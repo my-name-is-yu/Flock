@@ -99,7 +99,7 @@ void Store::Impl::gitInboxItem(const TaskData& task, std::string_view key, std::
 }
 
 bool Store::Impl::canReceiveGitWebhook(std::string_view bot, const Json& event) {
-    if (botPaused(bot)) return false;
+    if (botLifecycle.botPaused(bot)) return false;
     const auto repo = GitRepository::parse(field(event, "host"), field(event, "repo"));
     return query(R"SQL(
 SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot_id

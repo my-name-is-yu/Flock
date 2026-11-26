@@ -170,7 +170,7 @@ PolicyResult Policy::check(std::string_view bot, Action action, std::string_view
 bool Policy::forbidden(std::string_view bot, Action action, std::string_view target) const {
     if (!validBotId(bot) || target.empty()) return true;
     std::lock_guard lock(db_.mutex);
-    if (db_.botDeleted(bot)) return true;
+    if (db_.botLifecycle.botDeleted(bot)) return true;
     auto rows = db_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?", {actionName(action)});
     while (rows.next())
         if (targetMatches(rows.string(0), target)) return true;
@@ -195,7 +195,7 @@ PolicyResult Policy::check(std::string_view bot, const Resource& resource) const
 PolicyResult Policy::check(Id task, Action action, std::string_view target) const {
     std::lock_guard lock(db_.mutex);
     auto row = db_.query("SELECT bot_id FROM tasks WHERE id=?", {task});
-    return row.next() && !db_.botPaused(row.string(0)) ? check(row.string(0), action, target) : PolicyResult::deny;
+    return row.next() && !db_.botLifecycle.botPaused(row.string(0)) ? check(row.string(0), action, target) : PolicyResult::deny;
 }
 
 PolicyResult Policy::check(const Person& actor, Action action, std::string_view target) const {
@@ -205,7 +205,7 @@ PolicyResult Policy::check(const Person& actor, Action action, std::string_view 
         return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
     if (!validBotId(target)) return PolicyResult::deny;
     std::lock_guard lock(db_.mutex);
-    if (db_.botDeleted(target)) return PolicyResult::deny;
+    if (db_.botLifecycle.botDeleted(target)) return PolicyResult::deny;
     if (actor.adminRoot || db_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?", {target, actor.id}).next())
         return PolicyResult::allow;
     if ((action == Action::bot_view || action == Action::bot_talk || action == Action::bot_decide) &&
@@ -284,7 +284,7 @@ Json Policy::createOwnedBot(const Person& creator, const std::function<Json(cons
 void Policy::setOwner(const Person& creator, std::string_view bot) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !allows(creator, Action::bot_create, bot)) throw DecisionDenied{};
-    if (db_.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
+    if (db_.botLifecycle.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
     db_.secretStorage.sharedRedactor().requirePublic({creator.id, bot});
     if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?", {bot}).next()) throw Conflict("Bot creation is already in progress");
     db_.exec("INSERT INTO bot_owners VALUES(?,?)", {bot, creator.id});
@@ -307,7 +307,8 @@ Json Policy::botSettings(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(db_.mutex);
     if (!allows(actor, Action::bot_view, bot)) throw DecisionDenied{};
     const bool owner = allows(actor, Action::bot_settings, bot);
-    Json result{{"canManage", owner}, {"paused", db_.botPaused(bot)}, {"members", Json::array()}, {"secretInputs", Json::array()}};
+    Json result{
+        {"canManage", owner}, {"paused", db_.botLifecycle.botPaused(bot)}, {"members", Json::array()}, {"secretInputs", Json::array()}};
     if (owner) {
         auto members = db_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person", {bot});
         while (members.next()) result["members"].push_back(members.string(0));
@@ -336,7 +337,7 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
     std::lock_guard lock(db_.mutex);
     if (auto completed = db_.query("SELECT id FROM bot_changes WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
-    if (db_.botDeleted(target)) throw Conflict("This Bot ID has already been used");
+    if (db_.botLifecycle.botDeleted(target)) throw Conflict("This Bot ID has already been used");
 
     std::string owner;
     if (create) {
@@ -483,7 +484,7 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
         const auto entry = db_.taskRecords.load(task);
         const auto& bot = entry.botId;
-        if (db_.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
+        if (db_.botLifecycle.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
         const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();
         const auto key = "secret/" + Json::array({task, operation}).dump();
         const auto gate = db_.approveAction(db_.taskPolicyOrigin(entry), {Action::secret_use, std::string(destination), seen}, key,

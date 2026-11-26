@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime_components.hpp"
+#include "peer_storage.hpp"
 #include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"

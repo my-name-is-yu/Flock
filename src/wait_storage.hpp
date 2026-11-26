@@ -27,13 +27,15 @@ WorkBudgetTool workBudgetTool(std::string_view);
 class Database;
 class JournalStorage;
 class OutboxStorage;
+class PeerStorage;
 
 class WaitStorage {
 public:
     static constexpr Id initialWorkAllowance = 3;
 
-    WaitStorage(Database& database, Store::Impl& remaining, JournalStorage& journalStorage, OutboxStorage& outboxStorage)
-        : database(database), remaining(remaining), journalStorage(journalStorage), outboxStorage(outboxStorage) {}
+    WaitStorage(Database& database, Store::Impl& remaining, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
+                PeerStorage& peers)
+        : database(database), remaining(remaining), journalStorage(journalStorage), outboxStorage(outboxStorage), peers(peers) {}
 
     Id waitAllowance(Id taskId, WaitReason reason) const;
     bool waitIsActionable(const TaskData& task) const;
@@ -49,5 +51,6 @@ private:
     Store::Impl& remaining;
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
+    PeerStorage& peers;
 };
 }

@@ -215,7 +215,8 @@ const char* Store::Impl::questionAnswerError(const TaskData& task, const Message
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
     if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.eventId) return "That question is no longer current";
-    if (replanReady(task)) return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
+    if (peerStorage.replanReady(task))
+        return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
 }
 
@@ -873,7 +874,7 @@ Person Store::Impl::turnActor(const Message& message) {
 }
 
 bool Store::Impl::authorizeTurn(const Message& message) {
-    if (!isNextTurn(message.id) || botPaused(message.bot)) return false;
+    if (!isNextTurn(message.id) || botLifecycle.botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
         releaseModelCall(takeReservedConversationCall(message.id));

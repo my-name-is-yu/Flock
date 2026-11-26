@@ -252,7 +252,7 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"), revision);
         {
             std::lock_guard lock(mutex);
-            if (botPaused(bot)) throw BotPaused{};
+            if (botLifecycle.botPaused(bot)) throw BotPaused{};
         }
         auto turn = model.decide(safe);
         checked.calls.reserve(turn.calls.size());

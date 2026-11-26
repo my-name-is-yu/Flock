@@ -18,6 +18,8 @@
 #include <vector>
 
 namespace flockv0 {
+struct PeerExchange;
+
 class Runtime::Components::PeerExchanges {
 public:
     struct PeerResult {

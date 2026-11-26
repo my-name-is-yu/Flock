@@ -857,7 +857,8 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         if (shutdown.stop_requested()) return;
         const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
         const auto authorized = [&] {
-            if (botPaused(wait.bot) || !query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
+            if (botLifecycle.botPaused(wait.bot) ||
+                !query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
                 return false;
             const auto message = loadTurnMessage(wait.message);
             return !sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
@@ -1014,7 +1015,7 @@ bool Store::Impl::acceptInstruction(TaskData& task, Id messageId, int step, std:
             auto project = change->route.projectId;
             const bool pinned = !project.empty();
             if (!pinned) project = rememberedT3Project(task.botId, environment);
-            if (recipientRouteWouldCycle(task.id, environment, project)) {
+            if (peerStorage.recipientRouteWouldCycle(task.id, environment, project)) {
                 if (pinned) throw Conflict("This destination would make project queues wait for one another");
                 project.clear();
             }

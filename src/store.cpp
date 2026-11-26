@@ -95,58 +95,9 @@ Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelRe
     open(path);
 }
 
-std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
-    auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
-                      " WHERE phase<>'closed' AND (sender_task=? OR recipient_task=?)",
-                      {id, id});
-    if (!rows.next()) return std::nullopt;
-    return PeerExchange{rows.string(0), rows.string(1), rows.string(2), rows.string(3), rows.number(4), rows.number(5)};
-}
-
-bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
-    return query(R"SQL(
-WITH RECURSIVE source(env,project) AS (
-  SELECT environment_id,project_id FROM tasks WHERE id=?1
-), work_routes(source_env,source_project,current_env,current_project,pending_env,pending_project) AS (
-  SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
-         CASE WHEN r.state<>'cancelling' THEN r.pending_environment_id END,r.pending_project_id
-  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
-  WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
-), dependencies(source_env,source_project,target_env,target_project) AS (
-  SELECT source_env,source_project,current_env,current_project FROM work_routes
-  WHERE current_project<>''
-  UNION ALL
-  SELECT source_env,source_project,pending_env,pending_project FROM work_routes
-  WHERE pending_env IS NOT NULL AND pending_project<>''
-), reachable(env,project) AS (
-  SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
-  UNION
-  SELECT target_env,target_project FROM dependencies JOIN reachable
-    ON source_env=env AND source_project=project
-)
-SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
-)SQL",
-                 {sender, environment, project})
-        .next();
-}
-
-bool Store::Impl::recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const {
-    if (project.empty()) return false;
-    const auto peer = peerExchange(task);
-    return peer && peer->recipient == task && peer->kind == "work" && peerWorkRouteWouldCycle(peer->sender, environment, project);
-}
-
-bool Store::Impl::replanReady(const TaskData& task) const {
-    if (!task.replanning) return false;
-    std::lock_guard lock(mutex);
-    const Id id = task.id;
-    const auto peer = peerExchange(id);
-    return !peer || peer->allowsReplan(id);
-}
-
 void Store::Impl::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
-    const auto peer = peerExchange(id);
+    const auto peer = peerStorage.peerExchange(id);
     const bool undispatched = task.state == TaskState::queued || isUndispatchedNotesWait(task);
     if (!task.pendingInstructions.empty()) task.cancelledInstructions = task.pendingInstructions;
     waitStorage.clearWait(task, "cancel");
@@ -319,8 +270,8 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const OutboxSourc
         item.request.size() > limits::messages::maxBodyBytes || (!consultation && item.environmentId.empty()) || !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to " + std::to_string(limits::messages::maxBodyBytes) +
                        " bytes), and environment are required");
-    if (botDeleted(item.botId)) throw Conflict("Bot has been deleted");
-    if (botPaused(item.botId)) throw BotPaused{};
+    if (botLifecycle.botDeleted(item.botId)) throw Conflict("Bot has been deleted");
+    if (botLifecycle.botPaused(item.botId)) throw BotPaused{};
     const auto scrub = secretStorage.redactor(item.botId);
     scrub.requirePublic({item.botId, item.environmentId, item.projectId, item.config});
     initialModelCallLimit(item.config);
@@ -398,7 +349,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                           std::optional<InboxKind> expectedKind) {
     const auto& [bot, id, waitId, revision, generation] = target;
     if (!Policy(*this).allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
-    if (operation != "cancel" && botPaused(bot)) throw BotPaused{};
+    if (operation != "cancel" && botLifecycle.botPaused(bot)) throw BotPaused{};
     auto task = taskRecords.load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};
     const auto data = secretStorage.redactor(bot).payload(input);
@@ -436,7 +387,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
             if (choice == question->projects.end()) throw Conflict("Choose one of the listed T3 projects");
             const auto environment = task.environmentId;
             const auto& project = choice->second;
-            if (recipientRouteWouldCycle(id, environment, project))
+            if (peerStorage.recipientRouteWouldCycle(id, environment, project))
                 throw Conflict("This project would make project queues wait for one another. Choose another project or move the task.");
             task.projectId = project;
             rememberT3Project(bot, environment, project);

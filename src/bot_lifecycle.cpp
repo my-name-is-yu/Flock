@@ -1,4 +1,6 @@
 #include "storage.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "database.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
 #include "flock/types.hpp"
@@ -14,22 +16,22 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-bool Store::Impl::botDeleted(std::string_view bot) const {
-    return query("SELECT 1 FROM deleted_bots WHERE bot=?", {bot}).next();
+bool BotLifecycleStorage::botDeleted(std::string_view bot) const {
+    return db_.query("SELECT 1 FROM deleted_bots WHERE bot=?", {bot}).next();
 }
 
 bool Store::botDeleted(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
-    return p_->botDeleted(bot);
+    return p_->botLifecycle.botDeleted(bot);
 }
 
-bool Store::Impl::botPaused(std::string_view bot) const {
-    return query("SELECT 1 FROM bot_pauses WHERE bot=?", {bot}).next();
+bool BotLifecycleStorage::botPaused(std::string_view bot) const {
+    return db_.query("SELECT 1 FROM bot_pauses WHERE bot=?", {bot}).next();
 }
 
 bool Store::botPaused(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
-    return p_->botPaused(bot);
+    return p_->botLifecycle.botPaused(bot);
 }
 
 void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused, const std::function<Seconds()>& clock) {
@@ -38,7 +40,7 @@ void Store::setBotPaused(const Person& actor, std::string_view bot, bool paused,
     Transaction tx(p_->db);
     auto permissions = policy();
     if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
-    if (p_->botPaused(bot) == paused) return;
+    if (p_->botLifecycle.botPaused(bot) == paused) return;
 
     if (paused) {
         p_->exec("INSERT INTO bot_pauses VALUES(?)", {bot});

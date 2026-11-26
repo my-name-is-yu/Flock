@@ -126,13 +126,6 @@ PrReviewRequestedEntry decodePrReviewRequested(Id id, const Json& data) {
     });
 }
 
-void Store::Impl::peerMessage(const PeerExchange& exchange, const BotMessageEntry& entry, std::optional<Id> forwardedSource) {
-    const auto data = encodeBotMessage(entry);
-    const JournalKeys keys{.exchangeId = entry.exchangeId, .peerMessageId = entry.messageId, .forwardedSourceMessageId = forwardedSource};
-    writeJournal(exchange.sender, JournalKind::bot_message, data, keys);
-    writeJournal(exchange.recipient, JournalKind::bot_message, data, keys);
-}
-
 Id JournalStorage::journal(Id task, const PeerEvidenceEntry& entry, const Json& usage) {
     auto data = encodePeerEvidence(entry);
     if (!usage.empty()) data["usage"] = usage;

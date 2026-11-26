@@ -101,7 +101,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
         if (existing)
             receipt = *existing;
         else {
-            if (p_->botPaused(bot)) throw BotPaused{};
+            if (p_->botLifecycle.botPaused(bot)) throw BotPaused{};
             const auto routing = route();
             if (routing.botId != bot) throw Conflict("Invalid Bot conversation route");
             const auto id = p_->enqueueConversation(actor, routing, source, clientId, text, replyTo);
@@ -117,7 +117,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
 Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                     std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
                                     const ConversationInvitationEntry* invitation) {
-    if (botPaused(routing.botId)) throw BotPaused{};
+    if (botLifecycle.botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     initialModelCallLimit(routing.config);
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};

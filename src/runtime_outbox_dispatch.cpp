@@ -403,7 +403,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
     if (firstSend || destination) {
         std::lock_guard lock(db.mutex);
         const auto current = db.taskRecords.load(id);
-        if (firstSend && (db.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
+        if (firstSend &&
+            (db.botLifecycle.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
             return;
         if (destination) {
             const auto saved = outboxStorage.outbox(current, cmd.actionId);
@@ -530,7 +531,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
         }
         auto policyGate = ApprovalGate::allow;
         const auto startSend = [&](TaskData& current) {
-            if (shutdown.stop_requested() || terminal(current) || current.state == TaskState::cancelling || db.botPaused(cmd.ownerBotId))
+            if (shutdown.stop_requested() || terminal(current) || current.state == TaskState::cancelling ||
+                db.botLifecycle.botPaused(cmd.ownerBotId))
                 return false;
             if (destination) {
                 if (!db.projectRouteReady(id, cmd.actionId)) return false;

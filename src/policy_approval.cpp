@@ -199,7 +199,7 @@ ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resour
         if (origin.task) journalStorage.journal(origin.task, "policy_denied", details);
         return ApprovalGate::denied;
     };
-    if (botPaused(origin.bot)) return ApprovalGate::stale;
+    if (botLifecycle.botPaused(origin.bot)) return ApprovalGate::stale;
     if (policy.forbidden(origin.bot, resource.action, resource.target)) return deny("never");
     auto row = query(R"SQL(
 SELECT a.id,a.action,a.target,a.fingerprint,a.status,a.mode_revision=s.revision,a.expires_at,

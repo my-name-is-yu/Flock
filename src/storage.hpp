@@ -7,6 +7,8 @@
 #include "task_events.hpp"
 #include "journal_storage.hpp"
 #include "attachment_storage.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "peer_storage.hpp"
 #include "outbox_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "secret_storage.hpp"
@@ -105,12 +107,6 @@ struct CheckedModelTurn {
     Json usage;
 };
 
-struct PeerExchange {
-    std::string id, kind, phase, lastMessage;
-    Id sender = 0, recipient = 0;
-    bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
-};
-
 struct LinkedTaskDestinations {
     std::vector<RunTarget> choices;
     std::vector<std::string> unavailable;
@@ -191,15 +187,17 @@ struct GitPrKey {
 
 struct Store::Impl : Database {
     OutboxStorage outboxStorage{*this};
+    PeerStorage peerStorage{*this};
     JournalStorage journalStorage{*this, *this};
     TaskEvents taskEvents{*this, *this};
-    WaitStorage waitStorage{*this, *this, journalStorage, outboxStorage};
+    WaitStorage waitStorage{*this, *this, journalStorage, outboxStorage, peerStorage};
     TaskRecords taskRecords{*this, journalStorage, outboxStorage, waitStorage};
     const std::filesystem::path path;
     const MemorySeed memorySeed;
     const AutomationModelResolver automationModel;
     SecretStorage secretStorage{*this, path.parent_path()};
     AttachmentStorage attachments{*this};
+    BotLifecycleStorage botLifecycle{*this};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
@@ -209,8 +207,6 @@ struct Store::Impl : Database {
     std::mutex deliveryMutex;
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
-    bool botDeleted(std::string_view bot) const;
-    bool botPaused(std::string_view bot) const;
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
                            Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -467,11 +463,6 @@ struct Store::Impl : Database {
     Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, TaskSource sourceKind = TaskSource::request,
               std::optional<TaskTrigger> trigger = {}, std::optional<std::string> requester = {});
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&, Id sourceMessage = 0, std::optional<InboxKind> = {});
-    std::optional<PeerExchange> peerExchange(Id) const;
-    bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
-    bool recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const;
-    bool replanReady(const TaskData& task) const;
-    void peerMessage(const PeerExchange&, const BotMessageEntry&, std::optional<Id> forwardedSource);
     void requestCancellation(TaskData&, SessionStop stop = {});
     bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
 };

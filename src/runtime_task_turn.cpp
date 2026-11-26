@@ -220,7 +220,7 @@ void Runtime::Components::TaskTurn::decide(const TaskData& task) {
         std::lock_guard lock(db.mutex);
         event = db.taskEvents.currentEvent(task);
         if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > clock()) return;
-        peer = db.peerExchange(task.id);
+        peer = db.peerStorage.peerExchange(task.id);
         if (task.pendingDecision && TaskUpdates::checkpointMatches(*task.pendingDecision, task)) decision = task.pendingDecision->decision;
         if (event["kind"] != "result" && task.lastRun) {
             if (const auto report = reports.settledSessionReport(task)) event["sessionResult"] = encodeRunReport(report->data);
