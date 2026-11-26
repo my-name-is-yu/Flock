@@ -297,6 +297,7 @@ export function mountBoardInbox({
   const next = byId('decision-next');
   const more = byId('decision-more');
   const moreList = byId('decision-more-list');
+  const historyToggle = byId('decision-history');
   const message = byId('decision-message');
   const host = byId('decision-item');
   const transcript = byId('conversation');
@@ -446,23 +447,12 @@ export function mountBoardInbox({
         });
         actionsList.push(copyBtn);
       }
-      const histBtn = element('button', '', 'decision-more-item');
-      histBtn.type = 'button';
-      histBtn.append(iconSpan(svgIcons.history), element('span', 'History'));
-      histBtn.addEventListener('click', () => {
-        closeMoreMenu();
-        void openHistory(origin);
-      });
-      actionsList.push(histBtn);
-    } else if (mode === 'history' && pending().length) {
-      const pendingBtn = element('button', '', 'decision-more-item');
-      pendingBtn.type = 'button';
-      pendingBtn.append(iconSpan(svgIcons.history), element('span', 'Needs you'));
-      pendingBtn.addEventListener('click', () => {
-        closeMoreMenu();
-        open(origin);
-      });
-      actionsList.push(pendingBtn);
+    }
+    if (historyToggle) {
+      const viewingHistory = mode === 'history';
+      historyToggle.hidden = !(viewingHistory ? pending().length : mode === 'pending' && item);
+      historyToggle.setAttribute('aria-pressed', String(viewingHistory));
+      historyToggle.dataset.tooltip = viewingHistory ? 'Back to Needs you' : 'History';
     }
     more.hidden = !actionsList.length;
     moreList.replaceChildren(...actionsList);
@@ -821,6 +811,11 @@ export function mountBoardInbox({
 
   trigger.addEventListener('click', () => mode === 'pending' ? close() : open(trigger));
   byId('decision-close').addEventListener('click', () => close());
+  historyToggle?.addEventListener('click', () => {
+    closeMoreMenu();
+    if (mode === 'history') open(historyToggle);
+    else void openHistory(historyToggle);
+  });
   byId('decision-shade').addEventListener('click', () => close());
   previous.addEventListener('click', () => move(-1));
   next.addEventListener('click', () => move(1));
