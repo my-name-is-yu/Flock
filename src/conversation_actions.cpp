@@ -441,7 +441,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
     bool includesSavedContent = false;
-    std::optional<GitPrFollowup> followup;
+    std::optional<GitStorage::GitPrFollowup> followup;
     SessionTarget target;
     Resource resource{Action::t3_send, {}};
     constexpr auto stopped = "This Bot's participation in the Session has stopped";
@@ -478,14 +478,14 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
             std::string expectedCommit;
             Json source = nullptr;
             if (fixesPullRequest) {
-                followup = gitPrFollowup(message, ctx.intake);
-                if (!followup || followup->status != GitPrFollowup::Status::available)
+                followup = gitStorage.gitPrFollowup(message, ctx.intake);
+                if (!followup || followup->status != GitStorage::GitPrFollowup::Status::available)
                     throw ToolError("Automatic follow-up is unavailable for this pull request");
                 command.environmentId = followup->session.environmentId;
                 command.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
                 command.target.threadId = followup->session.threadId;
                 command.target.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
-                command.instruction = gitPrFollowupInstruction(message, *followup, decision);
+                command.instruction = gitStorage.gitPrFollowupInstruction(message, *followup, decision);
             } else if (savedTaskTarget) {
                 const auto task = ownTask(conversation_storage::identifier(decision.args, "taskId", true), message);
                 if (conversation_storage::identifier(decision.args, "generation", true, 0) != task.generation)
@@ -539,10 +539,10 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
         }
         transaction.commit();
     }
-    const auto availableFollowup = [&]() -> std::optional<GitPrFollowup> {
-        auto current = gitPrFollowup(message, ctx.intake);
+    const auto availableFollowup = [&]() -> std::optional<GitStorage::GitPrFollowup> {
+        auto current = gitStorage.gitPrFollowup(message, ctx.intake);
         if (!current || current->operation != followup->operation || current->session != target ||
-            current->status != GitPrFollowup::Status::available)
+            current->status != GitStorage::GitPrFollowup::Status::available)
             return std::nullopt;
         return current;
     };
@@ -560,7 +560,8 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
     } catch (const std::exception&) {
         error = "Could not verify access to this T3 Session";
     }
-    if (error.empty() && followup && followup->target.contains("headSha") && (!ctx.gitHost || !currentGitPrCheck(*ctx.gitHost, message)))
+    if (error.empty() && followup && followup->target.contains("headSha") &&
+        (!ctx.gitHost || !gitStorage.currentGitPrCheck(*ctx.gitHost, message)))
         error = "Could not confirm that the failing check belongs to this pull request's current head";
     const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
     {
@@ -681,7 +682,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
                 transaction.commit();
                 return advance;
             }
-            recordGitPrFollowup(message, *current);
+            gitStorage.recordGitPrFollowup(message, *current);
         }
         effect["sendState"] = "sending";
         effect["requestId"] = command.actionId;

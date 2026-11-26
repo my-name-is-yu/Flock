@@ -879,7 +879,7 @@ Person Store::Impl::turnActor(const Message& message) {
 bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id) || botLifecycle.botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
-        if (canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
+        if (gitStorage.canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
         modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
         exec("UPDATE conversation_turns SET status='done' WHERE message_id=?", {message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
@@ -941,12 +941,12 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
             bool shouldVerify = false;
             {
                 std::lock_guard lock(mutex);
-                if (canReceiveGitWebhook(message.bot, event)) {
-                    const auto followup = gitPrFollowup(message, intake);
-                    shouldVerify = followup && followup->status != GitPrFollowup::Status::attempted;
+                if (gitStorage.canReceiveGitWebhook(message.bot, event)) {
+                    const auto followup = gitStorage.gitPrFollowup(message, intake);
+                    shouldVerify = followup && followup->status != GitStorage::GitPrFollowup::Status::attempted;
                 }
             }
-            currentCheck = shouldVerify && currentGitPrCheck(*gitHost, message);
+            currentCheck = shouldVerify && gitStorage.currentGitPrCheck(*gitHost, message);
         }
     }
     const auto available = [&](int step, bool reviewPreference) {
@@ -960,13 +960,13 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const std::function<std::
         auto machines = Json::array();
         std::string_view followupStatus;
         if (notification) {
-            if (const auto followup = gitHost ? gitPrFollowup(message, intake) : std::nullopt) {
+            if (const auto followup = gitHost ? gitStorage.gitPrFollowup(message, intake) : std::nullopt) {
                 switch (followup->status) {
-                case GitPrFollowup::Status::available:
+                case GitStorage::GitPrFollowup::Status::available:
                     if (currentCheck) offered.push_back("fix_pull_request");
                     break;
-                case GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
-                case GitPrFollowup::Status::limitReached:
+                case GitStorage::GitPrFollowup::Status::attempted: followupStatus = "already_requested"; break;
+                case GitStorage::GitPrFollowup::Status::limitReached:
                     if (currentCheck) followupStatus = "limit_reached";
                     break;
                 }

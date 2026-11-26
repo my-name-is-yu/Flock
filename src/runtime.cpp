@@ -111,7 +111,7 @@ void Runtime::requestStop() {
 void Runtime::runConversations() {
     if (p_->workers.stopToken().stop_requested()) return;
     p_->maintenance.settleApprovals();
-    p_->db.deliverGitWebhooks();
+    p_->db.gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
     p_->db.deliverChannels(p_->workers.stopToken());
     constexpr auto messagesPerTick = 20;
@@ -127,7 +127,7 @@ void Runtime::tick() {
     p_->maintenance.settleApprovals();
     p_->taskTurn.persistTaskInferences();
     p_->maintenance.fireDueAutomations();
-    p_->db.deliverGitWebhooks();
+    p_->db.gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
     for (const auto& [bot, id] : p_->db.pendingConversations(Components::Workers::batchLimit, p_->options.clock())) p_->runTurn(id);
     p_->maintenance.advanceWorkflows();
@@ -141,7 +141,7 @@ void Runtime::tickConcurrent() {
     p_->maintenance.settleApprovalsIfChanged();
     p_->workers.collectCompleted();
     p_->maintenance.fireDueAutomationsIfChanged();
-    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->db.deliverGitWebhooks(); });
+    p_->maintenance.deferContendedWork("Git webhooks", [&] { p_->db.gitStorage.deliverGitWebhooks(); });
     p_->workers.startChannels();
     p_->workers.stepSessionWake();
     p_->workers.startConversations(p_->options.clock, [impl = p_.get()](Id id) { impl->runTurn(id); });

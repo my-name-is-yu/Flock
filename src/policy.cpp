@@ -470,7 +470,7 @@ SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pendin
     if (value.empty() || name.find(value) != name.npos || bot.find(value) != bot.npos) throw Conflict("Invalid protected value");
     db_.secretStorage.redactor(bot).requirePublic(actor.id);
     audit(actor, bot, "supply_secret", {{"requestId", request}, {"resourceKind", "secret"}, {"resourceId", name}});
-    db_.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
+    db_.inboxStorage.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
     db_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?", {request});
     db_.secretStorage.insert({row.string(0)}, value);
 }

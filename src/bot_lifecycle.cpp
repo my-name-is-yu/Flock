@@ -82,7 +82,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         p_->dropPausedBotDeliveries(bot);
     } else {
         p_->automationStorage.skipDueAutomations(bot, clock());
-        p_->skipPendingGitWebhooks(bot);
+        p_->gitStorage.skipPendingGitWebhooks(bot);
         p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     }
 
@@ -110,7 +110,7 @@ SELECT 1 WHERE
 )SQL",
                   {bot})
             .next() ||
-        p_->actionablePrReviews(bot).next())
+        p_->inboxStorage.actionablePrReviews(bot).next())
         throw BotBusy{};
     p_->exec("INSERT INTO deleted_bots VALUES(?)", {bot});
     p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});

@@ -54,7 +54,7 @@ bool Runtime::Components::TaskDecisions::canComplete(const TaskData& task, const
 void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, const Json& event, const TaskDecision& decision,
                                                         std::string_view message, bool replay) {
     updates.change(task, [&](TaskData& current) {
-        const bool unknown = replay && isGitTool(decision.tool) && db.gitEffectStarted(gitInvocation(decision), current.id);
+        const bool unknown = replay && isGitTool(decision.tool) && db.gitStorage.gitEffectStarted(gitInvocation(decision), current.id);
         const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message, 2048);
         ToolErrorEntry entry{event.at("id").get<Id>(), bounded(decision.tool, 128), why, unknown, {}};
         const auto args = decision.args.dump();
@@ -116,8 +116,8 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
         Json result;
         const auto invocation = approvedInvocation.empty() ? gitInvocation(decision) : std::string(approvedInvocation);
         try {
-            result = db.gitTool(*gitHost, snapshot.botId, snapshot.id, snapshot.environmentId, snapshot.projectId, decision, invocation,
-                                snapshot.generation);
+            result = db.gitStorage.gitTool(*gitHost, snapshot.botId, snapshot.id, snapshot.environmentId, snapshot.projectId, decision,
+                                           invocation, snapshot.generation);
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception& error) {
