@@ -100,7 +100,6 @@ bool runtime::SessionHistory::readEvidence(const TaskData& task, const Json& eve
 
 void runtime::SessionHistory::appendEventEvidence(const TaskData& task, const Json& event, const Json& entry) {
     auto evidence = event.at("evidence");
-    if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
     evidence.push_back(entry);
     database.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence, event["id"], task.id});
 }

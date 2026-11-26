@@ -20,7 +20,6 @@ struct ReadRequest;
 class runtime::SessionHistory {
 public:
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
-    static constexpr std::size_t maxEvidenceReads = 3;
 
     SessionHistory(Database&, T3&, const Policy&, TaskUpdates&, const std::string& mode);
     static std::size_t readOffset(const Json& args);
