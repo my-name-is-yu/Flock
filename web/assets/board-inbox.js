@@ -142,12 +142,12 @@ function prPreviewCard(rawUrl, title) {
   openBtn.target = '_blank';
   openBtn.rel = 'noopener noreferrer';
   openBtn.setAttribute('aria-label', 'Open pull request in new tab');
-  openBtn.title = 'Open pull request';
+  openBtn.dataset.tooltip = 'Open pull request';
   openBtn.append(iconSpan(svgIcons.external));
   const copyBtn = element('button', '', 'board-inbox-pr-tool');
   copyBtn.type = 'button';
   copyBtn.setAttribute('aria-label', 'Copy pull request link');
-  copyBtn.title = 'Copy link';
+  copyBtn.dataset.tooltip = 'Copy link';
   copyBtn.append(iconSpan(svgIcons.copy));
   let copyTimer = null;
   copyBtn.addEventListener('click', async (event) => {

@@ -1,3 +1,4 @@
+import '/tooltip.js';
 import { handleComposerEnter, isComposerSuggestionKey } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
@@ -589,11 +590,6 @@ function createSidebarEntry(botId) {
   const pinName = node('span', 'pin-name');
   const status = node('span', 'sr-only');
   select.append(rowUnread, face, text, pinName, status);
-  const tooltip = node('span', 'pin-tooltip');
-  tooltip.setAttribute('aria-hidden', 'true');
-  const tooltipName = node('span');
-  const shortcutLabel = node('kbd');
-  tooltip.append(tooltipName, shortcutLabel);
   const toggle = menuButton(botId);
   const decisionCount = button(null, 'decision-count', () => {
     selectBot(botId);
@@ -601,7 +597,7 @@ function createSidebarEntry(botId) {
   });
   decisionCount.dataset.focus = `decisions:${botId}`;
   decisionCount.setAttribute('aria-controls', 'decision-panel');
-  row.append(select, tooltip, decisionCount, toggle);
+  row.append(select, decisionCount, toggle);
   row.addEventListener('contextmenu', (event) => {
     event.preventDefault();
     setMenu(botId, 'first');
@@ -630,14 +626,16 @@ function createSidebarEntry(botId) {
       face.className = pinned ? 'pin-face' : '';
       avatarHost.classList.toggle('pin-avatar', pinned);
       avatarHost.classList.toggle('bot-avatar', !pinned);
-      tooltip.hidden = pinName.hidden = !pinned;
+      pinName.hidden = !pinned;
       text.hidden = pinned;
       const shortcut = pinned && pinIndex < 9 ? pinIndex + 1 : null;
-      shortcutLabel.hidden = shortcut === null;
       if (shortcut) {
-        shortcutLabel.textContent = `⌥⇧${shortcut}`;
+        select.dataset.shortcut = `⌥⇧${shortcut}`;
         select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
-      } else select.removeAttribute('aria-keyshortcuts');
+      } else {
+        delete select.dataset.shortcut;
+        select.removeAttribute('aria-keyshortcuts');
+      }
 
       if (previousBot?.name !== bot.name) {
         nameText.textContent = pinName.textContent = bot.name;
@@ -645,7 +643,8 @@ function createSidebarEntry(botId) {
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
       const presence = bot.paused ? 'paused' : bot.presence;
-      tooltipName.textContent = bot.paused ? `${bot.name} · Paused` : bot.name;
+      if (pinned) select.dataset.tooltip = bot.paused ? `${bot.name} · Paused` : bot.name;
+      else delete select.dataset.tooltip;
       const showWaitingPreview = presence === 'waiting' && !count;
       const previewLabel = showWaitingPreview || bot.paused ? stateLabels[presence] : bot.preview || '';
       if (previewText.data !== previewLabel) previewText.data = previewLabel;
@@ -860,12 +859,12 @@ function renderHeader() {
     const backLabel = `Back to ${owner.name}`;
     elements['peer-back-label'].textContent = backLabel;
     elements['peer-back'].setAttribute('aria-label', backLabel);
-    elements['peer-back'].title = `${backLabel} (Esc)`;
+    elements['peer-back'].dataset.tooltip = backLabel;
     if (changed('peer-heading', [owner.id, owner.name, owner.avatar, peer.id, peer.name])) {
       elements['peer-faces'].replaceChildren(avatar(owner, 'avatar-profile'));
       elements['peer-name-first'].textContent = owner.name;
       elements['peer-name-second'].textContent = peer.name;
-      elements['peer-heading'].title = `${owner.name} › ${peer.name}`;
+      elements['peer-heading'].dataset.tooltip = `${owner.name} › ${peer.name}`;
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -900,8 +899,8 @@ function renderHeader() {
   const name = elements['profile-name'];
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
+  profile.dataset.tooltip = settingsLabel;
   name.textContent = bot.name;
-  name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
   elements['profile-status'].hidden = !showStatus;
   if (showStatus) profile.setAttribute('aria-describedby', 'profile-status');
@@ -920,7 +919,9 @@ function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
   const title = [session.name, request].filter(Boolean).join(' · ');
   const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  row.title = [title, Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean).join(' · ');
+  const details = [Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean);
+  row.dataset.tooltip = [...details, title].filter(Boolean).join(' · ');
+  if (details.length) row.append(node('span', 'sr-only', ` · ${details.join(' · ')}`));
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -985,8 +986,9 @@ function workflowInspectors(data, open) {
       const link = linkToRun(stage.runRef, 'Open');
       if (link) head.append(link);
       row.append(node('span', 'workflow-stage-mark'), text);
-      row.title = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
-        .filter(Boolean).join('\n');
+      const versions = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
+        .filter(Boolean).join(' · ');
+      if (versions) row.setAttribute('aria-description', versions);
       list.append(row);
     }
     item.append(list);
@@ -1030,7 +1032,7 @@ function renderActivity() {
         ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
       const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
-      row.title = item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title;
+      row.setAttribute('aria-description', item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title);
       row.addEventListener('click', () => {
         openNavigation(false);
         decisions.openItem(item, row);
@@ -1147,7 +1149,7 @@ function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
   control.dataset.timelineAction = name;
   control.setAttribute('aria-label', label);
-  control.title = label;
+  control.dataset.tooltip = label;
   control.append(icon(name));
   return control;
 }
@@ -1160,12 +1162,12 @@ async function copyMessage(control, text) {
     control.dataset.copied = 'true';
     control.replaceChildren(icon('copied'));
     control.setAttribute('aria-label', 'Copied');
-    control.title = 'Copied';
+    control.dataset.tooltip = 'Copied';
     control._copyTimer = setTimeout(() => {
       delete control.dataset.copied;
       control.replaceChildren(icon('copy'));
       control.setAttribute('aria-label', 'Copy text');
-      control.title = 'Copy text';
+      control.dataset.tooltip = 'Copy text';
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
@@ -1248,7 +1250,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.setAttribute('aria-description', [fullTime.format(timestamp), extra].filter(Boolean).join(' · '));
   return time;
 }
 
@@ -1437,7 +1439,7 @@ function runIcon(run) {
   if (!link) return null;
   link.className = 'run-link';
   link.dataset.timelineAction = `run:${link.href}`;
-  link.title = 'Open in T3';
+  link.dataset.tooltip = 'Open in T3';
   link.setAttribute('aria-label', 'Open in T3');
   link.replaceChildren(icon('open'));
   return link;
@@ -1666,7 +1668,7 @@ function eventCard(event, context, place, report) {
       if (question && !place.afterQuestion) {
         const quote = node('p', 'msg-quote');
         quote.append(icon('reply'), node('span', null, question));
-        quote.title = question;
+        quote.dataset.tooltip = question;
         row.insertBefore(quote, meta.nextSibling);
       }
     }
@@ -1694,7 +1696,7 @@ function eventCard(event, context, place, report) {
       const note = node('p', 'msg-note msg-queued');
       note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
       if (blocker.botId !== context.bot?.id) note.append(node('span', 'msg-queued-owner', `· ${owner}`));
-      note.title = `Starts when “${blocker.request}” (${owner}) finishes`;
+      note.setAttribute('aria-description', `Starts when “${blocker.request}” (${owner}) finishes`);
       extras.push(note);
     }
   }
@@ -1759,7 +1761,7 @@ function setWorkingText(row, label) {
   if (current?.textContent === label) return;
   status.querySelector('.working-label.leaving')?.remove();
   const next = node('span', 'working-label', label);
-  next.title = label;
+  next.dataset.tooltip = label;
   if (current && !reducedMotion.matches) {
     current.setAttribute('aria-hidden', 'true');
     current.classList.add('leaving');
@@ -2245,7 +2247,7 @@ function renderScreenshots(draft, disabled) {
       const item = node('li', 'screenshot-preview');
       const preview = node('img');
       preview.alt = image.attachment.name;
-      preview.title = image.attachment.name;
+      preview.dataset.tooltip = image.attachment.name;
       preview.src = image.preview;
       const remove = button('×', 'icon-button remove-screenshot', () => {
         const hadFocus = document.activeElement === remove;
@@ -2260,7 +2262,7 @@ function renderScreenshots(draft, disabled) {
         }
       });
       remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
-      remove.title = `Remove ${image.attachment.name}`;
+      remove.dataset.tooltip = `Remove ${image.attachment.name}`;
       item.append(preview, remove);
       return item;
     }));
@@ -2311,7 +2313,7 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
     target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
   const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
   elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.title = sendLabel;
+  elements.send.dataset.tooltip = sendLabel;
 
   const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
   elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
@@ -2708,9 +2710,9 @@ function generalContent(bot) {
   const avatarButton = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
   avatarButton.setAttribute('aria-label', 'Change avatar');
   const face = node('span', 'settings-avatar');
-  const avatarTip = node('span', 'settings-avatar-tooltip', 'Change avatar');
-  avatarTip.setAttribute('aria-hidden', 'true');
-  avatarButton.append(face, avatarTip);
+  avatarButton.dataset.tooltip = 'Change avatar';
+  avatarButton.dataset.tooltipSide = 'top';
+  avatarButton.append(face);
   detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
 
   const nameWrap = node('div', 'settings-name-wrap');
@@ -2720,7 +2722,7 @@ function generalContent(bot) {
 
   function renderNameDisplay() {
     const nameBtn = button(null, 'settings-name-button', beginInlineRename);
-    nameBtn.title = 'Rename Bot';
+    nameBtn.setAttribute('aria-description', 'Rename Bot');
     nameBtn.append(node('span', 'settings-name', bot.name));
     nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
     nameWrap.replaceChildren(nameBtn);
@@ -3360,10 +3362,10 @@ function setSidebarWidth(px, persist = false) {
 }
 function setSidebarCollapsed(collapsed) {
   workspace.classList.toggle('sidebar-collapsed', collapsed);
-  const label = collapsed ? 'Show Bot sidebar' : 'Hide Bot sidebar';
+  const label = collapsed ? 'Show Bot list' : 'Hide Bot list';
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
   sidebarToggle.setAttribute('aria-label', label);
-  sidebarToggle.title = label;
+  sidebarToggle.dataset.tooltip = label;
 }
 const storedSidebarWidth = saved('flock-sidebar-width', null);
 if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {

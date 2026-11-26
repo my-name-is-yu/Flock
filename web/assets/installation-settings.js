@@ -134,7 +134,7 @@ function appendConnectionStates(container, {
 }) {
   if (typeof checked === 'boolean') {
     const badge = statusBadge(checked ? checkedLabel : failedLabel, checked ? 'checked' : 'error');
-    if (checkedAt) badge.title = `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`;
+    if (checkedAt) badge.setAttribute('aria-description', `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`);
     container.append(badge);
   } else if (configured && !hostManaged) container.append(statusBadge('Registered'));
   if (hostManaged) container.append(statusBadge('Managed on host'));
