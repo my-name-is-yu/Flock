@@ -31,7 +31,6 @@ enum class JournalKind {
     task_revision,
     bot_message,
     read_bot_evidence,
-    pr_review_requested,
     git_pr_followup_requested,
     conversation_message,
     conversation_reply,
@@ -52,7 +51,7 @@ struct JournalKeys {
     std::optional<Id> messageId;
     std::optional<int> instructionStep;
     std::optional<std::string_view> exchangeId, peerMessageId;
-    std::optional<Id> forwardedSourceMessageId, prReviewItemId;
+    std::optional<Id> forwardedSourceMessageId;
     std::optional<std::string_view> gitEventId, operationId;
     std::optional<Id> replyToMessageId, taskQuestionMessageId;
     std::optional<std::string_view> conversationRoute, conversationStatus;

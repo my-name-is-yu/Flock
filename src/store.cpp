@@ -212,7 +212,7 @@ Automations::Automations(Store& store)
       lifecycle_(StoreAccess::get(store).botLifecycle), secrets_(StoreAccess::get(store).secretStorage),
       tasks_(StoreAccess::get(store).taskOperations), policy_(StoreAccess::get(store).permissions) {}
 
-Inbox::Inbox(Store& store) : inbox_(StoreAccess::get(store).inboxStorage), git_(StoreAccess::get(store).gitStorage) {}
+Inbox::Inbox(Store& store) : inbox_(StoreAccess::get(store).inboxStorage) {}
 
 GitEvents::GitEvents(Store& store) : git_(StoreAccess::get(store).gitStorage), secrets_(StoreAccess::get(store).secretStorage) {}
 
@@ -575,11 +575,11 @@ Json Conversations::conversation(std::string_view bot, Id before, unsigned limit
 WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
-    AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
+    AND (?3=0 OR kind IN ('conversation_reply','report','completed')
          OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop'))
       OR (conversation_bot_id IS NULL
-        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
+        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
         AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)))
 ), bot_page AS (

@@ -50,7 +50,9 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
           true}},
         {"git_repo_info", {"Read repository details using repository:read.", "read", {}}},
         {"git_open_pr",
-         {"Open or recover the task's PR using repository:pr and repository:read on a separate head repository.",
+         {"Open or recover the task's PR using repository:pr and repository:read on a separate head repository. "
+          "If the result is ambiguous, call again with the same branches and a verified candidate's prNumber to link it, "
+          "or omit prNumber to check for candidates again.",
           "pr",
           {{"baseRef", "string", "Exact base branch."},
            {"headRepo", "string", "Head owner/repo. Omit for the base repository.", false},
@@ -58,6 +60,7 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
            {"title", "string", "Pull request title."},
            {"body", "string", "Pull request description.", false},
            {"draft", "boolean", "Open as a draft.", false},
+           {"prNumber", "integer", "Link this verified candidate from the previous result for the same branches.", false},
            {"newIntent", "boolean", "Set only when explicitly asked to create a replacement after the previous PR closed.", false}}}},
         {"git_update_pr",
          {"Update title, body, base branch or open/closed state using repository:pr.",

@@ -116,25 +116,11 @@ PeerEvidenceEntry decodePeerEvidence(Id id, const Json& data) {
     });
 }
 
-PrReviewRequestedEntry decodePrReviewRequested(Id id, const Json& data) {
-    const auto rowId = std::to_string(id);
-    return RecordDecoder("journal", rowId).decodeClosed(data, [](const Json& payload, const RecordDecoder& row) {
-        return PrReviewRequestedEntry{row.get<Id>(payload, "itemId"), row.get<std::string>(payload, "title"),
-                                      row.get<std::string>(payload, "text"), row.get<std::string>(payload, "prUrl")};
-    });
-}
-
 Id JournalStorage::journal(Id task, const PeerEvidenceEntry& entry, const Json& usage) {
     auto data = encodePeerEvidence(entry);
     if (!usage.empty()) data["usage"] = usage;
     return database.writeJournal(task, JournalKind::read_bot_evidence, data,
                                  {.exchangeId = entry.exchangeId, .peerMessageId = entry.messageId});
-}
-
-Id JournalStorage::journal(Id task, const PrReviewRequestedEntry& entry) {
-    return database.writeJournal(task, JournalKind::pr_review_requested,
-                                 {{"itemId", entry.itemId}, {"title", entry.title}, {"text", entry.text}, {"prUrl", entry.prUrl}},
-                                 {.prReviewItemId = entry.itemId});
 }
 
 Id JournalStorage::journal(Id task, const GitPrFollowupEntry& entry) {

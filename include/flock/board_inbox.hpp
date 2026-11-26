@@ -7,7 +7,7 @@
 #include <string_view>
 
 namespace flockv0 {
-enum class InboxKind { user_question, unknown_delivery, protected_input, pr_review, pr_reconciliation, policy_approval };
+enum class InboxKind { user_question, unknown_delivery, protected_input, policy_approval };
 
 std::string_view inboxKindName(InboxKind);
 InboxKind parseInboxKind(std::string_view);
@@ -21,7 +21,6 @@ struct InboxTarget {
 
 class Store;
 class InboxStorage;
-class GitStorage;
 struct Person;
 
 class Inbox {
@@ -33,7 +32,6 @@ public:
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision, const Json& data = Json::object());
 private:
     InboxStorage& inbox_;
-    GitStorage& git_;
 };
 
 }

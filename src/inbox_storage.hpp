@@ -11,16 +11,12 @@
 namespace flockv0 {
 class Database;
 class Policy;
-class GitStorage;
-class JournalStorage;
 class SecretStorage;
 class TaskOperations;
-class Statement;
 class TaskRecords;
 class WaitStorage;
 struct InboxTarget;
 struct Person;
-struct TaskData;
 enum class InboxKind;
 enum class WaitReason;
 
@@ -29,18 +25,15 @@ std::optional<InboxKind> inboxWaitKind(WaitReason);
 class PolicyApprovals;
 class InboxStorage {
 public:
-    InboxStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                 JournalStorage& journalStorage, Policy& permissions, TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
-        : database(database), secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), permissions(permissions), taskOperations(taskOperations), policyApprovals(policyApprovals) {}
+    InboxStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage, Policy& permissions,
+                 TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
+        : database(database), secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage), permissions(permissions),
+          taskOperations(taskOperations), policyApprovals(policyApprovals) {}
 
     Json inbox(const Person&, std::string_view bot) const;
     Json decisionHistory(const Person&, std::string_view bot) const;
-    void decideInbox(GitStorage&, const Person&, const InboxTarget&, std::string_view decision, const Json& data);
+    void decideInbox(const Person&, const InboxTarget&, std::string_view decision, const Json& data);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
-    void insertPrReview(const TaskData&, std::string_view url, std::string_view title, std::string_view prompt, std::string_view gitKey,
-                        std::string_view operationId = {}, const Json& candidates = Json::array());
-    Statement actionablePrReviews(std::string_view bot) const;
 private:
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot) const;
 
@@ -48,7 +41,6 @@ private:
     SecretStorage& secretStorage;
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
-    JournalStorage& journalStorage;
     Policy& permissions;
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;

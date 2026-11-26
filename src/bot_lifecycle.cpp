@@ -123,8 +123,7 @@ SELECT 1 WHERE
              WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))
 )SQL",
                    {bot})
-            .next() ||
-        storage.inboxStorage.actionablePrReviews(bot).next())
+            .next())
         throw BotBusy{};
     storage.database.exec("INSERT INTO deleted_bots VALUES(?)", {bot});
     storage.database.exec("DELETE FROM bot_pauses WHERE bot=?", {bot});

@@ -103,10 +103,6 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
         if (event.kind == "pull_request" && event.action == "closed" && pr.contains("merged") && pr.at("merged") == true)
             event.action = "merged";
         const bool open = str(pr, "state") != "closed";
-        if (event.kind == "pull_request" && event.action == "review_requested") {
-            const auto reviewer = payload.find("requested_reviewer");
-            if (reviewer != payload.end() && reviewer->is_object()) event.requestedReviewer = str(*reviewer, "login");
-        }
         if (event.kind == "review") {
             const auto& review = payload.at("review");
             const auto state = str(review, "state");

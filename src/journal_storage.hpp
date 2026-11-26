@@ -19,7 +19,6 @@ struct DeliveredInstructionEntry;
 struct GitPrFollowupEntry;
 struct OutboxInstruction;
 struct PeerEvidenceEntry;
-struct PrReviewRequestedEntry;
 struct RunReportEntry;
 struct RunStop;
 struct SendStartedEntry;
@@ -48,7 +47,6 @@ public:
     Id journal(Id, const SendStartedEntry&);
     Id journal(Id, const RunReportEntry&);
     Id journal(Id, const PeerEvidenceEntry&, const Json& usage);
-    Id journal(Id, const PrReviewRequestedEntry&);
     Id journal(Id, const GitPrFollowupEntry&);
     Id journalRunSettled(Id, const SettledRunReport&);
     Id journalConversationMessage(std::string_view bot, const ConversationMessageEntry&);

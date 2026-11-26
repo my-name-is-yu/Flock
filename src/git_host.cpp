@@ -454,7 +454,8 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
     }
     const auto repo = GitRepository::parse(hostId, field(args, "repo"));
     if (!permits(repo, op)) throw Conflict("Repository access denied");
-    {
+    const bool selectingPr = decision.tool == "git_open_pr" && args.contains("prNumber");
+    if (!selectingPr) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         PolicyOrigin origin;
@@ -496,13 +497,13 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
                                  field(args, "title"),
                                  field(args, "body"),
                                  args.value("draft", false)},
-                                invocation, args.value("newIntent", false), decision.reason);
+                                invocation, args.value("newIntent", false),
+                                selectingPr ? std::optional{args.at("prNumber").get<Id>()} : std::nullopt, decision.reason);
         result["ok"] = result.at("status") == "created";
         return result;
     }
-    const bool requestedReview = decision.tool == "git_request_review";
     const bool submittedReview = decision.tool == "git_submit_review";
-    const bool watchPr = decision.tool == "git_update_pr" || requestedReview;
+    const bool watchPr = decision.tool == "git_update_pr" || decision.tool == "git_request_review";
     if (watchPr && args.contains("baseRef")) branch(args, "baseRef");
     if (op == "read") {
         Json result;
@@ -539,7 +540,6 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
     const bool createPrComment = createComment && target.at("target") == "pr";
     const auto key = Json::array({invocation, decision.tool, target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
-    const auto reviewKey = requestedReview ? "review/" + actionId() : std::string{};
     Id eventCursor = 0;
     GitPrMutationClaim watchMutation(*this, gitPrMutationsInFlight);
     GitPrMutationClaim feedbackMutation(*this, gitFeedbackMutationsInFlight);
@@ -564,15 +564,6 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
         if (policy.forbidden(bot, *parseAction("repository." + std::string(op)), repo.resource()))
             throw Conflict("Repository access denied");
         database.exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)", {taskId, key, dedupe});
-        if (requestedReview) {
-            // A webhook can be delivered before the Git host returns the result.
-            database.exec(R"SQL(
-INSERT INTO git_review_receipts
-SELECT ?1,?2,?3,?4,?5,lower(value),?6 FROM json_each(?7) WHERE true
-ON CONFLICT(inbox_key,reviewer) DO NOTHING
-)SQL",
-                          {reviewKey, taskId, repo.host, repo.repo, args.at("prNumber"), eventCursor, args.at("reviewers").dump()});
-        }
         database.writeJournal(taskId, "git_mutation",
                               secretStorage.sharedRedactor().record(gitJournal(
                                   context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
@@ -594,20 +585,11 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
         result["data"] = scrub.payload(result.at("data"), false, gitResultTextLimit);
     else
         result["error"] = scrub.text(field(result, "error"));
-    if (requestedReview && result.value("status", "") == "failed")
-        database.exec("DELETE FROM git_review_receipts WHERE inbox_key=?", {reviewKey});
-    if (result.value("ok", false) && (watchPr || submittedReview)) {
+    if (result.value("ok", false) && watchPr) {
         const auto pr = args.at("prNumber").get<Id>();
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
-        if (watchPr) {
-            const auto sha = field(result.at("data"), "headSha");
-            result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), eventCursor,
-                                                 {{repo, repo, {}, {}}, pr, url, {}, sha, false}) == GitWatchResult::attached;
-        }
-        if (requestedReview && result.at("watchAttached") == true)
-            gitInboxItem(taskRecords.load(taskId), reviewKey, url, "Pull request awaiting review", "Review requested on the Git host.");
-        else if (submittedReview)
-            gitInboxItem(taskRecords.load(taskId), "review/" + actionId(), url, "Pull request review submitted", field(args, "verdict"));
+        result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), eventCursor, repo, pr, url,
+                                             field(result.at("data"), "headSha")) == GitWatchResult::attached;
     }
     database.exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
                   " WHERE task_id=?2 AND invocation=?3",

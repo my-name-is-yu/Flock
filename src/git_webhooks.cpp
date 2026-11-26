@@ -11,7 +11,6 @@
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"
 #include "bot_lifecycle_storage.hpp"
-#include "inbox_storage.hpp"
 #include "task_records.hpp"
 #include <sqlite3.h>
 
@@ -93,7 +92,6 @@ bool GitStorage::receiveGitWebhook(const GitWebhook& event) {
               {"headSha", sha},
               {"summary", bounded(scrub.text(event.summary), 4000)},
               {"jobId", event.jobId}};
-    if (!event.requestedReviewer.empty()) data["requestedReviewer"] = bounded(scrub.text(event.requestedReviewer), 100);
     if (const auto followup = followupType(event.followup); !followup.empty()) data["followup"] = followup;
     if (event.feedbackId) data["feedbackId"] = event.feedbackId;
     if (event.reviewLocation) {
@@ -118,13 +116,6 @@ INSERT INTO git_pr_heads SELECT ?1,?2,value,?3,?4,1 FROM json_each(?5) WHERE tru
     transaction.commit();
     gitWebhooksDrainedAt.reset();
     return true;
-}
-
-void GitStorage::gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title,
-                              std::string_view prompt) {
-    const auto id = task.id;
-    if (!database.query("SELECT 1 FROM pr_review_items WHERE task_id=? AND git_key=?", {id, key}).next())
-        inboxStorage.insertPrReview(task, url, title, prompt, key);
 }
 
 bool GitStorage::canReceiveGitWebhook(std::string_view bot, const Json& event) {
@@ -267,46 +258,16 @@ WHERE json_extract(result,'$.data.id')=?1
         event.erase("botId");
         event.erase("deliveryId");
         event.erase("feedbackId");
-        const auto reviewer = field(event, "requestedReviewer");
-        event.erase("requestedReviewer");
-        const auto action = field(event, "action");
         const auto scrub = secretStorage.sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event, "summary")), 4000);
         const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
-        auto inboxKey = key;
         const auto url = field(event, "url");
-        if (gitPrEndedEvent(event))
-            database.exec(
-                "UPDATE pr_review_items SET status='superseded' WHERE task_id=? AND url=? AND status='pending' AND operation_id IS NULL",
-                {taskId, url});
         if (const auto location = event.find("reviewLocation"); location != event.end()) {
             const auto commentId = location->at("commentId").get<Id>();
             location->erase("commentId");
             (*location)["url"] = url + "#discussion_r" + std::to_string(commentId);
             *location = scrub.record(std::move(*location));
         }
-        const auto prompt = field(event, "summary");
-        std::string title;
-        if (kind == "review" && action == "submitted") title = "Pull request review submitted";
-        if (kind == "code_scan") title = "Code scanning result";
-        if (kind == "pull_request" && (action == "review_requested" || action == "ready_for_review"))
-            title = "Pull request awaiting review";
-        if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
-            auto receipt =
-                database.query(R"SQL(
-DELETE FROM git_review_receipts WHERE rowid=(
- SELECT r.rowid FROM git_review_receipts r
- LEFT JOIN pr_review_items i ON i.task_id=r.task_id AND i.git_key=r.inbox_key
- WHERE r.task_id=? AND r.host=? AND r.repo=? AND r.pr_number=? AND r.reviewer=lower(?) AND r.after_event<?
-   AND (i.id IS NULL OR (i.status='pending' AND i.target_revision=?))
- ORDER BY r.after_event,r.rowid LIMIT 1
-) RETURNING inbox_key
-)SQL",
-                               {taskId, event.at("host"), event.at("repo"), pr, reviewer, delivery, task.currentRevision.value_or(0)});
-            if (receipt.next()) inboxKey = receipt.string(0);
-        }
-        if (!title.empty()) gitInboxItem(task, inboxKey, url, title, prompt.empty() ? title : prompt);
-
         const Json routing{
             {"environmentId", task.environmentId}, {"projectId", task.projectId}, {"config", task.config}, {"gitEvent", event}};
         database.exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'git_webhook',?,?)",

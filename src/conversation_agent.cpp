@@ -503,15 +503,6 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
                 const auto decoded = taskResult(message.replyTo, kind, data);
                 replyTo.update({{"kind", "result"}, {"taskId", taskId}, {"text", bounded(decoded.text, 2000)}});
                 addTask(taskId);
-            } else if (kind == "pr_review_requested") {
-                const auto review = decodePrReviewRequested(message.replyTo, data);
-                replyTo.update({{"kind", "pr_review"},
-                                {"taskId", taskId},
-                                {"itemId", review.itemId},
-                                {"title", scrub.text(review.title)},
-                                {"text", bounded(scrub.text(review.text), 2000)},
-                                {"prUrl", scrub.text(review.prUrl)}});
-                addTask(taskId);
             } else if (kind == "conversation_reply") {
                 const auto reply = decodeConversationReply(message.replyTo, data);
                 replyTo.update({{"kind", "bot_message"}, {"text", bounded(reply.text, 2000)}});
