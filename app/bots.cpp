@@ -2,6 +2,7 @@
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/automations.hpp"
+#include "flock/avatar_presets.hpp"
 #include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_notes_error.hpp"
@@ -26,6 +27,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -519,9 +521,24 @@ bool Bots::reconcileCreation(const BotChange& change) {
     return false;
 }
 
+Json createdBotAvatar(const BotChange& change) {
+    std::uint32_t hash = 2166136261u;
+    for (const unsigned char ch : change.target) hash = (hash ^ ch) * 16777619u;
+    const std::string color = avatarColors[hash / std::size(avatarShapes) % std::size(avatarColors)];
+    if (!change.avatar) return {{"kind", "shape"}, {"example", avatarShapes[hash % std::size(avatarShapes)]}, {"color", color}};
+    const auto& requested = *change.avatar;
+    if (requested.kind != "shape" && requested.kind != "icon")
+        throw BotProfileError("invalid_avatar", "Avatar kind must be shape or icon; upload images from Flock Web");
+    return validatedAvatarStyle({{"avatar",
+                                  {{"kind", requested.kind},
+                                   {requested.kind == "shape" ? "example" : "icon", requested.preset},
+                                   {"color", requested.color.empty() ? color : requested.color}}}});
+}
+
 void Bots::apply(const BotChange& change) try {
     if (!validBotId(change.target) || !validBotId(change.requestKey)) throw Conflict("Invalid Bot creation request");
     const auto name = validatedBotName({{"name", change.name}});
+    const auto avatar = createdBotAvatar(change);
     std::lock_guard lock(mutex_);
     std::filesystem::create_directories(directory_);
     const auto destination = directory_ / change.target;
@@ -543,10 +560,7 @@ void Bots::apply(const BotChange& change) try {
     const auto staging = directory_ / (".create-" + change.requestKey);
     if (!std::filesystem::create_directory(staging) && (std::filesystem::is_symlink(staging) || !std::filesystem::is_directory(staging)))
         throw Conflict("Invalid Bot staging directory");
-    const Json config{{"name", name},
-                      {"role", "custom"},
-                      {"creationRequest", change.requestKey},
-                      {"avatar", {{"kind", "shape"}, {"example", "sprout"}, {"color", "#69c9ac"}}}};
+    const Json config{{"name", name}, {"role", "custom"}, {"creationRequest", change.requestKey}, {"avatar", avatar}};
     writeAtomic(staging / "config.json", config.dump(2) + "\n");
     if (!writeNewFile(reservation, change.requestKey) && readText(reservation, 128) != change.requestKey)
         throw Conflict("This Bot ID has already been used");

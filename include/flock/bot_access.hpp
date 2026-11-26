@@ -5,6 +5,7 @@
 #include "flock/types.hpp"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,8 +25,9 @@ public:
     std::vector<std::string> peerIds(std::string_view bot) const;
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
     Json botSettings(const Person&, std::string_view bot) const;
-    Id applyBotChange(std::string_view bot, const Person& creator, std::string_view target, std::string_view name, Id message, int step,
-                      const ApplyBotChange&, const ReconcileBotCreation* onExhausted = nullptr);
+    Id applyBotChange(std::string_view bot, const Person& creator, std::string_view target, std::string_view name,
+                      std::optional<BotAvatarChoice> avatar, Id message, int step, const ApplyBotChange&,
+                      const ReconcileBotCreation* onExhausted = nullptr);
 private:
     Store& store_;
 };

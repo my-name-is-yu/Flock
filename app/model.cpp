@@ -6,6 +6,7 @@
 #include "flock/limits.hpp"
 #include "flock/session_read.hpp"
 #include "flock/bot_setup.hpp"
+#include "flock/avatar_presets.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/workspace_tools.hpp"
@@ -356,6 +357,15 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         fields["operation"]["enum"] = {"create_bot"};
         text("targetBotId", "Target Bot ID");
         text("name", "Requested Bot name");
+        fields["avatar"] = {{"type", "object"},
+                            {"properties",
+                             {{"kind", {{"type", "string"}, {"enum", {"shape", "icon"}}}},
+                              {"example", {{"type", "string"}, {"enum", avatarShapes}, {"description", "Preset shape for kind shape"}}},
+                              {"icon", {{"type", "string"}, {"enum", avatarIcons}, {"description", "Preset icon for kind icon"}}},
+                              {"color", textParameter("Hex color, such as #75b8e8")}}},
+                            {"required", {"kind"}},
+                            {"additionalProperties", false},
+                            {"description", "Preset appearance for the new Bot. Omit to choose one from the Bot ID."}};
     } else if (name == "read_memory" || name == "memory_history" || name == "write_memory" || name == "revert_memory_edit") {
         text("docId", "Exact shared playbook or file ID. Omit for your private memory.", false);
         if (name == "read_memory")

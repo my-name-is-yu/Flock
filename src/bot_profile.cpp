@@ -1,4 +1,5 @@
 #include "flock/bot_profile.hpp"
+#include "flock/avatar_presets.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
@@ -45,9 +46,6 @@ AvatarFormat detectAvatarFormat(std::string_view bytes) {
     }
     throw BotProfileError("invalid_image", "Choose a PNG, JPEG, WebP or GIF up to 5 MB");
 }
-
-constexpr std::string_view shapes[] = {"mug", "sprout", "controller", "lightbulb", "chat", "watering-can", "barbell"};
-constexpr std::string_view icons[] = {"star", "orbit", "zap", "compass", "feather", "hexagon", "telescope", "sparkles"};
 
 bool validHexColor(std::string_view color) {
     return (color.size() == 4 || color.size() == 7) && color.front() == '#' &&
@@ -161,12 +159,13 @@ Json validatedAvatarStyle(const Json& profile) {
     if (*kind == "shape") {
         const auto example = avatar->find("example");
         if (example == avatar->end() || !example->is_string() ||
-            std::ranges::find(shapes, example->get_ref<const std::string&>()) == std::end(shapes))
+            std::ranges::find(avatarShapes, example->get_ref<const std::string&>()) == std::end(avatarShapes))
             throw BotProfileError("invalid_avatar", "Unsupported avatar shape");
         style["example"] = *example;
     } else if (*kind == "icon") {
         const auto icon = avatar->find("icon");
-        if (icon == avatar->end() || !icon->is_string() || std::ranges::find(icons, icon->get_ref<const std::string&>()) == std::end(icons))
+        if (icon == avatar->end() || !icon->is_string() ||
+            std::ranges::find(avatarIcons, icon->get_ref<const std::string&>()) == std::end(avatarIcons))
             throw BotProfileError("invalid_avatar", "Unsupported avatar icon");
         style["icon"] = *icon;
     } else if (*kind != "upload") {
