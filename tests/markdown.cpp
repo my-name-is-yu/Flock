@@ -337,6 +337,11 @@ void bareUrls() {
               "<blockquote><p>See<br>\n<a href=\"https://example.com/__foo__\">https://example.com/__foo__</a> "
               "<a href=\"https://example.com/__bar__\">https://example.com/__bar__</a></p></blockquote>",
           "A nearby explicit link replaced the bare link destination");
+    check(markdown::toHtml(R"(https://example.com/__init__.py
+More details\
+Thanks)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+             "More details<br>\nThanks</p>",
+          "A later backslash line break truncated an earlier bare URL");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");

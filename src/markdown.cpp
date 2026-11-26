@@ -454,13 +454,7 @@ std::optional<FormattedBareUrl> formattedBareUrlAt(cmark_node* node, std::string
     return std::nullopt;
 }
 
-std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
-    auto* adjacent = cmark_node_next(node);
-    if (!adjacent || !isTextFormatting(adjacent)) return std::nullopt;
-    auto* paragraph = containingParagraph(node);
-    const auto line = physicalSourceLine(node, paragraph);
-    if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
-    const auto raw = lines[line - 1];
+std::optional<FormattedBareUrl> formattedBareUrlOnLine(cmark_node* node, std::string_view raw) {
     if (auto span = formattedBareUrlAt(node, raw, 0)) return span;
     const auto literal = value(cmark_node_get_literal(node));
     std::optional<FormattedBareUrl> closest;
@@ -480,6 +474,17 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
         }
     }
     return closest;
+}
+
+std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
+    auto* adjacent = cmark_node_next(node);
+    if (!adjacent || !isTextFormatting(adjacent) || value(cmark_node_get_literal(node)).find("http") == std::string::npos)
+        return std::nullopt;
+    const int logicalLine = cmark_node_get_start_line(node);
+    const int lastLine = physicalSourceLine(node, containingParagraph(node));
+    for (int line = logicalLine; line <= lastLine && line > 0 && static_cast<std::size_t>(line) <= lines.size(); ++line)
+        if (auto span = formattedBareUrlOnLine(node, lines[line - 1])) return span;
+    return std::nullopt;
 }
 
 void promoteBareLinks(cmark_node* node, const std::vector<std::string_view>& lines) {
