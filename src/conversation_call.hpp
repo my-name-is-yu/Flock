@@ -2,6 +2,7 @@
 
 #include "flock/bot_change.hpp"
 #include "flock/intake.hpp"
+#include "flock/json.hpp"
 #include "flock/types.hpp"
 #include <functional>
 #include <stop_token>
@@ -9,6 +10,8 @@
 namespace flockv0 {
 class GitHost;
 class T3;
+
+bool hasDestinationSelector(const Json&);
 
 enum class CallOutcome { advance, waiting, stop, finished };
 struct ConversationCallContext {

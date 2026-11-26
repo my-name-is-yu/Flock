@@ -1,6 +1,6 @@
 #include "conversation_turns.hpp"
+#include "flock/decision_errors.hpp"
 #include "git_storage.hpp"
-#include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/git_host.hpp"
 #include "flock/types.hpp"
@@ -9,6 +9,19 @@
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
+#include "json_fields.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "flock/board_inbox.hpp"
+#include "run_ref_storage.hpp"
+#include "flock/policy.hpp"
+#include "policy_approvals.hpp"
+#include "policy_origin.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "secret_storage.hpp"
+#include "journal_storage.hpp"
+#include "task_records.hpp"
+#include "workspace_internal.hpp"
 
 #include <algorithm>
 #include <cctype>

@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/automations.hpp"
 #include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"

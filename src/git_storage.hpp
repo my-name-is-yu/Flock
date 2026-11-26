@@ -99,8 +99,8 @@ private:
     const WebIdentityState& webIdentity;
     Policy& permissions;
     ConversationStorage& conversationTurns;
-    SessionParticipationStorage& sessionParticipationStorage;
     PolicyApprovals& policyApprovals;
+    SessionParticipationStorage& sessionParticipationStorage;
     const BotLifecycleStorage& botLifecycle;
     std::optional<Id> gitWebhooksDrainedAt;
     std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;

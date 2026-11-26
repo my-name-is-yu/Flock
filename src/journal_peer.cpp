@@ -2,9 +2,9 @@
 #include "journal_peer.hpp"
 #include "journal.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
+#include "database.hpp"
 
 #include <cstddef>
 #include <optional>

@@ -1,4 +1,5 @@
 #include "flock/tasks.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"

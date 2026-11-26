@@ -1,4 +1,4 @@
-#include "storage.hpp"
+#include "flock/bot_id.hpp"
 #include "conversation_call.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
@@ -18,6 +18,13 @@
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
+#include "json_fields.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "policy_origin.hpp"
+#include "workspace_internal.hpp"
+#include "flock/git_host.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -30,6 +37,11 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+bool hasDestinationSelector(const Json& args) {
+    return args.is_object() && (args.contains("destination") || args.contains("environmentId") || args.contains("projectId") ||
+                                args.contains("gatewayEnvironmentId"));
+}
+
 using conversation::Message;
 using conversation_storage::hasText;
 using conversation_storage::text;

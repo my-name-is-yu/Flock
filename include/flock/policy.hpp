@@ -21,9 +21,6 @@ class SecretStorage;
 class Store;
 class TaskRecords;
 
-bool validBotId(std::string_view);
-std::string botName(std::string_view);
-
 enum class Action {
     bot_view,
     bot_talk,
@@ -76,10 +73,7 @@ struct Resource {
     bool routine = false;
     static Resource sessionRead(std::string_view environment, std::string_view thread);
 };
-struct SecretRef {
-    std::string name;
-    bool valid() const;
-};
+struct SecretRef;
 class SecretRedactor;
 
 class Policy {

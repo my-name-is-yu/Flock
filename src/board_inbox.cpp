@@ -1,6 +1,8 @@
 #include "git_storage.hpp"
+#include "flock/decision_errors.hpp"
 #include "inbox_storage.hpp"
-#include "storage.hpp"
+#include "model_calls.hpp"
+#include "task_operations.hpp"
 #include "journal_peer.hpp"
 #include "task_storage.hpp"
 #include "flock/board_inbox.hpp"
@@ -10,6 +12,16 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
+#include "json_fields.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "wait_storage.hpp"
+#include "flock/policy.hpp"
+#include "policy_approvals.hpp"
+#include "secret_storage.hpp"
+#include "journal_storage.hpp"
+#include "task_records.hpp"
+#include "flock/task_target.hpp"
 
 #include <algorithm>
 #include <optional>

@@ -1,6 +1,5 @@
 #include "flock/conversations.hpp"
 #include "database.hpp"
-#include "storage.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
 #include "secret_storage.hpp"
@@ -20,6 +19,13 @@
 #include "flock/model_error.hpp"
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
+#include "json_fields.hpp"
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "channel_storage.hpp"
+#include "flock/git_host.hpp"
+#include "flock/workspace_tools.hpp"
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <cstddef>

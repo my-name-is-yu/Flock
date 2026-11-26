@@ -1,6 +1,5 @@
 #include "flock/git_events.hpp"
 #include "secret_storage.hpp"
-#include "storage.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/git_host.hpp"
@@ -8,6 +7,15 @@
 #include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
+#include "json_fields.hpp"
+#include "t3_credentials.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "inbox_storage.hpp"
+#include "task_records.hpp"
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <stdexcept>

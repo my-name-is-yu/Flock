@@ -5,11 +5,11 @@
 #include "journal.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "database.hpp"
 
 #include <optional>
 #include <string>

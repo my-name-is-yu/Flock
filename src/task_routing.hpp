@@ -74,10 +74,10 @@ public:
 private:
     Database& database;
     const Policy& permissions;
-    SessionReadStorage& sessionReadStorage;
-    SessionParticipationStorage& sessionParticipationStorage;
     PeerStorage& peerStorage;
     SecretStorage& secretStorage;
     WaitStorage& waitStorage;
+    SessionReadStorage& sessionReadStorage;
+    SessionParticipationStorage& sessionParticipationStorage;
 };
 }

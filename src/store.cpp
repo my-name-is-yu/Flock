@@ -1,4 +1,5 @@
 #include "flock/notifications.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/policy.hpp"
 #include "flock/peer_conversations.hpp"
 #include "flock/channels.hpp"
@@ -48,6 +49,11 @@
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "json_fields.hpp"
+#include "flock/secrets.hpp"
+#include "run_ref_storage.hpp"
+#include "inbox_storage.hpp"
+#include "flock/task_target.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -117,9 +123,9 @@ RunRef runRef(const Json& data) {
 }
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
-    : path(std::move(file)), memoryStorage(*this, secretStorage, permissions, conversationTurns, std::move(seed)),
-      automationStorage(*this, secretStorage, botLifecycle, permissions, std::move(model), taskOperations) {
-    open(path);
+    : path(std::move(file)), memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(seed)),
+      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(model), taskOperations) {
+    database.open(path);
 }
 
 Policy::Policy(Store& store) : Policy(store.p_->permissions) {}
@@ -164,7 +170,7 @@ void GitEvents::protectGitCredential(std::string value) {
     secrets_.protectGitCredential(std::move(value));
 }
 Database& Database::of(Store& store) {
-    return *store.p_;
+    return store.p_->database;
 }
 Conversations::Conversations(Store& store)
     : database_(Database::of(store)), turns_(store.p_->conversationTurns), context_(store.p_->conversationContextStorage),
@@ -205,7 +211,7 @@ const std::filesystem::path& Store::path() const {
 }
 
 std::pair<Id, Id> Store::changeStamp() const {
-    return p_->changeStamp();
+    return p_->database.changeStamp();
 }
 
 Conversations::ConversationChanges Conversations::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {

@@ -1,27 +1,14 @@
 #pragma once
 
 #include "flock/store_options.hpp"
-#include "flock/intake.hpp"
-#include "flock/json.hpp"
-#include "flock/person.hpp"
-#include "flock/run_ref.hpp"
-#include "flock/task.hpp"
 #include "flock/types.hpp"
-#include "flock/wait.hpp"
 
-#include <nlohmann/json.hpp>
-
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <memory>
-#include <optional>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace flockv0 {
 struct BotBusy : Conflict {
@@ -32,17 +19,7 @@ struct BotPaused : Conflict {
     BotPaused() : Conflict(botPausedMessage) {}
 };
 
-class SessionParticipation;
-struct ConfiguredSchedule;
-struct GitWebhook;
-struct InboxTarget;
-struct ScheduleImportError;
-
-struct TaskTarget {
-    std::string botId;
-    Id taskId, waitId, revision, generation;
-    static TaskTarget from(const TaskData& task, Id waitId);
-};
+struct Person;
 
 // Separate CLI and Web connections may use the same database.
 class Store {

@@ -1,4 +1,5 @@
 #include "flock/tasks.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/conversations.hpp"

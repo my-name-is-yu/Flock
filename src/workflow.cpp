@@ -12,7 +12,6 @@
 #include "journal_task.hpp"
 #include "outbox_storage.hpp"
 #include "secret_storage.hpp"
-#include "storage.hpp"
 #include "task_events.hpp"
 #include "task_records.hpp"
 #include "task_storage.hpp"

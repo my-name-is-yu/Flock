@@ -1,9 +1,9 @@
 #include "json_fields.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/policy.hpp"
 #include "task_routing.hpp"
 #include "session_participation_storage.hpp"
 #include "bot_settings_storage.hpp"
-#include "storage.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
@@ -12,6 +12,7 @@
 #include "flock/t3_command.hpp"
 #include "flock/decision.hpp"
 #include "flock/command.hpp"
+#include "database.hpp"
 
 #include <set>
 #include <string>

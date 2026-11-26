@@ -1,4 +1,5 @@
 #include "flock/identity.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/peer_conversations.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"

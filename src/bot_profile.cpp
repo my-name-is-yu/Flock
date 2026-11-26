@@ -1,4 +1,5 @@
 #include "flock/bot_profile.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -14,6 +15,22 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+bool validBotId(std::string_view id) {
+    constexpr std::string_view alnum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    return !id.empty() && id.size() <= 128 && alnum.find(id.front()) != alnum.npos &&
+           id.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.") == id.npos;
+}
+
+std::string botName(std::string_view input) {
+    const auto start = input.find_first_not_of(" \t\r\n");
+    if (start == input.npos) throw Conflict("Bot name is required");
+    const auto name = input.substr(start, input.find_last_not_of(" \t\r\n") - start + 1);
+    if (name.size() > 128 || std::count_if(name.begin(), name.end(), [](unsigned char c) { return (c & 0xC0) != 0x80; }) > 32 ||
+        std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; }))
+        throw Conflict("Invalid Bot name");
+    return std::string(name);
+}
+
 namespace {
 constexpr AvatarFormat png{"avatar.png", "image/png"};
 constexpr AvatarFormat jpeg{"avatar.jpg", "image/jpeg"};

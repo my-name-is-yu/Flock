@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/secret_ref.hpp"
 #include "demo.hpp"
 #include "model.hpp"
 #include "tests/fixtures.hpp"
@@ -27,6 +28,7 @@
 #include "flock/types.hpp"
 #include "flock/wait.hpp"
 #include "flock/workspace_tools.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

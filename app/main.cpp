@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/decision_errors.hpp"
 #include "demo.hpp"
 #include "chatgpt_web.hpp"
 #include "model.hpp"
@@ -11,7 +12,6 @@
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/external_mcp.hpp"
@@ -31,6 +31,7 @@
 #include "flock/types.hpp"
 #include "flock/wait.hpp"
 #include "flock/web.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

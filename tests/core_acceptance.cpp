@@ -1,4 +1,6 @@
 #include "flock/notifications.hpp"
+#include "flock/secret_ref.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/conversations.hpp"
@@ -23,6 +25,7 @@
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 #include "flock/types.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

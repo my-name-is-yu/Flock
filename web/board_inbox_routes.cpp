@@ -1,4 +1,6 @@
 #include "board_inbox_routes.hpp"
+#include "flock/bot_id.hpp"
+#include "flock/decision_errors.hpp"
 #include "settings_routes.hpp"
 #include "views.hpp"
 #include "flock/board_inbox.hpp"

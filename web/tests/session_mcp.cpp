@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
