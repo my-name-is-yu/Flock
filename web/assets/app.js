@@ -1687,7 +1687,6 @@ function eventCard(event, context, place, report) {
       }
     }
     if (event.kind === 'conversation_message' && place.replyQuote) {
-      // Same quiet quote as an answer's question; it jumps to the message being replied to.
       quote = button(null, 'msg-quote msg-quote-link', () => {
         void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
       });
@@ -2153,7 +2152,6 @@ function conversationRows(data, events, keep, source) {
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = previousReport = null; return; }
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
     const replyId = event.kind === 'conversation_message' ? event.data.replyToMessageId : 0;
-    // A reply right under the message it answers needs no quote.
     place.replyQuote = replyId && ![previous?.id, previousReport?.id].includes(replyId) ? quotedText(eventsById.get(replyId)) : null;
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
