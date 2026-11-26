@@ -1,10 +1,4 @@
-import { execFile } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
-import { promisify } from 'node:util';
+import { dumpDom, readAsset, requirePass, withAssetServer } from './dom-harness.mjs';
 
 function fixtures() {
   const nativeMatchMedia = window.matchMedia.bind(window);
@@ -492,9 +486,7 @@ async function exercise() {
   check(title.textContent === 'Deploy talks with', 'The open conversation picker kept the old Bot name');
 }
 
-const assets = new URL('../assets/', import.meta.url);
-const read = (path) => readFile(new URL(`.${path}`, assets));
-const index = (await read('/index.html')).toString().replace('<script type="module" src="/app.js"></script>', `
+const index = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
   <script>(${fixtures})();</script>
   <script type="module">
     import '/app.js';
@@ -508,26 +500,6 @@ const index = (await read('/index.html')).toString().replace('<script type="modu
       document.documentElement.dataset.flockResult = error.message;
     }
   </script>`);
-const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-const server = createServer(async (request, response) => {
-  const { pathname } = new URL(request.url, 'http://localhost');
-  try {
-    response.setHeader('Content-Type', pathname === '/' ? 'text/html' : contentTypes[extname(pathname)] ?? 'application/octet-stream');
-    response.end(pathname === '/' ? index : await read(pathname));
-  } catch {
-    response.writeHead(404).end();
-  }
+await withAssetServer({ '/': index }, async (origin) => {
+  requirePass(await dumpDom(process.argv[2], `${origin}/?bot=release`, { budget: 2500 }), 'The browser did not finish the timestamp checks');
 });
-const directory = await mkdtemp(join(tmpdir(), 'flock-message-time-dom-'));
-try {
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=2500', '--dump-dom',
-    `http://127.0.0.1:${server.address().port}/?bot=release`], { encoding: 'utf8', timeout: 25000 });
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the timestamp checks');
-} finally {
-  server.close();
-  await rm(directory, { recursive: true, force: true });
-}

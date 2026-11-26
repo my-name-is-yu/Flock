@@ -201,7 +201,7 @@ const server = createServer((request, response) => {
   } else if (url.pathname === '/composer-screenshots.mjs') {
     response.writeHead(200, { 'Content-Type': 'text/javascript' }).end(module);
   } else if (url.pathname === '/app') {
-    response.writeHead(200, { 'Content-Type': 'text/html' }).end(appHtml);
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(appHtml);
   } else if (url.pathname === '/') {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
   } else {

@@ -1,8 +1,4 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { assetUrl, dumpFixture, requirePass } from './dom-harness.mjs';
 
 function exercise(createTimelineRows) {
   const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -56,26 +52,14 @@ function exercise(createTimelineRows) {
   check(timeline.firstElementChild !== inBot, 'A different conversation reused the previous conversation row');
 }
 
-const directory = mkdtempSync(join(tmpdir(), 'flock-timeline-rows-'));
-try {
-  const module = new URL('../assets/timeline-rows.js', import.meta.url);
-  const html = `<!doctype html><html><body><section tabindex="0"><div></div></section><textarea></textarea>
-    <script type="module">
-      import { createTimelineRows } from ${JSON.stringify(module.href)};
-      try {
-        (${exercise})(createTimelineRows);
-        document.documentElement.dataset.flockResult = 'pass';
-      } catch (error) {
-        document.documentElement.dataset.flockResult = error.message;
-      }
-    </script></body></html>`;
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, html);
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
-} finally {
-  rmSync(directory, { recursive: true, force: true });
-}
+const html = `<!doctype html><html><body><section tabindex="0"><div></div></section><textarea></textarea>
+  <script type="module">
+    import { createTimelineRows } from ${JSON.stringify(assetUrl('timeline-rows.js'))};
+    try {
+      (${exercise})(createTimelineRows);
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error.message;
+    }
+  </script></body></html>`;
+requirePass(await dumpFixture(process.argv[2], html), 'The browser did not finish the DOM checks');

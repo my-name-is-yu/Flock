@@ -1,8 +1,4 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { assetUrl, dumpFixture, requirePass } from './dom-harness.mjs';
 
 async function exercise(createBotWorkspaceCard, placeRows) {
   const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -174,28 +170,15 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     'Editable settings did not show the model name before opening the editor');
 }
 
-const directory = mkdtempSync(join(tmpdir(), 'flock-bot-workspace-'));
-try {
-  const workspace = new URL('../assets/bot-workspace.js', import.meta.url);
-  const rows = new URL('../assets/timeline-rows.js', import.meta.url);
-  const html = `<!doctype html><html><body><main></main>
-    <script type="module">
-      import { createBotWorkspaceCard } from ${JSON.stringify(workspace.href)};
-      import { placeRows } from ${JSON.stringify(rows.href)};
-      try {
-        await (${exercise})(createBotWorkspaceCard, placeRows);
-        document.documentElement.dataset.flockResult = 'pass';
-      } catch (error) {
-        document.documentElement.dataset.flockResult = error.message;
-      }
-    </script></body></html>`;
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, html);
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the workspace checks');
-} finally {
-  rmSync(directory, { recursive: true, force: true });
-}
+const html = `<!doctype html><html><body><main></main>
+  <script type="module">
+    import { createBotWorkspaceCard } from ${JSON.stringify(assetUrl('bot-workspace.js'))};
+    import { placeRows } from ${JSON.stringify(assetUrl('timeline-rows.js'))};
+    try {
+      await (${exercise})(createBotWorkspaceCard, placeRows);
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error.message;
+    }
+  </script></body></html>`;
+requirePass(await dumpFixture(process.argv[2], html), 'The browser did not finish the workspace checks');

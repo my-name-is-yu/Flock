@@ -1,10 +1,4 @@
-import { execFile } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
-import { promisify } from 'node:util';
+import { dumpDom, readAsset, requirePass, withAssetServer } from './dom-harness.mjs';
 
 function fixtures() {
   const botId = 'release';
@@ -62,9 +56,7 @@ async function exercise() {
     'The controls submitted the wrong connection IDs');
 }
 
-const assets = new URL('../assets/', import.meta.url);
-const read = path => readFile(new URL(`.${path}`, assets));
-const settings = (await read('/bot-settings.html')).toString().replace('<script type="module" src="/bot-settings.js"></script>', `
+const settings = (await readAsset('/bot-settings.html')).replace('<script type="module" src="/bot-settings.js"></script>', `
   <script>(${fixtures})();</script>
   <script type="module">
     import '/bot-settings.js';
@@ -75,32 +67,7 @@ const settings = (await read('/bot-settings.html')).toString().replace('<script 
       document.documentElement.dataset.flockResult = error.message;
     }
   </script>`);
-const contentTypes = {'.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css'};
-const server = createServer(async (request, response) => {
-  const {pathname} = new URL(request.url, 'http://localhost');
-  try {
-    if (pathname === '/settings/release') {
-      response.setHeader('Content-Type', 'text/html');
-      response.end(settings);
-    } else {
-      response.setHeader('Content-Type', contentTypes[extname(pathname)] ?? 'application/octet-stream');
-      response.end(await read(pathname));
-    }
-  } catch {
-    response.writeHead(404).end();
-  }
+await withAssetServer({ '/settings/release': settings }, async (origin) => {
+  requirePass(await dumpDom(process.argv[2], `${origin}/settings/release#secrets`, { flags: ['--window-size=800,540'], budget: 1500 }),
+    'The browser did not finish the Bot Access checks');
 });
-const directory = await mkdtemp(join(tmpdir(), 'flock-bot-access-dom-'));
-try {
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const {stdout} = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--window-size=800,540',
-    '--virtual-time-budget=1500', '--dump-dom', `http://127.0.0.1:${server.address().port}/settings/release#secrets`],
-  {encoding: 'utf8', timeout: 25000});
-  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
-  if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the Bot Access checks');
-} finally {
-  server.close();
-  await rm(directory, {recursive: true, force: true});
-}
