@@ -93,7 +93,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     workspace = current;
     if (!editable) draft = null;
     showView();
-    // Show the model's name, not its slug, before anyone opens the editor.
     if (workspace.model && !catalogRequested && !catalog.models.length) {
       catalogRequested = true;
       loadModels().then((data) => {

@@ -2825,7 +2825,6 @@ function roleCard(bot) {
   return detailRole.element;
 }
 function settingsContent(bot, section = 'general') {
-  // The tabs name the section; the title says whose settings these are.
   elements['detail-title'].textContent = `${bot.name} settings`;
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);

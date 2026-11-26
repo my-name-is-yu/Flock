@@ -172,7 +172,6 @@
 .settings-workspace-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .3rem 1rem; margin: 0; font-size: var(--text-sm); }
 .settings-workspace-facts dt { color: var(--text-2); }
 .settings-workspace-facts dd { margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; align-self: center; }
-/* Only the T3 environment and project IDs are code. */
 .settings-workspace-facts dd:nth-of-type(n+4) { font-family: var(--font-mono); }
 .settings-workspace-form { display: grid; gap: .6rem; }
 .settings-workspace-model { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
