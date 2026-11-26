@@ -233,40 +233,34 @@ struct Fixture {
         options.botTools = tools;
         runtime = std::make_unique<Runtime>(*store, model, t3, [](auto) { return std::string{}; }, options);
     }
-    Intake intake(std::string bot = "alpha", Id limit = 20) const {
-        return {std::move(bot),
-                "",
-                "test-environment",
-                "private-project",
-                {{"modelCallLimit", limit}, {"model", "test"}, {"modelProvider", "chatgpt"}}};
+    Intake intake(std::string bot = "alpha") const {
+        return {std::move(bot), "", "test-environment", "private-project", {{"model", "test"}, {"modelProvider", "chatgpt"}}};
     }
     void block(Action action, std::string_view target, bool blocked = true) {
         PolicyRules{*store}.changeNeverRule(owner, action, target, blocked);
     }
-    Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
+    Json batch(std::vector<Decision> calls, std::string bot = "alpha") {
         model.next = std::move(calls);
         model.seen = nullptr;
-        lastMessage = ConversationIntake(*store)
-                          .receive(owner, intake(std::move(bot), budget), std::to_string(++seq), "Check the fixture")
-                          .at("messageId");
+        lastMessage =
+            ConversationIntake(*store).receive(owner, intake(std::move(bot)), std::to_string(++seq), "Check the fixture").at("messageId");
         runtime->runConversations();
         return model.seen;
     }
     Json run(Decision action, std::string bot = "alpha") {
-        const auto steps = batch({std::move(action)}, 20, std::move(bot));
+        const auto steps = batch({std::move(action)}, std::move(bot));
         check(steps.is_array() && steps.size() == 1, "Expected one tool result");
         return steps[0].at("result");
     }
-    void approvePaused(const Json& pause) {
-        const Id wait = pause.at("messageId");
-        Inbox(*store).decideInbox(owner, {"alpha", InboxKind::conversation_model_budget, pause.at("replyToMessageId"), wait, 0, 0, wait},
-                                  "approve");
+    void approvePolicy(const Json& item) {
+        check(item.at("itemKind") == "policy_approval", "Expected a policy approval");
+        Inbox(*store).decideInbox(owner, {"alpha", InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), 0, 0, 0},
+                                  "allow_once");
     }
-    void approve() {
-        const auto paused = Conversations(*store).pausedConversations("alpha");
-        check(paused.size() == 1, "Expected one paused turn");
-        approvePaused(paused.at(0));
-        runtime->runConversations();
+    Json pendingApproval() {
+        const auto items = Inbox(*store).inbox(owner);
+        check(items.size() == 1 && items[0].at("itemKind") == "policy_approval", "Expected one policy approval");
+        return items.at(0);
     }
     std::string sql(const std::string& query) const {
         sqlite3* connection = nullptr;
@@ -497,23 +491,23 @@ void externalTools(Fixture& f) {
               f.model.content.at(2).at("image_url") == "data:image/jpeg;base64," + jpeg[0].at("dataBase64").get<std::string>(),
           "JPEG inspection did not distinguish a valid frame header from a truncated file");
 
-    const auto searches = f.web->searches.load();
-    const auto fetches = f.web->fetches.load();
-    f.batch({search, fetch}, 2);
-    check(f.web->searches == searches + 1 && f.web->fetches == fetches, "Parallel calls overspent the remaining budget");
+    f.model.followStep = [&](const Json& steps) {
+        if (steps.size() != 2) return std::vector<Decision>{};
+        f.runtime->requestStop();
+        return std::vector{call("list_connections")};
+    };
+    f.batch({search, fetch});
+    f.model.followStep = {};
     const auto id = std::to_string(f.lastMessage);
-    const auto pending = Json::parse(f.sql("SELECT effect FROM conversation_steps WHERE message_id=" + id + " AND step=1"));
-    check(pending[0].at("ok") == true && pending[1].is_null(), "Exhausted batch did not retain its completed call");
-    check(f.sql("SELECT CAST(attempts AS TEXT) FROM model_budgets WHERE id='message/" + id + "'") == "2" &&
-              f.sql("SELECT CAST(count(*) AS TEXT) FROM model_attempts WHERE purpose='bot_tool' AND message_id=" + id) == "1",
-          "Action budget reservation was not durable");
+    check(f.sql("SELECT count(*) FROM model_attempts WHERE purpose='bot_tool' AND message_id=" + id) == "2",
+          "The parallel calls lost their attempt accounting");
     f.restart();
     f.block(Action::web_search, "public");
-    f.approve();
-    check(f.web->searches == searches + 1 && f.web->fetches == fetches + 1, "Approval did not execute exactly the pending call");
-    check(Conversations(*f.store).pausedConversations("alpha").empty() && f.model.seen[0].at("result").at("accessRevoked") == true &&
+    f.runtime->runConversations();
+    check(f.model.seen.size() == 3 && f.model.seen[0].at("result").at("accessRevoked") == true &&
               f.model.seen[1].at("result").at("ok") == true,
-          "The resumed model did not see the pending result and access revocation");
+          "The resumed model did not see the completed result and access revocation");
+    f.block(Action::web_search, "public", false);
 }
 
 void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
@@ -540,14 +534,18 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     Fixture f;
     const auto root = f.home / "workspaces" / "alpha";
     fs::create_directories(root);
-    const auto data = [](unsigned i) { return "Evidence for slot " + std::to_string(i) + " 根" + std::string(8169, '\x01'); };
-    std::vector<Decision> batch;
-    for (unsigned i = 0; i < 8; ++i) {
+    const auto data = [](unsigned i) {
+        auto text = "Evidence for slot " + std::to_string(i) + " 根";
+        text.append(8192 - text.size(), '\x01');
+        return text;
+    };
+    constexpr unsigned batches = 19, batchSize = 8, calls = batches * batchSize;
+    std::vector<std::vector<Decision>> reads(batches);
+    for (unsigned i = 0; i < calls; ++i) {
         const auto file = std::to_string(i) + ".txt";
         write(root / file, data(i));
-        batch.push_back(call("workspace_read_file", {{"path", file}}));
+        reads.at(i / batchSize).push_back(call("workspace_read_file", {{"path", file}}));
     }
-    constexpr unsigned batches = 19, calls = batches * 8;
     unsigned requests = 0;
     f.model.inspectRequest = [&](const Json& request) {
         ++requests;
@@ -558,15 +556,16 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     Json firstRef, secondRef;
     bool recovered = false, revoked = false;
     f.model.followStep = [&](const Json& steps) -> std::vector<Decision> {
-        if (steps.size() < calls) return batch;
+        if (steps.size() < calls) return reads.at(steps.size() / batchSize);
         if (steps.size() == calls) {
             check(steps.front().at("result").at("evidenceOmitted") == true && steps.front().at("result").at("untrustedData") == true,
                   "The earlier result disappeared without an explicit evidence status");
             firstRef = steps.at(0).at("result").at("resultRef");
             secondRef = steps.at(1).at("result").at("resultRef");
             check(firstRef != secondRef, "Parallel results shared a reference");
-            for (unsigned i = 0; i < 8; ++i)
-                check(steps.at(calls - 8 + i).at("result").at("text") == data(i), "The latest batch lost evidence or changed call order");
+            for (unsigned i = calls - batchSize; i < calls; ++i)
+                check(steps.at(i).at("result").at("text") == data(i), "The latest batch lost evidence or changed call order");
+            f.runtime->requestStop();
             return {call("read_tool_result", firstRef)};
         }
         const auto& reread = steps.back().at("result").at("result");
@@ -582,17 +581,17 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
         revoked = true;
         return {};
     };
-    f.batch(batch, batches * 9);
-    check(requests == batches, "The stress fixture did not finish all batches before pausing");
+    f.batch(reads.front());
+    check(requests == batches + 1, "The stress fixture did not finish all batches before stopping");
     write(root / "0.txt", "Changed on disk after the original read");
     f.restart();
-    f.approve();
-    check(recovered && !revoked && requests == batches + 2, "The approved turn did not recover the first result before stopping");
+    f.runtime->runConversations();
+    check(recovered && !revoked && requests == batches + 2, "The resumed turn did not recover the first result before stopping");
     f.restart();
     f.block(Action::workspace_read, "alpha");
     f.runtime->runConversations();
-    check(revoked && requests == batches + 3 && Conversations(*f.store).pausedConversations("alpha").empty(),
-          "The approved turn did not finish its recovery checks after restart");
+    check(revoked && requests == batches + 3 && Inbox(*f.store).inbox(localOwner).empty(),
+          "The resumed turn did not finish its recovery checks after restart");
     f.model.followStep = {};
     check(f.run(call("read_tool_result", firstRef)).at("ok") == false, "A reference was accepted from another turn");
 }
@@ -678,10 +677,16 @@ void mcpToolOutcomes(Fixture& f) {
               "Malformed MCP result was exposed as evidence: " + std::string(name));
     };
 
-    f.batch({invoke("numeric-content")}, 2);
+    f.model.beforeTurn = [&](const ModelInput& input) {
+        if (!input.event.at("turn").empty()) f.runtime->requestStop();
+    };
+    f.batch({invoke("numeric-content")});
+    f.model.beforeTurn = {};
+    const auto message = std::to_string(f.lastMessage);
     f.restart();
-    f.approve();
-    expectUnknown(f.model.seen.at(0).at("result"), "numeric-content after restart");
+    f.runtime->runConversations();
+    expectUnknown(Json::parse(f.sql("SELECT result FROM conversation_steps WHERE step=1 AND message_id=" + message)).at(0),
+                  "numeric-content after restart");
 
     for (const auto* name : {"missing-content", "invalid-block", "invalid-resource", "invalid-resource-mime-type", "invalid-annotations",
                              "invalid-structured-content", "invalid-is-error"})
@@ -697,11 +702,7 @@ void mcpToolOutcomes(Fixture& f) {
 
     const auto approveMcp = [&](std::string_view name) {
         check(f.batch({invoke(name)}).is_null(), "An MCP tool that required approval ran before approval");
-        const auto items = Inbox(*f.store).inbox(owner);
-        check(items.size() == 1 && items.at(0).at("itemKind") == "policy_approval", "MCP tool did not create an approval");
-        const auto& item = items.at(0);
-        Inbox(*f.store).decideInbox(owner, {"alpha", InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), 0, 0, 0},
-                                    "allow_once");
+        f.approvePolicy(f.pendingApproval());
         f.runtime->runConversations();
         return f.model.seen.at(0).at("result");
     };
@@ -744,20 +745,28 @@ void mcpLoopback(Fixture& f, std::string_view url) {
 }
 
 void approvalWhileAnotherTurnIsInferring(Fixture& f) {
-    f.block(Action::web_search, "public", false);
-    f.block(Action::web_search, "public", false);
+    PolicyRules policy(*f.store);
+    policy.setMode(owner, "supervised");
+    policy.changeRule(owner, RuleKind::ask, Action::web_search, "public", true);
     const auto search = [](std::string query) { return call("web_search", {{"query", query}}); };
-    f.batch({search("older")}, 1);
-    const auto paused = Conversations(*f.store).pausedConversations("alpha").at(0);
+    f.batch({search("older")});
+    const auto older = f.pendingApproval();
+    bool approved = false;
     f.model.beforeTurn = [&](const ModelInput& input) {
-        if (input.event.at("messageId") == f.lastMessage && input.event.at("turn").empty()) f.approvePaused(paused);
+        if (!approved && input.event.at("messageId") == f.lastMessage && input.event.at("turn").empty()) {
+            f.approvePolicy(older);
+            approved = true;
+        }
     };
     f.batch({search("newer")});
     f.model.beforeTurn = {};
+    f.approvePolicy(f.pendingApproval());
+    f.runtime->runConversations();
     const auto& queries = f.web->searchQueries;
     check(queries.size() >= 2 && queries[queries.size() - 2] == "older" && queries.back() == "newer",
           "A newer tool action overtook a resumed turn");
-    f.approve();
+    policy.changeRule(owner, RuleKind::ask, Action::web_search, "public", false);
+    policy.setMode(owner, "full");
 }
 }
 

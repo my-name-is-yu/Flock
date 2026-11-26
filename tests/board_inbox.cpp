@@ -93,18 +93,10 @@ struct Database {
         if (sqlite3_exec(db, sql.c_str(), read, &value, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
         return value;
     }
-    void pause(Id task, std::string_view reason) {
-        const auto id = std::to_string(task);
-        Json wait{{"text", "Fixture approval"}, {"eventId", 0}, {"run", nullptr}};
-        if (reason == "budget") wait.update({{"attempted", "follow_up"}, {"decisionReason", ""}, {"usage", Json::object()}});
-        exec("INSERT INTO waits(task_id,reason,data) VALUES(" + id + ",'" + std::string(reason) + "','" + wait.dump() + "')");
-        exec("UPDATE tasks SET state='waiting',generation=generation+1 WHERE id=" + id);
-    }
 };
 
 struct Script : Model {
     Id managed = 0;
-    bool failConversation = false;
     Json reviewContext;
     Json openPrArgs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
@@ -122,9 +114,7 @@ struct Script : Model {
                 reviewContext = event.at("replyTo");
                 return {"reply", {{"text", "The smoke checks ran."}}, "Answer the review question"};
             }
-            if (failConversation && prompt == "Pause this conversation")
-                return {"find_tasks", Json::object(), "Use the final available call"};
-            if (event.at("turn").empty() && prompt != "Pause this conversation") {
+            if (event.at("turn").empty()) {
                 for (const auto& task : input.task.at("tasks")) {
                     if (task.at("taskId") != managed) continue;
                     Json args{{"taskId", managed}, {"generation", task.at("generation")}};
@@ -231,44 +221,24 @@ void exercise(const std::filesystem::path& path) {
 
     const auto question = TaskIntake(store).submit(intake("report", "Report the work\nInclude the source", "question"));
     const auto unknown = TaskIntake(store).submit(intake("review", "Recover the delivery", "unknown"));
-    const auto deadlineTask = TaskIntake(store).submit(intake("review", "Track the deadline", "deadline"));
     const auto changed = TaskIntake(store).submit(intake("report", "Revision A", "changed"));
-    const auto budget = TaskIntake(store).submit(intake("review", "Approve an extra run", "budget"));
-    const auto model = TaskIntake(store).submit(intake("review", "Add a model call", "model"));
-    const auto hidden = TaskIntake(store).submit(intake("private", "Unshared request", "private"));
     const auto terminal = TaskIntake(store).submit(intake("review", "Cancelled request", "closed"));
     TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(terminal).task, 0), "cancel");
 
-    Seconds now = unixTime();
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
     auto options = git_fixture::options(std::make_shared<git_fixture::FakeHost>());
-    options.clock = [&] { return now; };
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options);
     for (int step = 0; step < 12; ++step) runtime.tick();
     check(taskJson(Tasks(store).task(unknown)).at("wait").at("reason") == "unknown_delivery", "fixture did not pause on delivery");
-
-    db.pause(changed, "budget");
-    db.pause(budget, "budget");
-    db.pause(model, "model_budget");
-    db.pause(hidden, "model_budget");
-    const auto due = Tasks(store).task(deadlineTask).task.deadline;
-    check(due > now, "fixture did not launch the Run with a deadline");
-    now = due;
-    for (int step = 0; step < 4 && taskJson(Tasks(store).task(deadlineTask)).at("wait").is_null(); ++step) runtime.tick();
-    const auto deadlineWait = taskJson(Tasks(store).task(deadlineTask)).at("wait");
-    check(deadlineWait.is_object() && deadlineWait.at("reason") == "deadline", "fixture did not reach its deadline");
 
     const auto report = taskJson(Tasks(store).task(question));
     const auto review =
         openReview(store, runtime, script, intake("report", "unused", "turn"), question, "published-report", "Check the report and source");
     const auto secret = secretRequests.requestSecret("review", {"report-credential"});
-    const auto conversation = ConversationIntake(store).receive(localOwner, intake("review", "unused", "turn", {{"modelCallLimit", 1}}),
-                                                                "pause", "Pause this conversation");
-    script.failConversation = true;
-    runtime.runConversations();
-
+    for (const auto* kind : {"extra_run", "deadline", "model_budget", "conversation_model_budget", "stuck", "conversation_stuck"})
+        rejected<std::invalid_argument>([kind] { parseInboxKind(kind); }, "a removed inbox kind was accepted");
     const auto before = db.exec("PRAGMA data_version");
     const auto inbox = Inbox(store).inbox(alice);
     check(Inbox(store).inbox(alice) == inbox && db.exec("PRAGMA data_version") == before, "refreshing the inbox mutated SQLite");
@@ -280,14 +250,9 @@ void exercise(const std::filesystem::path& path) {
     check(Inbox(store).inbox(alice, "private").empty() && Inbox(store).inbox(reader, "review").empty(),
           "inbox membership restrictions were ignored");
     check(row(inbox, "itemKind", "user_question").at("choices") == Json::array({"Draft", "Final"}) &&
-              row(inbox, "itemKind", "conversation_model_budget").at("itemId") == conversation.at("messageId") &&
-              row(inbox, "itemKind", "conversation_model_budget").at("request") == "Pause this conversation" &&
-              row(inbox, "itemKind", "conversation_model_budget").at("allowance") == 1 &&
               row(inbox, "itemKind", "protected_input").at("itemId") == secret &&
-              row(inbox, "itemKind", "pr_review").at("itemId") == review && row(inbox, "itemKind", "model_budget").at("taskId") == model &&
-              row(inbox, "itemKind", "model_budget").at("allowance") == 20 && row(inbox, "itemKind", "extra_run").at("allowance") == 3 &&
-              row(inbox, "itemKind", "deadline").at("taskId") == deadlineTask &&
-              row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 9,
+              row(inbox, "itemKind", "pr_review").at("itemId") == review &&
+              row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 4,
           "inbox omitted a pending decision or its prompt");
     const auto readerQuestion = row(Inbox(store).inbox(reader), "itemKind", "user_question");
     const auto waitAnchor = report.at("wait").at("messageId");
@@ -312,17 +277,12 @@ SELECT )SQL" +
               activeQuestion->wait->messageId == waitAnchor.get<Id>() && activeQuestion->wait->reason() == WaitReason::user_question,
           "task views disagreed about the open wait");
     db.exec("DELETE FROM journal WHERE kind='fixture_activity' AND task_id=" + std::to_string(question));
-    check(!row(inbox, "itemKind", "model_budget").contains("conversationEventId"),
+    check(!row(inbox, "itemKind", "protected_input").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
     const auto reviewEvent =
         row(Conversations(store).conversation("report"), "id", row(inbox, "itemKind", "pr_review").at("conversationEventId"));
     check(reviewEvent.at("kind") == "pr_review_requested" && reviewEvent.at("data").at("itemId") == review,
           "PR review did not point to its own conversation event");
-    const auto paused = row(inbox, "itemKind", "conversation_model_budget");
-    check(paused.at("conversationEventId") == paused.at("waitId") &&
-              row(Conversations(store).conversation("review"), "id", paused.at("conversationEventId")).at("kind") == "conversation_reply",
-          "a paused turn did not point to its conversation reply");
-
     const auto questionBefore = pending(store, user_question);
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
                              "nonmember answered a question");
@@ -339,50 +299,24 @@ SELECT )SQL" +
           "PR approval failed to update the linked review");
     Inbox(store).decideInbox(owner, pending(store, protected_input), "supply", {{"value", "test-vault-value"}});
     check(Inbox(store).decisionHistory(owner).dump().find("test-vault-value") == std::string::npos, "secret was journaled");
-    const auto old = target(row(Inbox(store).inbox(alice), "taskId", changed));
+    const auto old = TaskTarget::from(Tasks(store).task(changed).task, 0);
     const auto staleReview =
         openReview(store, runtime, script, intake("report", "unused", "turn"), changed, "revision-a", "Review the first source");
     script.managed = changed;
     ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "change", "Switch the scope");
     runtime.runConversations();
     const auto revisionB = taskJson(Tasks(store).task(changed));
-    check(revisionB.at("currentRevision") != old.targetRevision && revisionB.at("doneWhen") == "Verify source B",
+    check(revisionB.at("currentRevision") != old.revision && revisionB.at("doneWhen") == "Verify source B",
           "conversation did not change the task revision");
     const auto sent = sessions.sends;
     const auto interrupted = sessions.interrupts;
-    rejected<RequestChanged>([&] { Inbox(store).decideInbox(alice, old, "approve"); }, "old approval applied to revision B");
+    rejected<RequestChanged>([&] { TaskControl(store).operate(alice, old, "cancel"); }, "old stop applied to revision B");
     rejected<RequestChanged>(
-        [&] {
-            Inbox(store).decideInbox(alice, {"report", pr_review, staleReview, 0, changed, old.targetRevision, old.targetGeneration},
-                                     "approve");
-        },
+        [&] { Inbox(store).decideInbox(alice, {"report", pr_review, staleReview, 0, changed, old.revision, old.generation}, "approve"); },
         "an old PR review approved a new revision");
     check(taskJson(Tasks(store).task(changed)) == revisionB && sessions.sends == sent && sessions.interrupts == interrupted &&
               Inbox(store).decisionHistory(owner).size() == 2,
           "rejected approval changed task, delivery, or history");
-
-    const auto extra = target(row(Inbox(store).inbox(alice), "taskId", budget));
-    const auto allowance = Tasks(store).task(budget).task.allowance.remaining;
-    std::barrier ready(2);
-    const auto act = [&](Store& connection, const Person& actor) {
-        ready.arrive_and_wait();
-        try {
-            Inbox(connection).decideInbox(actor, extra, "approve");
-            return actor.id;
-        } catch (const DecisionUnavailable&) {
-            return std::string{};
-        }
-    };
-    auto first = std::async(std::launch::async, [&] { return act(store, alice); });
-    auto second = std::async(std::launch::async, [&] { return act(concurrent, bob); });
-    const auto a = first.get();
-    const auto b = second.get();
-    check(a.empty() != b.empty() && Tasks(store).task(budget).task.allowance.remaining == allowance + 3,
-          "simultaneous approval took effect more or less than once");
-    const auto decided = row(TaskHistory(store).history(budget), "kind", "inbox_decision").at("data");
-    check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 && decided.at("decision") == "approve" &&
-              decided.at("targetRevision") == extra.targetRevision,
-          "task history lost who decided, when, or what they reviewed");
 
     script.managed = question;
     ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "block", "Report the blocker");
@@ -423,26 +357,31 @@ SELECT )SQL" +
     check(taskJson(Tasks(store).task(unknown)) == previous && pending(store, unknown_delivery) == delivery && sessions.reconciles == 0,
           "failed history insertion committed reconciliation intent or wait update");
     db.exec("DROP TRIGGER reject_audit");
-    Inbox(store).decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}});
+    std::barrier ready(2);
+    const auto act = [&](Store& connection, const Person& actor) {
+        ready.arrive_and_wait();
+        try {
+            Inbox(connection).decideInbox(actor, delivery, "reconcile", {{"threadId", "candidate"}});
+            return actor.id;
+        } catch (const DecisionUnavailable&) {
+            return std::string{};
+        }
+    };
+    auto first = std::async(std::launch::async, [&] { return act(store, alice); });
+    auto second = std::async(std::launch::async, [&] { return act(concurrent, bob); });
+    const auto a = first.get();
+    const auto b = second.get();
+    check(a.empty() != b.empty(), "simultaneous delivery reconciliations took effect more or less than once");
+    const auto decided = row(TaskHistory(store).history(unknown), "kind", "inbox_decision").at("data");
+    check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 &&
+              decided.at("decision") == "reconcile" && decided.at("targetRevision") == delivery.targetRevision,
+          "task history lost who decided, when, or what they reviewed");
+
     const auto reconciling = Tasks(store).task(unknown);
     check(reconciling.pendingAction && reconciling.pendingAction->command.candidate &&
               reconciling.pendingAction->command.candidate->threadId == "candidate" && reconciling.task.state == TaskState::sending &&
               sessions.reconciles == 0,
           "reconciliation did not commit the canonical delivery intent");
-    Inbox(store).decideInbox(alice, pending(store, deadline), "extend", {{"deadline", due + 3600}});
-    check(Tasks(store).task(deadlineTask).task.deadline == due + 3600, "deadline extension did not resume the run");
-    Inbox(store).decideInbox(alice, pending(store, model_budget, "review"), "approve");
-    check(Tasks(store).task(model).task.state == TaskState::deciding &&
-              db.exec("SELECT count(*) FROM events e JOIN model_attempts a ON a.id=e.reserved_attempt WHERE a.task_id=" +
-                      std::to_string(model)) == 1,
-          "model approval did not reserve a call for the exact task event");
-    const auto turn = pending(store, conversation_model_budget);
-    Inbox(store).decideInbox(alice, turn, "approve");
-    rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, turn, "approve"); }, "turn approved twice");
-    check(Conversations(store).pausedConversations("review").empty(), "conversation model approval did not release the pause");
-    const auto decision = row(Inbox(store).decisionHistory(alice), "itemKind", "conversation_model_budget");
-    check(decision.at("requestTitle") == "Pause this conversation" && decision.at("decidedByYou") == true,
-          "a taskless conversation decision lost its source title or actor");
     secretRequests.requestSecret("review", {"after-restart"});
 }
 
@@ -564,9 +503,9 @@ int main() {
         reviewReply(directory.path / "review-reply.db");
         Store restarted(path);
         const auto history = Inbox(restarted).decisionHistory(alice);
-        const auto approval = row(history, "itemKind", "extra_run");
-        check(history.size() == 7 && approval.at("decidedAt").get<Id>() > 0 &&
-                  (approval.at("decidedBy") == "alice" || approval.at("decidedBy") == "bob") &&
+        const auto delivery = row(history, "itemKind", "unknown_delivery");
+        check(history.size() == 3 && delivery.at("decidedAt").get<Id>() > 0 &&
+                  (delivery.at("decidedBy") == "alice" || delivery.at("decidedBy") == "bob") &&
                   row(Inbox(restarted).inbox(alice), "itemKind", "protected_input").at("prompt") == "Supply a value for after-restart",
               "restart lost pending requests or recorded decisions");
     } catch (const std::exception& error) {

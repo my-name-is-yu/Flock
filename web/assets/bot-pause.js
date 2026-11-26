@@ -16,8 +16,8 @@ export function mountBotPause(dialog, save) {
     dialog.style.setProperty('--bot-accent', accentColor(bot));
     title.textContent = `${action} ${bot.name}?`;
     description.textContent = paused
-      ? 'Pausing stops open requests, refuses messages, and skips scheduled work until you resume this Bot.'
-      : 'This Bot will accept new messages and run future scheduled work.';
+      ? `${bot.name} stops its open requests, won’t take new messages, and skips its recurring requests until you resume it.`
+      : `${bot.name} will take new messages and run its recurring requests again.`;
     confirm.textContent = `${action} Bot`;
     feedback.textContent = '';
     confirm.onclick = async () => {

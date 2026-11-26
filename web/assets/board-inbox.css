@@ -86,7 +86,7 @@
 .decision-more { position: relative; }
 .decision-more > summary { list-style: none; cursor: pointer; }
 .decision-more > summary::-webkit-details-marker { display: none; }
-.decision-more[open] > summary { background: var(--selected); color: var(--text); }
+.decision-more[open] > summary, .decision-history[aria-pressed="true"] { background: var(--selected); color: var(--text); }
 .decision-more-list {
   position: absolute; z-index: 5; inset-block-start: calc(100% + .35rem); inset-inline-end: 0;
   display: grid; gap: .12rem; min-width: 11.5rem; padding: .3rem;

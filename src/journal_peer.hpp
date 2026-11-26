@@ -21,7 +21,6 @@ struct PeerResultReference {
 struct BotMessageEntry {
     std::string exchangeId, messageId, fromBotId, toBotId, messageType, requestKind, text;
     std::optional<std::string> replyTo;
-    std::optional<bool> chargesBudget;
     std::optional<ForwardedPeerMessage> forwarded;
     std::optional<std::string> status;
     std::vector<PeerResultReference> evidence;

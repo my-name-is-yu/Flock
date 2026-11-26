@@ -1,7 +1,3 @@
-export function continuationLabel(allowance, unit = 'step') {
-  return `Continue for ${allowance} more ${unit}${allowance === 1 ? '' : 's'}`;
-}
-
 export const actionLabels = {
   'bot.view': 'View Bot conversations',
   'bot.talk': 'Talk to Bots',
@@ -21,7 +17,6 @@ export const actionLabels = {
   'mcp.invoke': 'Call MCP tools',
   'mcp.read_resource': 'Read MCP resources',
   'environment.inspect': 'View T3 environments',
-  'environment.configure': 'Configure T3 environments',
   'environment.launch': 'Start work in T3',
   'shared_memory.read': 'Read shared memory',
   'shared_memory.write': 'Write to shared memory',

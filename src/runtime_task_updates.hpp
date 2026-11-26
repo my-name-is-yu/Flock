@@ -6,7 +6,6 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
-#include "flock/outbox.hpp"
 
 #include <optional>
 #include <string_view>
@@ -16,22 +15,19 @@ namespace flockv0 {
 class JournalStorage;
 class TaskEvents;
 class TaskRecords;
-class WaitStorage;
 
 class runtime::TaskUpdates {
 public:
-    TaskUpdates(Database& database, JournalStorage& journal, TaskEvents& events, TaskRecords& records, WaitStorage& waits)
-        : database(database), journal(journal), events(events), records(records), waits(waits) {}
+    TaskUpdates(Database& database, JournalStorage& journal, TaskEvents& events, TaskRecords& records)
+        : database(database), journal(journal), events(events), records(records) {}
 
     TaskData snapshot(Id id);
     void saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision = std::nullopt);
     void consumeEvent(TaskData& task);
     static bool checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task);
 
-    bool admitWork(TaskData&, const TaskDecision&, bool& charge);
     void establishCriteria(TaskData&, const Json& args);
     void recordDecision(const TaskData&, const Json& event, const TaskDecision&, std::string_view action);
-    static void refundUnsentWork(TaskData&, const Outbox&);
 
     bool changeTask(Id id, const auto& update, TaskData* saved = nullptr) {
         std::lock_guard lock(database.mutex);
@@ -60,6 +56,5 @@ private:
     JournalStorage& journal;
     TaskEvents& events;
     TaskRecords& records;
-    WaitStorage& waits;
 };
 }

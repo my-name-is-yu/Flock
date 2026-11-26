@@ -1,3 +1,4 @@
+import '/tooltip.js';
 import { actionLabel, actionLabels } from '/action-labels.mjs';
 import {
   browserNotificationsEnabled, listenForBrowserNotifications, notificationPermission, onNotificationPreferenceChange,
@@ -6,7 +7,9 @@ import {
 import {
   confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
+import { showAvatar } from '/avatars.js';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { quietSavedStatus } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -108,6 +111,7 @@ async function load() {
 }
 
 const navigation = settingsNavigation();
+quietSavedStatus(document.getElementById('status'));
 function showSection() {
   const active = navigation.get(location.hash.slice(1)) ?? navigation.get('appearance');
   const section = active.dataset.section;
@@ -159,9 +163,13 @@ async function loadBots() {
     const rows = document.createDocumentFragment();
     if (!bots.length) row(rows, rowLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
     for (const bot of bots) {
-      const item = row(rows, rowLabel(bot.name, bot.about || 'No role yet. Choose Edit to describe what it does.'));
+      const label = rowLabel(bot.name, ...(bot.about ? [bot.about] : []));
+      const face = element('span', '', 'avatar settings-bot-avatar');
+      showAvatar(face, bot);
+      const item = row(rows, face);
+      item.append(label);
       const actions = element('span', '', 'row-actions');
-      actions.append(link('Edit', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `Edit ${bot.name}`),
+      actions.append(link('Settings', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `${bot.name} settings`),
         link('Access', `/settings/${encodeURIComponent(bot.id)}`, `Access for ${bot.name}`));
       item.append(actions);
     }

@@ -202,7 +202,6 @@ void runSettingsChangesResyncConfiguredSchedules() {
     });
     createBot(home / "release", config, "Review releases", "");
     Bots bots(home);
-    check(bots.cards().at(0).at("modelCallLimit") == 20, "Bot settings did not show the default allowance");
     Store store(temp.path / "tasks.db");
     const auto start = utc(2026, 1, 1, 12, 0);
     const auto due = utc(2026, 1, 2, 0, 0);
@@ -246,18 +245,13 @@ void runSettingsChangesResyncConfiguredSchedules() {
         bots.updateRunSettings(store, "release", {{"model", " next-model "}, {"reasoningEffort", "ultra"}}, due + 1, report, catalog);
     check(model.at("model") == "next-model" && model.at("projectId") == "new-project",
           "model and effort save did not preserve the project");
-    const auto allowance = bots.updateRunSettings(store, "release", {{"modelCallLimit", 7}}, due + 1, report);
-    check(allowance.at("modelCallLimit") == 7 && allowance.at("model") == "next-model" && allowance.at("reasoningEffort") == "ultra" &&
-              allowance.at("projectId") == "new-project",
-          "saving the allowance changed the model, effort or destination");
     Automations(store).fireDueAutomations(due + 1);
     const auto tasks = TaskList(store).tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.environmentId == "new-environment" && tasks.at(0).task.projectId == "new-project" &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).targetTime == due,
           "workspace save lost the due time, kept the old route, or restored a canceled schedule");
     const auto settings = tasks.front().task.config;
-    check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt" && settings.at("reasoningEffort") == "ultra" &&
-              settings.at("modelCallLimit") == 7,
+    check(settings.at("model") == "next-model" && settings.at("modelProvider") == "chatgpt" && settings.at("reasoningEffort") == "ultra",
           "the scheduled task did not use the saved planner settings");
 
     const auto cleared = bots.updateRunSettings(store, "release", {{"model", ""}}, due + 1, report);
@@ -285,7 +279,6 @@ void automationFiringsUseCurrentPlannerSettings() {
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     auto original = botConfig("previous-model");
-    original["modelCallLimit"] = 9;
     createBot(folder, original, "", "");
     Bots bots(home);
     Store store(temp.path / "tasks.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
@@ -297,7 +290,6 @@ void automationFiringsUseCurrentPlannerSettings() {
     saved.projectId = "saved-project";
     saved.config["modelProvider"] = "saved-provider";
     saved.config["reasoningEffort"] = "high";
-    saved.config["runTimeoutSeconds"] = 135;
     const auto schedule = Automations(store).createAutomation(
         owner, saved, {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}}, firstDue - 60);
     const auto trigger = Automations(store).createAutomation(
@@ -311,8 +303,7 @@ void automationFiringsUseCurrentPlannerSettings() {
                            {{"model", "current-model"},
                             {"environmentId", "current-environment"},
                             {"projectId", "current-project"},
-                            {"reasoningEffort", "low"},
-                            {"modelCallLimit", 7}},
+                            {"reasoningEffort", "low"}},
                            firstDue, report);
 
     Automations(store).fireDueAutomations(nextDue);
@@ -327,7 +318,6 @@ void automationFiringsUseCurrentPlannerSettings() {
     auto currentConfig = saved.config;
     currentConfig["model"] = "current-model";
     currentConfig["modelProvider"] = "chatgpt";
-    currentConfig["modelCallLimit"] = 7;
     currentConfig["reasoningEffort"] = "low";
     const auto checkTask = [&](Id id, const Json& expected) {
         const auto task = Tasks(store).task(id).task;
@@ -338,7 +328,6 @@ void automationFiringsUseCurrentPlannerSettings() {
     checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(), currentConfig);
     auto previousConfig = currentConfig;
     previousConfig["model"] = "previous-model";
-    previousConfig["modelCallLimit"] = 9;
     previousConfig.erase("reasoningEffort");
     checkTask(previousTask, previousConfig);
 
@@ -350,7 +339,6 @@ void automationFiringsUseCurrentPlannerSettings() {
 
     write(folder / "config.json", botConfig("current-model").dump());
     const auto reset = Automations(store).receiveWebhook(owner, "deploy", "event-2", {{"branch", "main"}}, defaultDue);
-    currentConfig.erase("modelCallLimit");
     checkTask(reset.at("tasks").at(0).at("taskId").get<Id>(), currentConfig);
 
     const auto fallbackDue = utc(2026, 1, 5, 0, 0);

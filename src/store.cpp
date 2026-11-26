@@ -29,7 +29,6 @@
 #include "task_operations.hpp"
 #include "secret_storage.hpp"
 #include "peer_storage.hpp"
-#include "model_calls.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
 #include "session_stop.hpp"
@@ -204,8 +203,7 @@ Json ConversationIntake::receive(const Person& actor, const Intake& routing, std
 
 Conversations::Conversations(Store& store)
     : database_(Database::of(store)), context_(StoreAccess::get(store).conversationContextStorage),
-      memory_(StoreAccess::get(store).memoryStorage), modelCalls_(StoreAccess::get(store).modelCalls),
-      channels_(StoreAccess::get(store).channelStorage) {}
+      memory_(StoreAccess::get(store).memoryStorage), channels_(StoreAccess::get(store).channelStorage) {}
 
 Memory::Memory(Store& store) : database_(Database::of(store)), memory_(StoreAccess::get(store).memoryStorage) {}
 
@@ -257,15 +255,10 @@ Conversations::ConversationChanges Conversations::conversationChangesSince(std::
     ConversationChanges changes{newest.number(0), {}};
     if (!after || *after >= changes.through) return changes;
     auto rows = database_.query(R"SQL(
-SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
+SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered',
-                 'conversation_budget_approved')
-UNION
-SELECT j.conversation_bot_id,j.wait_message_id FROM journal j
-WHERE j.id>?1 AND j.id<=?2 AND j.kind='conversation_budget_approved'
-  AND (?3='' OR j.conversation_bot_id=?3)
+  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered')
 ORDER BY 1,2
 )SQL",
                                 {*after, changes.through, bot});
@@ -298,7 +291,7 @@ events(id,bot,kind) AS (
 SELECT j.id,b.bot,
        CASE WHEN j.conversation_route='error' THEN 'failure' ELSE 'reply' END
 FROM visible_bots b JOIN journal j ON j.conversation_bot_id=b.bot AND j.id>b.after
-WHERE j.kind='conversation_reply' AND j.conversation_route IS NOT 'model_budget'
+WHERE j.kind='conversation_reply'
 UNION ALL
 SELECT j.id,b.bot,'failure'
 FROM visible_bots b JOIN tasks t ON t.bot_id=b.bot JOIN journal j ON j.task_id=t.id AND j.id>b.after
@@ -376,7 +369,6 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     if (botLifecycle.botPaused(item.botId)) throw BotPaused{};
     const auto scrub = secretStorage.redactor(item.botId);
     scrub.requirePublic({item.botId, item.environmentId, item.projectId, item.config});
-    initialModelCallLimit(item.config);
     const auto request = scrub.text(item.request);
     TaskData task{.state = consultation ? TaskState::deciding : TaskState::queued,
                   .botId = item.botId,
@@ -386,7 +378,6 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
                   .projectId = item.projectId,
                   .doneWhen = {},
                   .createdAt = unixTime(),
-                  .allowance = {.remaining = WaitStorage::initialWorkAllowance},
                   .config = item.config};
     if (sourceMessageId) task.sourceMessageId = sourceMessageId;
     if (source) {
@@ -471,9 +462,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     }
     if (task.state != TaskState::waiting) throw DecisionUnavailable{};
     const auto reason = wait->reason();
-    const auto* verification = wait->verification();
-    const bool extendingVerificationDeadline = operation == "extend" && verification;
-    if (task.generation != generation && !extendingVerificationDeadline) throw RequestChanged{};
+    if (task.generation != generation) throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
     auto next = TaskState::deciding;
@@ -504,14 +493,6 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
             journalStorage.journal(id, entry);
         }
-    } else if (operation == "approve" && reason == WaitReason::budget) {
-        task.allowance.remaining += WaitStorage::initialWorkAllowance;
-        database.writeJournal(id, "budget_granted", {{"waitId", waitId}, {"remaining", task.allowance.remaining}});
-    } else if (operation == "approve" && reason == WaitReason::model_budget) {
-        const Id eventId = task.eventId;
-        const auto attempt = modelCalls.approveModelBudget(actor, modelCalls.taskModelBudget(id), "task_decision", 0, id, eventId);
-        database.exec("UPDATE events SET reserved_attempt=? WHERE id=? AND task_id=?", {attempt, eventId, id});
-        database.writeJournal(id, "model_budget_granted", {{"waitId", waitId}, {"attemptId", attempt}});
     } else if (operation == "retry" && (reason == WaitReason::model_failure || taskRouting.isUndispatchedNotesWait(task))) {
         if (reason == WaitReason::bot_notes_unavailable) next = TaskState::queued;
         if (const auto* failure = std::get_if<ModelFailureWait>(&wait->details);
@@ -520,19 +501,6 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
         task.feedback.reset();
         database.writeJournal(id, "model_retry", {{"waitId", waitId}});
-    } else if (operation == "extend" && reason == WaitReason::deadline) {
-        if (!data.contains("deadline") || !data["deadline"].is_number_integer() || data["deadline"].get<Seconds>() <= unixTime())
-            throw Conflict("The new deadline must be in the future");
-        const auto deadline = data.at("deadline").get<Seconds>();
-        if (verification) {
-            auto& run = destinationRun(task, verification->actionId);
-            if (!run.outstanding()) throw RequestChanged{};
-            run.deadline = deadline;
-        } else {
-            task.deadline = deadline;
-        }
-        next = TaskState::running;
-        database.writeJournal(id, "deadline_extended", {{"deadline", deadline}, {"waitId", waitId}});
     } else if (operation == "reconcile" &&
                (reason == WaitReason::unknown_delivery || reason == WaitReason::auth || reason == WaitReason::settings)) {
         if (data.contains("session")) {
@@ -610,7 +578,7 @@ WITH visible AS NOT MATERIALIZED (
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
          OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
-    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
+    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')

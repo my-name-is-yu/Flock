@@ -157,7 +157,9 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row .row-label { flex: 1 1 16rem; gap: .2rem; overflow-wrap: anywhere; }
 .settings-row .row-label strong { font-weight: 550; }
 .settings-row .row-label small { color: var(--text-2); line-height: 1.45; }
+.settings-row .row-label > small:only-child { color: var(--text); font-size: var(--text-sm); }
 .settings-row > :not(.row-label) { flex: none; }
+.settings-row .settings-bot-avatar { width: 2rem; height: 2rem; margin-inline-end: calc(.25rem - var(--space-4)); }
 .settings-row .secret-form { padding: 0; background: transparent; }
 .secret-form input { width: 14rem; max-width: 100%; }
 .machine-paths { margin: 0; padding-inline-start: 1rem; color: var(--text-2); font-size: var(--text-xs); }
@@ -209,7 +211,7 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .setting-state[data-state="checked"] { color: var(--success); }
 .setting-state[data-state="pending"] { color: var(--warning); }
 .setting-state[data-state="error"] { color: var(--danger); }
-.row-label .system-values { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.row-label .system-values { display: inline; }
 .system-values b { font-weight: 550; }
 .restart-notice .row-label strong { color: var(--warning); }
 

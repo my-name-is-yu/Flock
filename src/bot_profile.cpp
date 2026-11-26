@@ -1,7 +1,6 @@
 #include "flock/bot_profile.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/types.hpp"
-#include "flock/intake.hpp"
 #include "flock/json.hpp"
 
 #include <algorithm>
@@ -128,13 +127,6 @@ const Json& modelReasoningEfforts(const Json& catalog, std::string_view slug) {
 }
 
 Json validatedBotRunSetting(std::string_view key, const Json& value) {
-    if (key == "modelCallLimit") {
-        try {
-            return initialModelCallLimit({{"modelCallLimit", value}});
-        } catch (const Conflict& error) {
-            throw BotProfileError("invalid_model_call_limit", error.what());
-        }
-    }
     if (key == "reasoningEffort") {
         if (value.is_string()) {
             const auto& effort = value.get_ref<const std::string&>();

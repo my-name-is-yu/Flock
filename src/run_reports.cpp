@@ -1,4 +1,3 @@
-#include "wait_storage.hpp"
 #include "task_run_reports.hpp"
 #include "outbox_storage.hpp"
 #include "journal_storage.hpp"
@@ -133,12 +132,6 @@ bool TaskRunReports::recordDestinationReport(TaskData& task, DestinationRun& run
     run.retryAt.reset();
     run.stopRetryAt.reset();
     run.evidenceAttempts = 0;
-    const auto wait = waitStorage.currentWait(task.id);
-    const auto* deadline = wait ? wait->verification() : nullptr;
-    if (deadline && deadline->actionId == run.actionId) {
-        waitStorage.clearWait(task, "run_finished");
-        task.state = TaskState::running;
-    }
     auto priorReport = database.query("SELECT 1 FROM journal WHERE task_id=? AND kind='report'"
                                       " AND run_environment_id=? AND run_thread_id=? AND run_id=? AND revision_id IS ? LIMIT 1",
                                       {task.id, run.environmentId, ref.threadId, ref.runId, revision});

@@ -144,20 +144,19 @@ std::string_view verdictError(const Decision& decision, const std::vector<std::s
 ModelInput modelInput(const Recording& recording, std::string_view commit, std::string_view slug, std::string_view mode) {
     const auto criterion =
         "At commit " + std::string(commit) + ", measure peak RSS for the build with updates enabled and report the numeric result.";
-    ModelInput input{
-        {{"id", 1}, {"botId", "memory"}, {"request", criterion}, {"doneWhen", criterion}, {"remaining", 3}, {"additionalUsed", 0}},
-        recording.event,
-        Json::array(),
-        {"Validate the measured commit, setting and numeric RSS with evidence. "
-         "The generic final report alone cannot establish the criteria. "
-         "Use a supplied build-output item as evidence. If it has not been supplied and session_read is available, "
-         "read that item using the threadId, runId, itemId and view in buildOutput. "
-         "If evidence remains insufficient, follow up for the missing evidence.",
-         "buildOutput identifies the terminal activity for the measurement."},
-        {"follow_up", "complete", "ask_user"},
-        "",
-        Json::array(),
-        {{"modelProvider", "chatgpt"}, {"model", slug}}};
+    ModelInput input{{{"id", 1}, {"botId", "memory"}, {"request", criterion}, {"doneWhen", criterion}},
+                     recording.event,
+                     Json::array(),
+                     {"Validate the measured commit, setting and numeric RSS with evidence. "
+                      "The generic final report alone cannot establish the criteria. "
+                      "Use a supplied build-output item as evidence. If it has not been supplied and session_read is available, "
+                      "read that item using the threadId, runId, itemId and view in buildOutput. "
+                      "If evidence remains insufficient, follow up for the missing evidence.",
+                      "buildOutput identifies the terminal activity for the measurement."},
+                     {"follow_up", "complete", "ask_user"},
+                     "",
+                     Json::array(),
+                     {{"modelProvider", "chatgpt"}, {"model", slug}}};
     input.event["buildOutput"] = locator(recording.location);
     if (mode == "on_demand") {
         input.event["sessionReadViews"] = Json::array({"messages", "activity"});

@@ -179,10 +179,10 @@ private:
             return std::nullopt;
         }
         const auto origin = store_.policyApprovals.policyOrigin(message_);
-        const auto budget = store_.modelCalls.messageModelBudget(message_.id);
+        const auto scope = store_.modelCalls.messageModelScope(message_.id);
         std::vector<std::size_t> reserved;
         for (const auto& [slot, provider] : eligible) {
-            if (isBotTool(calls_[slot].tool) && !reserveBotCall(slot, provider, origin, budget)) continue;
+            if (isBotTool(calls_[slot].tool) && !reserveBotCall(slot, provider, origin, scope)) continue;
             if (!storeRead(slot)) saveSlot(slot, {{"inFlight", true}});
             reserved.push_back(slot);
         }
@@ -190,7 +190,7 @@ private:
         return reserved;
     }
 
-    bool reserveBotCall(std::size_t slot, ProviderState provider, const PolicyOrigin& origin, const ModelBudget& budget) {
+    bool reserveBotCall(std::size_t slot, ProviderState provider, const PolicyOrigin& origin, std::string_view scope) {
         const auto& call = calls_[slot];
         auto resource = store_.authorizedBotToolScope(tools_.bot, call);
         if (!resource) {
@@ -216,11 +216,7 @@ private:
             saveSlot(slot, toolFailure(approvalError(gate)));
             return false;
         }
-        if (!store_.modelCalls.takeReservedConversationCall(message_.id) &&
-            !store_.modelCalls.reserveModelCall(budget, "bot_tool", message_.id, 0, 0)) {
-            blocked_[slot] = true;
-            return false;
-        }
+        store_.modelCalls.recordBotTool(scope, message_.id);
         store_.policyApprovals.approveAction(origin, *resource, key, payload, now);
         return true;
     }
@@ -351,8 +347,6 @@ private:
             store_.database.exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=?"
                                  " AND EXISTS (SELECT 1 FROM policy_approvals WHERE turn=? AND status='pending')",
                                  {message_.id, message_.id});
-        } else {
-            store_.modelCalls.pauseTurn(message_);
         }
         transaction.commit();
         return complete;

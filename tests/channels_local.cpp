@@ -164,7 +164,7 @@ struct RecordedTransport final : ChannelTransport {
 };
 
 Intake intake(std::string_view bot, std::string_view text) {
-    return {std::string(bot), std::string(text), "env", "project", {{"modelCallLimit", 20}}};
+    return {std::string(bot), std::string(text), "env", "project"};
 }
 
 void shareBot(Store& store, std::string_view bot) {
@@ -934,7 +934,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return Decision{"list_connections", Json::object(), {}};
-        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId", "env"}, {"runTimeoutSeconds", 1800}}});
+        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId", "env"}}});
         return reply("Chat is available");
     };
     ConversationIntake(store).receive(localOwner, intake("release", ""), std::to_string(++count), "List reusable environments");

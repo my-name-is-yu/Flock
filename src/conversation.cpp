@@ -120,7 +120,6 @@ Id ConversationStorage::enqueueConversation(const Person& actor, const Intake& r
                                             const ConversationInvitationEntry* invitation) {
     if (botLifecycle.botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
-    initialModelCallLimit(routing.config);
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
     const auto scrub = secretStorage.redactor(routing.botId);
     if (origin) {

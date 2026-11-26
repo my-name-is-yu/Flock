@@ -67,12 +67,6 @@ function readFileAsBase64(file) {
   });
 }
 
-function colorNameFor(hex) {
-  const normalized = String(hex ?? '').toLowerCase();
-  const match = AVATAR_COLORS.find(([, value]) => value.toLowerCase() === normalized);
-  return match ? match[0] : normalized.toUpperCase();
-}
-
 const EASE_OUT_EXPO = 'cubic-bezier(0.23, 1, 0.32, 1)';
 const EASE_SPRING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 const reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -106,12 +100,12 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     <section class="studio-start" id="studio-start" hidden>
       <header class="studio-head">
         <h2 id="studio-start-title">New Bot</h2>
-        <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
+        <button type="button" class="icon-button studio-close" data-close aria-label="Close" data-tooltip="Close" data-shortcut="Esc">${uiIcon('close')}</button>
       </header>
       <div class="studio-start-list">
         <button type="button" class="studio-start-option" data-preset="custom">
           <span class="studio-start-icon">${uiIcon('plus')}</span>
-          <span class="studio-start-copy"><strong>Start from scratch</strong><small>Choose a name and look now, write its instructions later</small></span>
+          <span class="studio-start-copy"><strong>Start from scratch</strong><small>Pick a name and look now, describe its role later</small></span>
           ${uiIcon('chevron-right')}
         </button>
       </div>
@@ -124,14 +118,14 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         <div class="studio-hero-avatar" id="studio-hero-avatar"></div>
         <div class="studio-name">
           <input class="studio-name-input" id="studio-bot-name" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Bot name" aria-label="Name">
-          <button type="button" id="studio-random-name" class="icon-button studio-name-random" aria-label="Random name" title="Random name">${uiIcon('dice')}</button>
+          <button type="button" id="studio-random-name" class="icon-button studio-name-random" aria-label="Random name" data-tooltip="Random name">${uiIcon('dice')}</button>
         </div>
       </div>
 
       <div class="studio-panel">
         <header class="studio-head">
           <h2 id="studio-title">New Bot</h2>
-          <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
+          <button type="button" class="icon-button studio-close" data-close aria-label="Close" data-tooltip="Close" data-shortcut="Esc">${uiIcon('close')}</button>
         </header>
 
         <div class="studio-bar">
@@ -140,7 +134,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
             <button type="button" data-kind="icon" data-label="Icons" aria-pressed="false">Icons</button>
             <button type="button" data-kind="upload" data-label="Upload" aria-pressed="false">Upload</button>
           </div>
-          <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" title="Shuffle appearance">${uiIcon('shuffle')}</button>
+          <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" data-tooltip="Shuffle appearance">${uiIcon('shuffle')}</button>
         </div>
 
         <div class="studio-gallery" id="studio-gallery" role="group" aria-label="Avatar choices"></div>
@@ -157,7 +151,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         </div>
 
         <div class="studio-colors-field" id="studio-color-field">
-          <div class="studio-label"><span id="studio-color-label">Color</span><span id="studio-color-name"></span></div>
+          <div class="studio-label"><span id="studio-color-label">Color</span></div>
           <div id="studio-colors" class="studio-palette" role="group" aria-labelledby="studio-color-label"></div>
         </div>
 
@@ -190,7 +184,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     removeUpload: el('studio-remove-upload'),
     uploadError: el('studio-upload-error'),
     colorField: el('studio-color-field'),
-    colorName: el('studio-color-name'),
     colors: el('studio-colors'),
     submitError: el('studio-submit-error'),
     cancel: el('studio-cancel'),
@@ -211,7 +204,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     swatch.type = 'button';
     swatch.className = 'studio-swatch';
     swatch.dataset.color = hex;
-    swatch.title = label;
+    swatch.dataset.tooltip = label;
     swatch.setAttribute('aria-label', label);
     swatch.style.setProperty('--swatch', hex);
     els.colors.append(swatch);
@@ -377,17 +370,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     });
   }
 
-  function animateColorName() {
-    runAnimation(
-      els.colorName,
-      [
-        { opacity: 0.35, transform: 'translateY(2px)' },
-        { opacity: 1, transform: 'none' },
-      ],
-      { duration: 160, easing: EASE_OUT_EXPO },
-    );
-  }
-
   function saveLabel() {
     if (saving) return mode === 'edit' ? 'Saving…' : 'Creating…';
     return mode === 'edit' ? 'Save' : 'Create';
@@ -449,7 +431,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           btn.type = 'button';
           btn.className = 'studio-choice';
           btn.dataset.value = value;
-          btn.title = label;
+          btn.dataset.tooltip = label;
           btn.setAttribute('aria-label', label);
           const mini = document.createElement('span');
           mini.className = 'studio-mini';
@@ -517,7 +499,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       const selected = swatch.dataset.color.toLowerCase() === activeHex;
       swatch.setAttribute('aria-pressed', String(selected));
     }
-    els.colorName.textContent = colorNameFor(state.color);
     els.colorField.hidden = state.kind === 'upload';
     els.uploadPanel.hidden = state.kind !== 'upload';
     els.shuffle.disabled = state.kind === 'upload';
@@ -745,13 +726,11 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   els.colors.addEventListener('click', (event) => {
     const swatch = event.target.closest('button[data-color]');
     if (!swatch) return;
-    const changed = state.color.toLowerCase() !== swatch.dataset.color.toLowerCase();
     state.color = swatch.dataset.color;
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
     popHeroAvatar();
-    if (changed) animateColorName();
   });
   els.colors.addEventListener('keydown', (event) => arrowNavigate(els.colors, 'button[data-color]', event));
 
@@ -769,7 +748,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     renderAppearance();
     animateShuffleIcon();
     popHeroAvatar();
-    animateColorName();
   });
 
   els.photo.addEventListener('change', (event) => {

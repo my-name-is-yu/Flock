@@ -4,7 +4,6 @@ const preference = 'flock-notifications';
 const summaries = {
   user_question: 'Has a question for you.',
   policy_approval: 'Needs your approval.',
-  conversation_model_budget: 'Needs your approval.',
   pr_review: 'Has a pull request for you to review.',
   reply: 'Replied in the conversation.',
   failure: 'Something went wrong.',

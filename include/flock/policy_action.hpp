@@ -24,7 +24,6 @@ enum class Action {
     mcp_invoke,
     mcp_read_resource,
     environment_inspect,
-    environment_configure,
     environment_launch,
     shared_memory_read,
     shared_memory_write,
