@@ -1010,6 +1010,10 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     const InboxTarget turnTarget{"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause};
     check(task.wait->reason() == WaitReason::model_budget && Conversations(store).pausedConversations("beta").size() == 1,
           "The fixture did not exhaust the shared and independent allowances");
+    const auto pending = Inbox(store).inbox(localOwner, "alpha");
+    check(Conversations(store).pausedConversations("alpha").at(0).at("sharedWaitIds") == Json::array({task.wait->id}) &&
+              pending.size() == 1 && pending.at(0).at("itemKind") == "conversation_model_budget",
+          "One exhausted allowance asked twice for the same approval");
     const auto beforeApproval = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     if (approveTask)
         TaskControl(store).operate(localOwner, taskTarget, "approve");

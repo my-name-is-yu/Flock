@@ -170,6 +170,17 @@ Id ModelCalls::approveModelBudget(const Person& actor, const ModelBudget& budget
     return attempt;
 }
 
+std::vector<Id> ModelCalls::sharedModelBudgetWaits(std::string_view budget) const {
+    std::vector<Id> waits;
+    auto rows = database.query(R"SQL(
+SELECT w.id,w.task_id FROM waits w CROSS JOIN tasks t ON t.id=w.task_id
+WHERE w.resolution IS NULL AND w.reason='model_budget' AND t.state='waiting'
+)SQL");
+    while (rows.next())
+        if (taskModelBudget(rows.number(1)).id == budget) waits.push_back(rows.number(0));
+    return waits;
+}
+
 void ModelCalls::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
     if (!database.query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit", {budget}).next()) return;
     const auto& policy = permissions;
@@ -319,7 +330,10 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? O
     while (rows.next()) {
         auto turn = rows.json(0);
         turn["text"] = modelBudgetPauseText(rows.string(2));
-        turn["allowance"] = modelCalls_.messageModelBudget(rows.number(1)).initialLimit;
+        const auto budget = modelCalls_.messageModelBudget(rows.number(1));
+        turn["allowance"] = budget.initialLimit;
+        // Approving this pause also resumes these task waits, so people only need to see one.
+        turn["sharedWaitIds"] = modelCalls_.sharedModelBudgetWaits(budget.id);
         result.push_back(std::move(turn));
     }
     return result;
