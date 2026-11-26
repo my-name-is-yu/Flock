@@ -56,7 +56,10 @@ async function exercise(createRecurringRequests) {
   const [, configuredWhen, advancedWhen] = list.querySelectorAll('.cron-when');
   const reminderWhen = list.querySelector('.cron-when');
   check(count.data === '3', 'the count omitted an older page');
-  check(reminderWhen.textContent.includes(reminderTime) && reminderWhen.textContent.includes(reminderZone),
+  const reminderZoneName = new Intl.DateTimeFormat('en', { timeZone: reminderZone, timeZoneName: 'longGeneric' })
+    .formatToParts(new Date()).find((part) => part.type === 'timeZoneName').value;
+  check(reminderWhen.textContent.includes(reminderTime) && reminderWhen.textContent.includes(reminderZoneName) &&
+    !reminderWhen.textContent.includes(reminderZone),
     'the reminder was formatted in the wrong zone');
   check(configuredWhen.textContent === 'Every Sunday at 09:05', 'the weekly expression was described incorrectly');
   check(advancedWhen.textContent.startsWith('Runs next on ') && !advancedWhen.textContent.includes(advanced.cron),
