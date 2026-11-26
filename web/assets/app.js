@@ -224,14 +224,6 @@ function waitText(wait, { spokenByBot = false } = {}) {
   if (wait.reason === 'policy_approval') return fallback;
   return wait.text || fallback || 'Refresh the pending request.';
 }
-// Links in a message open beside Flock instead of replacing the conversation.
-function setMessageHtml(element, html) {
-  element.innerHTML = html;
-  for (const link of element.querySelectorAll('a[href]')) {
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-  }
-}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -1161,6 +1153,14 @@ function icon(name, className = 'glyph') {
   host.setAttribute('aria-hidden', 'true');
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
   return host;
+}
+// Links in a message open beside Flock instead of replacing the conversation.
+function setMessageHtml(element, html) {
+  element.innerHTML = html;
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
 }
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
