@@ -1,3 +1,4 @@
+#include "flock/secret_requests.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/policy.hpp"
 #include "task_routing.hpp"
@@ -98,7 +99,7 @@ Json BotSettingsStorage::botSettingsTool(std::string_view bot, const Person& act
             if (!policy.allows(bot, Action::secret_use, ref.name)) throw AccessDenied("Protected input unavailable");
             return {{"status", "available"}};
         }
-        const auto id = policy.requestSecret(bot, ref, sourceMessage);
+        const auto id = secretRequests.requestSecret(bot, ref, sourceMessage);
         return {{"requestId", id}, {"status", "pending"}, {"settingsLink", "/settings/" + std::string(bot) + "#secrets"}};
     }
     if (tool == "list_connections") {

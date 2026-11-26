@@ -5,7 +5,7 @@
 #include "flock/tasks.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/runtime.hpp"
 #include "flock/store.hpp"
 #include "flock/task.hpp"
@@ -22,9 +22,9 @@ namespace flockv0::http_test {
 void boardInboxEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner", true};
-    Policy policy{store};
-    policy.setMember(owner, "release", "reviewer", true);
-    policy.setMember(owner, "release", "reader", true);
+    BotAccess access{store};
+    access.setMember(owner, "release", "reviewer", true);
+    access.setMember(owner, "release", "reader", true);
     const auto release = TaskIntake(store).submit({"release", "Draft notes", "local-env", "release"});
     TaskIntake(store).submit({"triage", "Private request", "linked env", "triage"});
     FixedModel model;
@@ -85,7 +85,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
               source.back().at("kind") == "waiting" && source.back().at("data").at("text") == inbox.at(0).at("prompt"),
           "view-only reader could not load the older question with its surrounding history");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage" + cursor), 403);
-    policy.setMember(owner, "release", "reader", false);
+    access.setMember(owner, "release", "reader", false);
     check(browser.post("/api/inbox/decide", answer, 403).at("error") == "access_denied" && taskJson(Tasks(store).task(release)) == before &&
               TaskHistory(store).history(release) == history,
           "denied Inbox decision advanced the request");

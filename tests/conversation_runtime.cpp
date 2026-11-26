@@ -14,7 +14,10 @@
 #include "flock/store_options.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/limits.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/participation.hpp"
@@ -31,6 +34,7 @@
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
 #include "flock/session_ref.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -2362,7 +2366,7 @@ void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus
               destinationRunFor(restarted, "cloud").at("status") == "running" &&
               destinationRunFor(restarted, "other").at("status") == "running",
           "the stoppable follow-up was not restored after restart");
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
 
     constexpr auto stopRequest = "Stop only the cloud follow-up";
     f.script(stopRequest, {[id](const ModelInput& input) {
@@ -2621,7 +2625,7 @@ void lateSavedDestinationReceiptKeepsTaskAndSlot() {
     f.advanceConcurrentlyUntil([&] { return !f.response(queuedReceipt).is_null(); },
                                "the queued follow-up receipt was not durably acknowledged before stopping its predecessor");
 
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
     constexpr auto stopRequest = "Stop only the delayed linked follow-up";
     f.script(stopRequest, {[taskId](const ModelInput& input) {
                  const auto task = listed(input, taskId);
@@ -2749,8 +2753,8 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
     const auto task = twoLinkedDestinationTask(f);
     constexpr auto secret = "synthetic-report-secret";
     const auto secretRef = SecretRef{"report-secret"};
-    Policy policy{*f.store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", secretRef), secret);
+    SecretRequests secretRequests{*f.store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", secretRef), secret);
     f.t3.finish("run-1", std::string("Measured latency with ") + secret + " and found a stable result.");
     f.advanceUntil([&] { return !lastTaskEvent(*f.store, task, "report").is_null(); }, "the first destination report was not recorded");
     const auto reportEvent = lastTaskEvent(*f.store, task, "report");
@@ -2779,7 +2783,7 @@ void destinationFollowupValidatesAndRedactsSourceReport() {
           "a report from another revision reached a destination Session");
     reviseReportReference(f, reportId, revision);
 
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
     constexpr auto followupText = "Continue using the valid report";
     f.script(followupText, {sendDestinationWithSource(task, reportId, "other", "other-project", followupText)});
     f.receive("valid-source-report", followupText);
@@ -2860,7 +2864,7 @@ void ordinarySessionApprovalKeepsItsPayload() {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.sessions[{"desktop", "session-approved"}] = {"Existing Session",     "Project", "project", "running", "2026-11-25T00:00:00Z",
                                                       "2026-11-25T00:00:00Z", {},        false};
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
     const Json args{{"environmentId", "desktop"}, {"threadId", "session-approved"}, {"text", "Share the result"}};
     f.script("Send the result", {[&](const ModelInput&) { return Decision{"message_session", args, "Send the approved message"}; }});
     f.receive("approved-session-message", "Send the result");
@@ -2955,7 +2959,7 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
     if (closeRoute == "session_access") {
         receipt = f.enqueue("prepared-session-send", "Send a follow-up before access closes");
     } else if (closeRoute == "access") {
-        Policy{*f.store}.setMember(localOwner, "alpha", accessMember.id, true);
+        BotAccess{*f.store}.setMember(localOwner, "alpha", accessMember.id, true);
         Store writer(f.dir / "state.db");
         receipt =
             ConversationIntake(writer).receive(accessMember, f.routing(), "prepared-session-send", "Send a follow-up before access closes");
@@ -2966,7 +2970,7 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
             }
             ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
         };
-        Policy{*f.store}.setMember(localOwner, "alpha", accessMember.id, true);
+        BotAccess{*f.store}.setMember(localOwner, "alpha", accessMember.id, true);
         Channels(*f.store).connectChannel(
             {ChannelKind::slack, channelCapabilities(ChannelKind::slack),
              [](std::string_view credential, std::string_view workspace) {
@@ -3022,7 +3026,7 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
         check(sqlite3_step(statement) == SQLITE_DONE, "could not persist the active Session participation fixture");
         sqlite3_finalize(statement);
     } else if (closeRoute == "access") {
-        Policy{*f.store}.setMember(localOwner, "alpha", accessMember.id, false);
+        BotAccess{*f.store}.setMember(localOwner, "alpha", accessMember.id, false);
     }
 
     f.restart();
@@ -3102,7 +3106,7 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
         const auto queuedId = oneLinkedDestinationTask(f, "receipt-sibling", "Queue behind linked work");
 
         const Person member{"receipt-member", false};
-        Policy{*f.store}.setMember(localOwner, "alpha", member.id, true);
+        BotAccess{*f.store}.setMember(localOwner, "alpha", member.id, true);
         sqlite3* writer = nullptr;
         check(sqlite3_open((f.dir / "state.db").c_str(), &writer) == SQLITE_OK, "could not open the receipt fixture database");
         const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> writerGuard(writer, sqlite3_close);
@@ -3227,8 +3231,9 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     f.t3.loseSendForEnvironment = "cloud";
     const Person taskRequester{"task-requester"}, stopRequester{"stop-requester"};
-    Policy{*f.store}.setMember(localOwner, "alpha", taskRequester.id, true);
-    Policy{*f.store}.setMember(localOwner, "alpha", stopRequester.id, true);
+    BotAccess botAccess{*f.store};
+    botAccess.setMember(localOwner, "alpha", taskRequester.id, true);
+    botAccess.setMember(localOwner, "alpha", stopRequester.id, true);
     f.t3.deliveryVisible = false;
     constexpr auto startText = "Start work whose Run receipt is delayed";
     auto route = f.routing(startText);
@@ -3247,7 +3252,7 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
         "the original destination did not enter its unknown-receipt state");
     const auto action = destinationRunFor(f.task(taskId), "cloud").at("actionId").get<std::string>();
     const auto actualRun = f.t3.deliveries.at(action);
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
 
     constexpr auto stopText = "Stop the Run whose receipt is delayed";
     f.script(stopText, {[taskId](const ModelInput& input) {
@@ -3304,8 +3309,8 @@ void recoveredDestinationStopHonorsPolicy() {
         check(unknown.value("threadId", "").empty() && unknown.value("runId", "").empty(),
               ("the fixture did not preserve a started destination with unknown receipt IDs: " + unknown.dump()).c_str());
         const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
-        Policy{*f.store}.changeRule(localOwner, RuleKind::never, Action::t3_send, Resource::sessionRead("cloud", actualRun.threadId).target,
-                                    true);
+        PolicyRules{*f.store}.changeRule(localOwner, RuleKind::never, Action::t3_send,
+                                         Resource::sessionRead("cloud", actualRun.threadId).target, true);
         stopDestinationByName(f, id, "deny-recovered-stop", "Stop the uncertain cloud destination");
         for (int i = 0; i < 6; ++i) {
             f.now += 5;
@@ -3326,7 +3331,7 @@ void recoveredDestinationStopHonorsPolicy() {
         check(unknown.value("threadId", "").empty() && unknown.value("runId", "").empty(),
               ("the approval fixture did not start with unknown Run IDs: " + unknown.dump()).c_str());
         const auto actualRun = f.t3.deliveries.at(unknown.at("actionId").get<std::string>());
-        Policy{*f.store}.setMode(localOwner, "supervised");
+        PolicyRules{*f.store}.setMode(localOwner, "supervised");
         stopDestinationByName(f, id, "approve-recovered-stop", "Stop the uncertain cloud destination");
         f.now += 5;
         f.tick();
@@ -3402,7 +3407,7 @@ void setOutboxPhase(Fixture& f, std::string_view actionId, std::string_view phas
 
 void startedRunOutboxApprovalIsStale() {
     Fixture f;
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
     oneLinkedDestinationTask(f, "stale-outbox-approval", "Wait for linked launch approval");
     f.advanceUntil([&] { return !Inbox(*f.store).inbox(localOwner).empty(); }, "the linked launch did not request approval");
     const auto cards = Inbox(*f.store).inbox(localOwner);
@@ -3456,7 +3461,8 @@ void queuedDestinationStopsReleaseSlots() {
     }
     {
         Fixture f;
-        Policy{*f.store}.setMode(localOwner, "supervised");
+        PolicyRules policyRules{*f.store};
+        policyRules.setMode(localOwner, "supervised");
         const auto destination = oneLinkedDestinationTask(f, "approval-stop", "Wait for linked launch approval");
         f.advanceUntil([&] { return !Inbox(*f.store).inbox(localOwner).empty(); }, "the linked launch did not request approval");
         const auto cards = Inbox(*f.store).inbox(localOwner);
@@ -3469,7 +3475,7 @@ void queuedDestinationStopsReleaseSlots() {
         check(f.t3.sent.empty() && destinationResult(f.task(destination), "cloud").at("status") == "cancelled" &&
                   latestApprovalStatus(f) == "stale" && Inbox(*f.store).inbox(localOwner).empty(),
               "cancelling a pending launch did not settle its approval locally");
-        Policy{*f.store}.setMode(localOwner, "full");
+        policyRules.setMode(localOwner, "full");
         f.advanceUntil([&] { return f.t3.sent.size() == 1; }, "the follower did not acquire the slot after pending-approval cancellation");
         check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find("Run after approval") != std::string::npos,
               "the cancelled pending launch held its slot or launched after settlement");
@@ -3907,8 +3913,8 @@ void authoritativeHandoffFitsBeforeMemory() {
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
     while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
     Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
-    Policy policy{*f.store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture-key"}), protectedValue);
+    SecretRequests secretRequests{*f.store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture-key"}), protectedValue);
     const auto id = TaskIntake(*f.store).submit(f.routing());
     f.reach(id, "running");
     const auto checkMemory = [&](const Command& command, std::size_t sectionBudget) {
@@ -4193,7 +4199,7 @@ void existingAutomationUsesLiveMemorySharing() {
     RuntimeOptions options{[&] { return f.now; }};
     options.intake = [&](std::string_view, std::string_view) { return f.routing(); };
     f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
+    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
 
     f.now = schedule.at("nextRunAt");
     Automations(*f.store).fireDueAutomations(f.now);
@@ -4221,7 +4227,7 @@ void privateMemoryStaysInFlockByDefault() {
         return f.routing();
     };
     f.runtime.reset();
-    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, Runtime::SoulLoader{}, options);
+    f.runtime = std::make_unique<Runtime>(*f.store, f.model, f.t3, SoulLoader{}, options);
     routing.config["shareMemoryWithSessions"] = true;
     f.reach(TaskIntake(*f.store).submit(routing), "running");
     check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("Private convention") == std::string::npos,

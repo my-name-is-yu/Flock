@@ -15,7 +15,7 @@
 #include "flock/outbox.hpp"
 #include "bot_settings_storage.hpp"
 #include "database.hpp"
-#include "flock/policy.hpp"
+#include "flock/policy_action.hpp"
 #include "policy_approvals.hpp"
 #include "task_records.hpp"
 #include "task_routing.hpp"

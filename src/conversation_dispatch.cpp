@@ -1,3 +1,4 @@
+#include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "conversation_call.hpp"
 #include "wait_storage.hpp"
@@ -181,8 +182,8 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             constexpr int maxCreationAttempts = 4;
             auto retries = database.query("SELECT failures FROM conversation_retries WHERE message_id=?", {id});
             const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
-            const auto changeId = permissions.applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
-                                                             exhausted ? &ctx.reconcileBotCreation : nullptr);
+            const auto changeId = botAccess.applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
+                                                           exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(database.db);
             policyApprovals.consumePolicyApproval(key);
             conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));

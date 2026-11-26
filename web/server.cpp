@@ -30,6 +30,7 @@
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
 #include "flock/store.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
@@ -254,7 +255,7 @@ public:
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake) throw std::invalid_argument("Invalid Flock Web listener settings");
         if (callbacks_.authenticate && !callbacks_.identityRequired) {
-            Policy{store_}.requireWebIdentity();
+            PolicyRules{store_}.requireWebIdentity();
             WebIdentity(store_).setWebIdentityResolver(callbacks_.resolveIdentity);
         }
         GitEvents(store_).protectGitCredential(callbacks_.githubWebhookSecret);

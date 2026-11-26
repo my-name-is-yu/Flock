@@ -5,11 +5,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace flockv0::markdown {
 namespace {
@@ -253,6 +255,303 @@ std::string link(cmark_node* node, Target target, unsigned depth) {
     return label + "（" + destination + "）";
 }
 
+std::string decodeTextFragment(std::string_view fragment) {
+    if (fragment.find_first_of("&\\") == fragment.npos) return std::string(fragment);
+    std::string markdown = "[x](<x";
+    bool escaped = false;
+    for (const char ch : fragment) {
+        if ((ch == '<' || ch == '>') && !escaped) markdown += '\\';
+        markdown += ch;
+        escaped = ch == '\\' && !escaped;
+    }
+    markdown += "x>)";
+    std::unique_ptr<cmark_node, decltype(&cmark_node_free)> root(cmark_parse_document(markdown.data(), markdown.size(), CMARK_OPT_DEFAULT),
+                                                                 cmark_node_free);
+    auto* paragraph = root ? cmark_node_first_child(root.get()) : nullptr;
+    auto* link = paragraph ? cmark_node_first_child(paragraph) : nullptr;
+    if (!link || cmark_node_get_type(link) != CMARK_NODE_LINK) return std::string(fragment);
+    const auto destination = value(cmark_node_get_url(link));
+    if (destination.size() < 2 || !destination.starts_with('x') || !destination.ends_with('x')) return std::string(fragment);
+    return destination.substr(1, destination.size() - 2);
+}
+
+enum class BareUrlInput { source, text };
+
+bool endsInCharacterReference(std::string_view url) {
+    if (!url.ends_with(';')) return false;
+    const auto ampersand = url.rfind('&');
+    if (ampersand == url.npos) return false;
+    const auto reference = url.substr(ampersand);
+    return decodeTextFragment(reference) != reference;
+}
+
+std::string_view bareUrlAt(std::string_view text, BareUrlInput input) {
+    if (!text.starts_with("http://") && !text.starts_with("https://")) return {};
+    auto end =
+        std::ranges::find_if(text, [](unsigned char ch) { return std::isspace(ch) || ch == '<' || ch == '>' || ch == '"' || ch == '`'; });
+    auto url = text.substr(0, static_cast<std::size_t>(end - text.begin()));
+    auto extraParentheses = std::ranges::count(url, ')') - std::ranges::count(url, '(');
+    auto extraBrackets = std::ranges::count(url, ']') - std::ranges::count(url, '[');
+    while (!url.empty() && (input != BareUrlInput::source || !endsInCharacterReference(url))) {
+        if (std::string_view(".,;:!?'").find(url.back()) != std::string_view::npos) {
+            url.remove_suffix(1);
+        } else if (url.back() == ')' && extraParentheses > 0) {
+            url.remove_suffix(1);
+            --extraParentheses;
+        } else if (url.back() == ']' && extraBrackets > 0) {
+            url.remove_suffix(1);
+            --extraBrackets;
+        } else {
+            static constexpr std::string_view closingPunctuation[] = {"。", "、", "，", "．", "！", "？", "）",
+                                                                      "］", "」", "』", "”",  "’",  "】"};
+            const auto suffix = std::ranges::find_if(closingPunctuation, [&](auto mark) { return url.ends_with(mark); });
+            if (suffix == std::end(closingPunctuation)) break;
+            url.remove_suffix(suffix->size());
+        }
+    }
+    return safeUrl(url) ? url : std::string_view{};
+}
+
+std::vector<std::string_view> bareUrls(std::string_view text, std::size_t startColumn, std::size_t endColumn, BareUrlInput input) {
+    std::vector<std::string_view> urls;
+    for (auto start = text.find("http", startColumn); start < endColumn; start = text.find("http", start + 1)) {
+        if (!urls.empty() && text.data() + start < urls.back().data() + urls.back().size()) continue;
+        if (start > 0 && (std::isalnum(static_cast<unsigned char>(text[start - 1])) || text[start - 1] == '/')) continue;
+        if (const auto url = bareUrlAt(text.substr(start), input); !url.empty()) urls.push_back(url);
+    }
+    return urls;
+}
+
+cmark_node* bareLink(const std::string& destination) {
+    auto* link = cmark_node_new(CMARK_NODE_LINK);
+    auto* label = cmark_node_new(CMARK_NODE_TEXT);
+    cmark_node_set_url(link, destination.c_str());
+    cmark_node_set_literal(label, destination.c_str());
+    cmark_node_append_child(link, label);
+    return link;
+}
+
+void promoteTextLinks(cmark_node* node) {
+    const auto text = value(cmark_node_get_literal(node));
+    const auto urls = bareUrls(text, 0, text.size(), BareUrlInput::text);
+    if (urls.empty()) return;
+    std::size_t offset = 0;
+    for (const auto url : urls) {
+        const auto start = static_cast<std::size_t>(url.data() - text.data());
+        if (start > offset) {
+            auto* prefix = cmark_node_new(CMARK_NODE_TEXT);
+            cmark_node_set_literal(prefix, text.substr(offset, start - offset).c_str());
+            cmark_node_insert_before(node, prefix);
+        }
+        cmark_node_insert_before(node, bareLink(std::string(url)));
+        offset = start + url.size();
+    }
+    cmark_node_set_literal(node, text.c_str() + offset);
+}
+
+std::vector<std::string_view> sourceLines(std::string_view source) {
+    std::vector<std::string_view> lines;
+    for (;;) {
+        const auto end = source.find_first_of("\r\n");
+        lines.push_back(source.substr(0, end));
+        if (end == source.npos) return lines;
+        source.remove_prefix(end + (source.substr(end).starts_with("\r\n") ? 2 : 1));
+    }
+}
+
+std::size_t inlineContentEnd(cmark_node* node, int line, int adjustment, std::size_t lineLength) {
+    for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent)) {
+        const auto type = cmark_node_get_type(parent);
+        if (type != CMARK_NODE_EMPH && type != CMARK_NODE_STRONG) break;
+        if (cmark_node_get_end_line(parent) != line) continue;
+        const auto end = cmark_node_get_end_column(parent) + adjustment;
+        const int delimiter = type == CMARK_NODE_STRONG ? 2 : 1;
+        if (end >= delimiter) lineLength = std::min(lineLength, static_cast<std::size_t>(end - delimiter));
+    }
+    return lineLength;
+}
+
+bool isTextFormatting(cmark_node* node) {
+    const auto type = cmark_node_get_type(node);
+    if (type != CMARK_NODE_EMPH && type != CMARK_NODE_STRONG) return false;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child))
+        if (cmark_node_get_type(child) != CMARK_NODE_TEXT && !isTextFormatting(child)) return false;
+    return true;
+}
+
+cmark_node* containingParagraph(cmark_node* node) {
+    for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent))
+        if (cmark_node_get_type(parent) == CMARK_NODE_PARAGRAPH) return parent;
+    return nullptr;
+}
+
+int inlineLineBreaks(cmark_node* node) {
+    const auto type = cmark_node_get_type(node);
+    if (type == CMARK_NODE_SOFTBREAK || type == CMARK_NODE_LINEBREAK) return 1;
+    int childBreaks = 0;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child)) childBreaks += inlineLineBreaks(child);
+    return std::max(childBreaks, cmark_node_get_end_line(node) - cmark_node_get_start_line(node));
+}
+
+int physicalSourceLine(cmark_node* node, cmark_node* paragraph) {
+    if (!paragraph) return cmark_node_get_start_line(node);
+    int line = cmark_node_get_end_line(paragraph);
+    for (; node != paragraph; node = cmark_node_parent(node))
+        for (auto* next = cmark_node_next(node); next; next = cmark_node_next(next)) line -= inlineLineBreaks(next);
+    return line;
+}
+
+std::string decodeBareUrl(std::string_view url) {
+    if (url.find('&') == url.npos) return std::string(url);
+    const auto markdown = "<" + std::string(url) + ">";
+    std::unique_ptr<cmark_node, decltype(&cmark_node_free)> root(cmark_parse_document(markdown.data(), markdown.size(), CMARK_OPT_DEFAULT),
+                                                                 cmark_node_free);
+    auto* paragraph = root ? cmark_node_first_child(root.get()) : nullptr;
+    auto* link = paragraph ? cmark_node_first_child(paragraph) : nullptr;
+    return link && cmark_node_get_type(link) == CMARK_NODE_LINK ? value(cmark_node_get_url(link)) : std::string(url);
+}
+
+bool formattingMatchesSource(cmark_node* node, std::string_view source, int adjustment) {
+    const int start = cmark_node_get_start_column(node) + adjustment;
+    const int end = cmark_node_get_end_column(node) + adjustment;
+    if (start < 1 || end < start || static_cast<std::size_t>(end) > source.size()) return false;
+    const auto raw = source.substr(start - 1, end - start + 1);
+    if (cmark_node_get_type(node) == CMARK_NODE_TEXT) return decodeTextFragment(raw) == value(cmark_node_get_literal(node));
+    if ((raw.front() != '*' && raw.front() != '_') || raw.back() != raw.front()) return false;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child))
+        if (!formattingMatchesSource(child, source, adjustment)) return false;
+    return true;
+}
+
+struct FormattedBareUrl {
+    std::string destination;
+    std::string preceding;
+    std::string following;
+    cmark_node* last;
+};
+
+std::optional<FormattedBareUrl> formattedBareUrlAt(cmark_node* node, std::string_view raw, int adjustment) {
+    const int line = cmark_node_get_start_line(node);
+    const int column = cmark_node_get_start_column(node) + adjustment;
+    const int end = cmark_node_get_end_column(node) + adjustment;
+    if (column < 1 || end < column || cmark_node_get_end_line(node) != line) return std::nullopt;
+    const auto content = raw.substr(0, inlineContentEnd(node, line, adjustment, raw.size()));
+    const auto textEnd = std::min(content.size(), static_cast<std::size_t>(end));
+    const auto literal = value(cmark_node_get_literal(node));
+
+    for (auto url : bareUrls(content, column - 1, textEnd, BareUrlInput::source)) {
+        const auto start = static_cast<std::size_t>(url.data() - content.data());
+        if (start + url.size() <= textEnd) continue;
+        const auto first = decodeBareUrl(url.substr(0, textEnd - start));
+        if (!literal.ends_with(first)) continue;
+
+        auto offset = textEnd;
+        cmark_node* last = node;
+        for (auto* next = cmark_node_next(node); next && offset < start + url.size(); next = cmark_node_next(next)) {
+            const auto type = cmark_node_get_type(next);
+            const bool formatting = isTextFormatting(next);
+            const int nextEnd = cmark_node_get_end_column(next) + adjustment;
+            if (cmark_node_get_start_line(next) != line || cmark_node_get_end_line(next) != line ||
+                cmark_node_get_start_column(next) + adjustment != static_cast<int>(offset) + 1 || nextEnd <= static_cast<int>(offset) ||
+                (type != CMARK_NODE_TEXT && !formatting) ||
+                (formatting &&
+                 (static_cast<std::size_t>(nextEnd) > start + url.size() || !formattingMatchesSource(next, content, adjustment))))
+                break;
+            offset = static_cast<std::size_t>(nextEnd);
+            last = next;
+        }
+        if (last == node) continue;
+        if (start + url.size() > offset) url = bareUrlAt(content.substr(start, offset - start), BareUrlInput::source);
+        if (url.empty() || start + url.size() <= textEnd) continue;
+
+        std::string following;
+        if (cmark_node_get_type(last) == CMARK_NODE_TEXT) {
+            const auto lastStart = static_cast<std::size_t>(cmark_node_get_start_column(last) + adjustment - 1);
+            if (lastStart > start + url.size() || offset > content.size()) continue;
+            const auto lastText = value(cmark_node_get_literal(last));
+            auto rawText = content.substr(lastStart, offset - lastStart);
+            if (offset == content.size()) {
+                const auto lastContent = rawText.find_last_not_of(" \t");
+                rawText = rawText.substr(0, lastContent == rawText.npos ? 0 : lastContent + 1);
+            }
+            if (decodeTextFragment(rawText) != lastText) continue;
+            const auto decoded = decodeTextFragment(url.substr(lastStart - start));
+            if (!lastText.starts_with(decoded)) continue;
+            following = lastText.substr(decoded.size());
+        }
+        const auto destination = decodeBareUrl(url);
+        if (safeUrl(destination))
+            return FormattedBareUrl{destination, literal.substr(0, literal.size() - first.size()), std::move(following), last};
+    }
+    return std::nullopt;
+}
+
+std::optional<FormattedBareUrl> formattedBareUrlOnLine(cmark_node* node, std::string_view raw) {
+    if (auto span = formattedBareUrlAt(node, raw, 0)) return span;
+    const auto literal = value(cmark_node_get_literal(node));
+    std::optional<FormattedBareUrl> closest;
+    auto distance = std::numeric_limits<int>::max();
+    for (const auto url : bareUrls(raw, 0, raw.size(), BareUrlInput::source)) {
+        const auto sourceStart = static_cast<int>(url.data() - raw.data());
+        for (auto marker = url.find_first_of("*_"); marker != url.npos; marker = url.find_first_of("*_", marker + 1)) {
+            const auto prefix = url.substr(0, marker);
+            const bool matches = prefix.find('&') == prefix.npos ? literal.ends_with(prefix) : literal.ends_with(decodeBareUrl(prefix));
+            if (!matches) continue;
+            const int adjustment = sourceStart + static_cast<int>(marker) - cmark_node_get_end_column(node);
+            if (adjustment == 0 || std::abs(adjustment) >= distance) continue;
+            if (auto span = formattedBareUrlAt(node, raw, adjustment)) {
+                distance = std::abs(adjustment);
+                closest = std::move(span);
+            }
+        }
+    }
+    return closest;
+}
+
+std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::vector<std::string_view>& lines) {
+    auto* adjacent = cmark_node_next(node);
+    if (!adjacent || !isTextFormatting(adjacent) || value(cmark_node_get_literal(node)).find("http") == std::string::npos)
+        return std::nullopt;
+    const auto readLine = [&](int line) -> std::optional<FormattedBareUrl> {
+        if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
+        auto raw = lines[line - 1];
+        if (auto span = formattedBareUrlOnLine(node, raw)) return span;
+        if (!raw.ends_with('\\')) return std::nullopt;
+        raw.remove_suffix(1);
+        auto span = formattedBareUrlOnLine(node, raw);
+        if (span && cmark_node_get_type(cmark_node_next(span->last)) == CMARK_NODE_LINEBREAK) return span;
+        return std::nullopt;
+    };
+    const int physical = physicalSourceLine(node, containingParagraph(node));
+    if (auto span = readLine(physical)) return span;
+    const int reported = cmark_node_get_start_line(node);
+    for (int line = physical - 1; line > reported; --line)
+        if (auto span = readLine(line)) return span;
+    return reported == physical ? std::nullopt : readLine(reported);
+}
+
+void promoteBareLinks(cmark_node* node, const std::vector<std::string_view>& lines) {
+    const auto type = cmark_node_get_type(node);
+    if (type == CMARK_NODE_LINK || type == CMARK_NODE_IMAGE) return;
+    if (type != CMARK_NODE_TEXT) {
+        for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child)) promoteBareLinks(child, lines);
+        return;
+    }
+    if (const auto span = formattedBareUrl(node, lines)) {
+        auto* after = span->following.empty() ? cmark_node_next(span->last) : span->last;
+        for (auto* consumed = cmark_node_next(node); consumed != after;) {
+            auto* next = cmark_node_next(consumed);
+            cmark_node_free(consumed);
+            consumed = next;
+        }
+        auto* link = bareLink(span->destination);
+        cmark_node_insert_after(node, link);
+        cmark_node_set_literal(node, span->preceding.c_str());
+        if (!span->following.empty()) cmark_node_set_literal(span->last, span->following.c_str());
+    }
+    promoteTextLinks(node);
+}
+
 bool insideLink(cmark_node* node) {
     for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent))
         if (cmark_node_get_type(parent) == CMARK_NODE_LINK) return true;
@@ -373,9 +672,10 @@ bool slackMrkdwnRepresentable(cmark_node* node) {
 std::string convert(std::string_view source, Target target, const SensitiveText& sensitive = {}) {
     static constexpr char empty[] = "";
     const auto* bytes = source.empty() ? empty : source.data();
-    auto* document = cmark_parse_document(bytes, source.size(), CMARK_OPT_DEFAULT);
+    auto* document = cmark_parse_document(bytes, source.size(), target == Target::html ? CMARK_OPT_SOURCEPOS : CMARK_OPT_DEFAULT);
     if (!document) return escape(source, target);
     std::unique_ptr<cmark_node, decltype(&cmark_node_free)> root(document, cmark_node_free);
+    if (target == Target::html && source.find("http") != source.npos) promoteBareLinks(root.get(), sourceLines(source));
     if (target == Target::html &&
         ((sensitive && sensitive(render(root.get(), Target::html_text, 0))) || hasSensitiveUrl(root.get(), sensitive)))
         return "<p>[redacted]</p>";

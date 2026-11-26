@@ -1,5 +1,6 @@
 #include "model_calls.hpp"
 #include "session_read_storage.hpp"
+#include "flock/policy_action.hpp"
 #include "policy_approvals.hpp"
 #include "bot_settings_storage.hpp"
 #include "conversation_call.hpp"
@@ -18,7 +19,6 @@
 #include "flock/git_host.hpp"
 #include "conversation_turns.hpp"
 #include "task_routing.hpp"
-#include "flock/policy.hpp"
 
 #include <algorithm>
 #include <cstddef>

@@ -268,6 +268,138 @@ void nestedAndStable() {
 }
 }
 
+void bareUrls() {
+    check(markdown::toHtml("See https://example.com/pull/12, then (https://example.com/a_(b)) and https://example.com/x.") ==
+              "<p>See <a href=\"https://example.com/pull/12\">https://example.com/pull/12</a>, then "
+              "(<a href=\"https://example.com/a_(b)\">https://example.com/a_(b)</a>) and "
+              "<a href=\"https://example.com/x\">https://example.com/x</a>.</p>",
+          "bare URLs were not linked or kept trailing punctuation");
+    check(markdown::toHtml("[docs](https://example.com/docs) and `https://example.com/code` and javascript:alert(1) and https://") ==
+              "<p><a href=\"https://example.com/docs\">docs</a> and <code>https://example.com/code</code> and "
+              "javascript:alert(1) and https://</p>",
+          "autolinking touched existing links, code, unsafe schemes or empty URLs");
+    check(markdown::toHtml("xhttps://example.com <https://example.com/&q> &amp;") ==
+              "<p>xhttps://example.com <a href=\"https://example.com/&amp;q\">https://example.com/&amp;q</a> &amp;</p>",
+          "autolinking matched inside a word or double-linked an explicit autolink");
+    check(markdown::toHtml("See https://example.com/__init__.py and https://example.com/?q=*test*。") ==
+              "<p>See <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> and "
+              "<a href=\"https://example.com/?q=*test*\">https://example.com/?q=*test*</a>。</p>",
+          "Markdown syntax or Japanese punctuation changed a bare link destination");
+    check(markdown::toHtml("“https://example.com/資料” （https://example.com/report）") ==
+              "<p>“<a href=\"https://example.com/資料\">https://example.com/資料</a>” "
+              "（<a href=\"https://example.com/report\">https://example.com/report</a>）</p>",
+          "Quotation marks or full-width parentheses entered a bare link");
+    check(markdown::toHtml("> See **https://example.com/__init__.py**") ==
+              "<blockquote><p>See <strong><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a>"
+              "</strong></p></blockquote>",
+          "Linking a bare URL broke the enclosing Markdown");
+    check(markdown::toHtml("https://example.com/[docs](https://example.org) and https://example.com/path**and more**") ==
+              "<p><a href=\"https://example.com/\">https://example.com/</a><a href=\"https://example.org\">docs</a> and "
+              "<a href=\"https://example.com/path\">https://example.com/path</a><strong>and more</strong></p>",
+          "A bare link swallowed an existing Markdown link or incomplete emphasis");
+    check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/?q=&amp; after") ==
+              "<p>Open <a href=\"https://example.com/?q=&amp;\">https://example.com/?q=&amp;</a> after</p>",
+          "Reference definitions or entity escaping changed a bare link");
+    check(markdown::toHtml("**https://example.com/__init__.py**です") ==
+              "<p><strong><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></strong>です</p>",
+          "A bare URL changed its surrounding emphasis");
+    check(markdown::toHtml("https://example.com/__init__.py[docs](https://example.org)") ==
+              "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a>"
+              "<a href=\"https://example.org\">docs</a></p>",
+          "An adjacent Markdown link truncated the bare filename");
+    check(markdown::toHtml("https://example.com/?q=*test*&amp;") ==
+              "<p><a href=\"https://example.com/?q=*test*&amp;\">https://example.com/?q=*test*&amp;</a></p>",
+          "A character reference at the end of a formatted URL changed its destination");
+    check(markdown::toHtml("[ref]: https://example.org/reference\nOpen https://example.com/__init__.py after") ==
+              "<p>Open <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> after</p>",
+          "A preceding reference definition truncated the bare filename");
+    check(markdown::toHtml("See the file:\n   https://example.com/__init__.py") ==
+              "<p>See the file:<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></p>",
+          "Indentation truncated a bare filename on a continuation line");
+    check(markdown::toHtml("> See the file:\nhttps://example.com/?a=1&amp;b=__init__.py") ==
+              "<blockquote><p>See the file:<br>\n"
+              "<a href=\"https://example.com/?a=1&amp;b=__init__.py\">https://example.com/?a=1&amp;b=__init__.py</a></p></blockquote>",
+          "A lazy quoted continuation truncated a bare URL with a character reference");
+    check(markdown::toHtml("https://example.com/**[docs](https://docs.example)**") ==
+              "<p><a href=\"https://example.com/\">https://example.com/</a>"
+              "<strong><a href=\"https://docs.example\">docs</a></strong></p>",
+          "A bare link swallowed a link inside adjacent formatting");
+    for (const auto prefix : {"> See\n ", "> See\n>  "})
+        check(
+            markdown::toHtml(std::string(prefix) + "https://example.com/__init__.py") ==
+                "<blockquote><p>See<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></p></blockquote>",
+            "A space before a quoted continuation changed the bare link target");
+    check(markdown::toHtml("> See\n>  https://example.com/__foo__ https://example.com/__bar__") ==
+              "<blockquote><p>See<br>\n<a href=\"https://example.com/__foo__\">https://example.com/__foo__</a> "
+              "<a href=\"https://example.com/__bar__\">https://example.com/__bar__</a></p></blockquote>",
+          "Two similar URLs on a continuation line shared the wrong destination");
+    check(markdown::toHtml("> See\n>  <https://example.com/__foo__> https://example.com/__bar__") ==
+              "<blockquote><p>See<br>\n<a href=\"https://example.com/__foo__\">https://example.com/__foo__</a> "
+              "<a href=\"https://example.com/__bar__\">https://example.com/__bar__</a></p></blockquote>",
+          "A nearby explicit link replaced the bare link destination");
+    check(markdown::toHtml(R"(https://example.com/__init__.py
+More details\
+Thanks)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+             "More details<br>\nThanks</p>",
+          "A later backslash line break truncated an earlier bare URL");
+    for (const std::string_view suffix : {"3", "?view=full"}) {
+        const std::string firstUrl = "https://example.com/__init__.py";
+        const auto secondUrl = firstUrl + std::string(suffix);
+        const auto message = firstUrl + R"( details\
+)" + secondUrl;
+        check(markdown::toHtml(message) == "<p><a href=\"" + firstUrl + "\">" + firstUrl + "</a> details<br>\n<a href=\"" + secondUrl +
+                                               "\">" + secondUrl + "</a></p>",
+              "A backslash break made a second bare link reuse the previous line's destination");
+    }
+    check(markdown::toHtml(R"(https://example.com/__init__ details\
+https://example.com/__init__?view=full)") ==
+              "<p><a href=\"https://example.com/__init__\">https://example.com/__init__</a> details<br>\n"
+              "<a href=\"https://example.com/__init__?view=full\">https://example.com/__init__?view=full</a></p>",
+          "A backslash break truncated a link after emphasis shared with the previous line");
+    check(markdown::toHtml(R"(https://example.com/*test*\
+https://example.com/_test_)") == "<p><a href=\"https://example.com/*test*\">https://example.com/*test*</a><br>\n"
+                                 "<a href=\"https://example.com/_test_\">https://example.com/_test_</a></p>",
+          "Matching text on either side of a hard break changed the link spelling");
+    check(markdown::toHtml("See [https://example.com/docs]. Open https://example.com/docs?q=all&preview; then continue.") ==
+              "<p>See [<a href=\"https://example.com/docs\">https://example.com/docs</a>]. Open "
+              "<a href=\"https://example.com/docs?q=all&amp;preview\">https://example.com/docs?q=all&amp;preview</a>; then continue.</p>",
+          "Sentence punctuation entered a bare link");
+    check(markdown::toHtml("[http://[::1]/docs]") == "<p>[<a href=\"http://[::1]/docs\">http://[::1]/docs</a>]</p>",
+          "Trimming brackets broke an IPv6 destination");
+    check(markdown::toHtml("https://example.com/__init__.py  \nSee details") ==
+              "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\nSee details</p>",
+          "Spaces before a hard break truncated a formatted bare URL");
+    check(markdown::toHtml("https://example.com/__init__.py?a=1&amp;b=2 then < or >") ==
+              "<p><a href=\"https://example.com/__init__.py?a=1&amp;b=2\">https://example.com/__init__.py?a=1&amp;b=2</a>"
+              " then &lt; or &gt;</p>",
+          "An angle bracket in nearby prose truncated a formatted URL with an entity");
+    check(markdown::toHtml(R"(https://example.com/__init__.py
+[details](
+https://example.org/)
+https://example.com/__main__.py)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+                                      "<a href=\"https://example.org/\">details</a><br>\n"
+                                      "<a href=\"https://example.com/__main__.py\">https://example.com/__main__.py</a></p>",
+          "A neighboring multiline Markdown destination truncated a bare URL");
+    check(markdown::toHtml(R"(Download https://example.com/__init__.py to C:\
+)") == "<p>Download <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> to C:\\</p>",
+          "A literal backslash before the final newline truncated a bare URL");
+    check(markdown::toHtml(R"(Download https://example.com/__init__.py to C:\\
+See details)") ==
+              "<p>Download <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> to C:\\<br>\nSee details</p>",
+          "Escaped backslashes before a line break truncated a bare URL");
+    check(markdown::toHtml(R"(See\
+https://example.com/__init__.py
+[details](
+https://example.org/)
+https://example.com/__main__.py)") == "<p>See<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
+                                      "<a href=\"https://example.org/\">details</a><br>\n"
+                                      "<a href=\"https://example.com/__main__.py\">https://example.com/__main__.py</a></p>",
+          "Combining a hard break with a multiline Markdown link hid the physical URL line");
+    const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
+    check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
+          "A bare URL exposed an encoded protected value");
+}
+
 int main() {
     try {
         issueExample();
@@ -280,6 +412,7 @@ int main() {
         linkedImages();
         protectedHtml();
         nestedAndStable();
+        bareUrls();
         std::cout << "Markdown rendering behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
