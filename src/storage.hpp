@@ -89,16 +89,16 @@ struct Store::Impl {
                                                 sessionReadStorage,
                                                 taskRecords,
                                                 taskRunReports};
-    ModelCalls modelCalls{database, botLifecycle, permissions, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
-    TaskOperations taskOperations{database,    automationStorage, botLifecycle, permissions, journalStorage, modelCalls,  outboxStorage,
-                                  peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
+    ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
+    TaskOperations taskOperations{database,      automationStorage, botLifecycle, permissions, journalStorage, outboxStorage, peerStorage,
+                                  secretStorage, taskEvents,        taskRecords,  taskRouting, waitStorage,    inboxStorage};
     TaskRouting taskRouting{database, permissions, peerStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
-    TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage, waitStorage};
+    TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage};
     OutboxStorage outboxStorage{database};
     PeerStorage peerStorage{database};
     JournalStorage journalStorage{database, channelStorage};
-    TaskEvents taskEvents{database, modelCalls};
-    WaitStorage waitStorage{database, journalStorage, outboxStorage, peerStorage, modelCalls};
+    TaskEvents taskEvents{database};
+    WaitStorage waitStorage{database, journalStorage, outboxStorage, peerStorage};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
     SecretStorage secretStorage{database, path.parent_path()};
     MemoryStorage memoryStorage;
@@ -109,8 +109,8 @@ struct Store::Impl {
     WorkflowStorage workflowStorage{database,      taskRecords,       taskEvents,     journalStorage,
                                     secretStorage, conversationTurns, taskOperations, taskRouting};
     WebIdentityState webIdentity;
-    InboxStorage inboxStorage{database,    secretStorage, taskRecords,    waitStorage,    journalStorage,
-                              permissions, modelCalls,    taskOperations, policyApprovals};
+    InboxStorage inboxStorage{database,       secretStorage, taskRecords,    waitStorage,
+                              journalStorage, permissions,   taskOperations, policyApprovals};
     GitStorage gitStorage{database,
                           secretStorage,
                           inboxStorage,

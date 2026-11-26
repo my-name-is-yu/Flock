@@ -78,9 +78,7 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   status TASK
   history TASK [--after ID] [--limit N]
   answer TASK WAIT REVISION GENERATION TEXT
-  approve TASK WAIT REVISION GENERATION
   retry TASK WAIT REVISION GENERATION
-  extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
   reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
   cancel TASK [WAIT REVISION GENERATION]
   t3 connect [MCP_URL] [--port PORT]
@@ -93,7 +91,6 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   model models
   model acceptance MODEL_SLUG
 
-Approve continues a paused request for another full allowance.
 State defaults to $FLOCK_HOME or ~/.config/flock. Quote messages and answers
 containing spaces. Run --fixed uses local demo adapters for both model and T3.
 )";
@@ -457,8 +454,6 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     Json details = Json::object();
     if (operation == "answer")
         details["text"] = args.pop("answer");
-    else if (operation == "extend")
-        details["deadline"] = number(args, "new Unix deadline");
     else if (operation == "reconcile") {
         while (!args.empty()) {
             const auto flag = args.pop("reconciliation option");
@@ -585,8 +580,7 @@ int runCli(Arguments& args) {
         print(taskJson(Tasks(store).task(id)));
     } else if (command == "history" || command == "tasks")
         taskCommand(home, command, args);
-    else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" || command == "reconcile" ||
-             command == "cancel")
+    else if (command == "answer" || command == "retry" || command == "reconcile" || command == "cancel")
         operate(home, bots, command, args);
     else
         throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");

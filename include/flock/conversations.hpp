@@ -13,14 +13,11 @@ class ChannelStorage;
 class ConversationContextStorage;
 class Database;
 class MemoryStorage;
-class ModelCalls;
 
 class Conversations {
 public:
     explicit Conversations(Store&);
 
-    // Conversation turns paused on the model call limit, newest first.
-    Json pausedConversations(std::string_view botId) const;
     Json compactions(std::string_view bot, Id before = 0, unsigned limit = 50) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
@@ -36,7 +33,6 @@ private:
     Database& database_;
     const ConversationContextStorage& context_;
     const MemoryStorage& memory_;
-    const ModelCalls& modelCalls_;
     const ChannelStorage& channels_;
 };
 }

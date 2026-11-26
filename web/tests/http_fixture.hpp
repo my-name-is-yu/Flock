@@ -88,7 +88,7 @@ inline WebCallbacks callbacks() {
                         std::string(request),
                         bot == "triage" ? "linked env" : "local-env",
                         std::string(bot),
-                        {{"token", privateValue}, {"runTimeoutSeconds", 1800}}};
+                        {{"token", privateValue}}};
             }};
 }
 

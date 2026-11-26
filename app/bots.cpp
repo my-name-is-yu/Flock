@@ -297,7 +297,6 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
             if (!name.is_string() || !validPlainId(name.get_ref<const std::string&>())) throw Conflict("Invalid connection name");
         bot.settings[key] = config[key];
     }
-    if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = initialModelCallLimit(config);
     if (const auto fix = config.find("fixPullRequests"); fix != config.end())
         bot.settings["fixPullRequests"] = validatedBotFixPullRequests(*fix);
     if (config.contains("conversationEnvironments")) {
@@ -322,10 +321,6 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
             }
         }
     }
-    const auto timeout = config.value("runTimeoutSeconds", Json(1800));
-    if (!timeout.is_number_integer() || timeout.get<long double>() < 1 || timeout.get<long double>() > 2147483647)
-        throw Conflict("runTimeoutSeconds must be a positive integer");
-    bot.settings["runTimeoutSeconds"] = timeout.get<int>();
     if (config.contains("session")) {
         try {
             bot.settings["session"] = normalizeSessionSettings(config["session"]);
@@ -414,7 +409,6 @@ std::optional<PlannerModel> Bots::plannerModel(std::string_view id) const {
     PlannerModel planner{bot->settings.at("model").get<std::string>(), bot->settings.at("modelProvider").get<std::string>(), std::nullopt};
     if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
         planner.reasoningEffort = effort->get<std::string>();
-    if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = initialModelCallLimit(bot->settings);
     return planner;
 }
 
@@ -473,12 +467,7 @@ Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& b
 
     Json item = {{"id", id}, {"name", name}, {"soul", readText(botDir / "SOUL.md", maxBotRoleBytes, true)}, {"cron", schedules}};
     if (const auto fix = config.find("fixPullRequests"); fix != config.end()) item["fixPullRequests"] = *fix == true;
-    try {
-        item["modelCallLimit"] = initialModelCallLimit(config);
-    } catch (const Conflict&) {
-    }
     for (const std::string_view key : botRunSettingFields) {
-        if (key == "modelCallLimit") continue;
         if (key == "model" || key == "reasoningEffort") {
             const auto provider = config.find("modelProvider");
             if (provider == config.end() || *provider != "chatgpt") continue;

@@ -26,7 +26,7 @@ VALUES
   WHERE kind IN (''instruction_accepted'',''instruction_delivered'')'),
     ('index', 'journal_peer_evidence', 'journal', 'CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind=''read_bot_evidence'''),
     ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind=''bot_message'''),
-    ('index', 'journal_pr_followup', 'journal', 'CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,id) WHERE kind=''git_pr_followup_requested'''),
+    ('index', 'journal_pr_followup', 'journal', 'CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind=''git_pr_followup_requested'''),
     ('index', 'journal_pr_review_anchor', 'journal', 'CREATE UNIQUE INDEX journal_pr_review_anchor ON journal(task_id,pr_review_item_id)
     WHERE kind=''pr_review_requested'''),
     ('index', 'journal_report_result', 'journal', 'CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
@@ -80,9 +80,7 @@ VALUES
     ('index', 'sqlite_autoindex_conversation_model_failures_1', 'conversation_model_failures', NULL),
     ('index', 'sqlite_autoindex_conversation_steps_1', 'conversation_steps', NULL),
     ('index', 'sqlite_autoindex_conversation_turns_1', 'conversation_turns', NULL),
-    ('index', 'sqlite_autoindex_conversation_turns_2', 'conversation_turns', NULL),
     ('index', 'sqlite_autoindex_deleted_bots_1', 'deleted_bots', NULL),
-    ('index', 'sqlite_autoindex_environment_settings_1', 'environment_settings', NULL),
     ('index', 'sqlite_autoindex_events_1', 'events', NULL),
     ('index', 'sqlite_autoindex_external_mcp_allowed_bots_1', 'external_mcp_allowed_bots', NULL),
     ('index', 'sqlite_autoindex_external_mcp_connections_1', 'external_mcp_connections', NULL),
@@ -106,7 +104,6 @@ VALUES
     ('index', 'sqlite_autoindex_message_attachments_1', 'message_attachments', NULL),
     ('index', 'sqlite_autoindex_messages_1', 'messages', NULL),
     ('index', 'sqlite_autoindex_messages_2', 'messages', NULL),
-    ('index', 'sqlite_autoindex_model_budgets_1', 'model_budgets', NULL),
     ('index', 'sqlite_autoindex_outbox_1', 'outbox', NULL),
     ('index', 'sqlite_autoindex_peer_exchanges_1', 'peer_exchanges', NULL),
     ('index', 'sqlite_autoindex_peer_exchanges_2', 'peer_exchanges', NULL),
@@ -205,16 +202,14 @@ VALUES
   PRIMARY KEY(message_id,step))'),
     ('table', 'conversation_turns', 'conversation_turns', 'CREATE TABLE conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  status TEXT NOT NULL CHECK(status IN (''running'',''paused'',''policy_waiting'',''done'')),
-  pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
+  status TEXT NOT NULL CHECK(status IN (''running'',''policy_waiting'',''done'')),
+  reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id))'),
     ('table', 'deleted_bots', 'deleted_bots', 'CREATE TABLE deleted_bots(bot TEXT PRIMARY KEY)'),
-    ('table', 'environment_settings', 'environment_settings', 'CREATE TABLE environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment))'),
     ('table', 'events', 'events', 'CREATE TABLE events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   dedupe TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
   retry_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT ''[]'',
-  reserved_attempt INTEGER REFERENCES model_attempts(id),
   UNIQUE(task_id,dedupe))'),
     ('table', 'external_mcp_allowed_bots', 'external_mcp_allowed_bots', 'CREATE TABLE external_mcp_allowed_bots(
  connection_id TEXT NOT NULL REFERENCES external_mcp_connections(id), bot_id TEXT NOT NULL,
@@ -281,7 +276,7 @@ VALUES
   message_id INTEGER, instruction_step INTEGER,
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
-  reply_to_message_id INTEGER, wait_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
+  reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
   CHECK(kind<>''pr_review_requested'' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)))'),
@@ -325,13 +320,10 @@ VALUES
   principal_source INTEGER NOT NULL CHECK(principal_source IN (0,1,2,3,4)),
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence))'),
     ('table', 'model_attempts', 'model_attempts', 'CREATE TABLE model_attempts(
-  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
+  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL,
   purpose TEXT NOT NULL, time INTEGER NOT NULL,
   message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
   event_id INTEGER REFERENCES events(id), usage TEXT)'),
-    ('table', 'model_budgets', 'model_budgets', 'CREATE TABLE model_budgets(
-  id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-  CHECK(attempts>=0 AND attempts<=call_limit))'),
     ('table', 'outbox', 'outbox', 'CREATE TABLE outbox(
   id TEXT PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   phase TEXT NOT NULL, auth_generation TEXT NOT NULL DEFAULT '''', data TEXT NOT NULL,
@@ -505,8 +497,7 @@ WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_ru
             OR (j.kind=''user_answer'' AND j.user_answer_conversation IS NOT 1)))'),
     ('view', 'conversation_input_status', 'conversation_input_status', 'CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
-  CASE t.status WHEN ''paused'' THEN ''needs_you''
-                WHEN ''policy_waiting'' THEN ''needs_you''
+  CASE t.status WHEN ''policy_waiting'' THEN ''needs_you''
                 WHEN ''done'' THEN coalesce(
                   (SELECT conversation_status FROM journal WHERE id=t.reply_id),''access_revoked'')
   END AS status

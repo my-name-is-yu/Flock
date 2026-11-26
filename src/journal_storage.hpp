@@ -53,7 +53,6 @@ public:
     Id journalRunSettled(Id, const SettledRunReport&);
     Id journalConversationMessage(std::string_view bot, const ConversationMessageEntry&);
     Id journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry&);
-    void journalConversationBudgetApproved(Id message, Id pause, std::string_view bot);
     Id journalInterrupt(Id, const RunStop&);
     Id journalInterrupt(Id, const ConversationInterruptEntry&);
 private:

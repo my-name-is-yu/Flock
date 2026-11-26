@@ -18,7 +18,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     <dl class="settings-workspace-facts" hidden>
       <dt>Model</dt><dd></dd>
       <dt>Reasoning effort</dt><dd></dd>
-      <dt>Steps per request</dt><dd></dd>
       <dt>Environment</dt><dd></dd>
       <dt>Project</dt><dd></dd>
     </dl>
@@ -32,10 +31,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
         </label>
       </div>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
-      <label class="settings-workspace-field">Steps per request
-        <input name="modelCallLimit" type="number" min="1" max="2147483647" required aria-describedby="settings-steps-hint">
-      </label>
-      <p class="settings-workspace-hint" id="settings-steps-hint">Each request starts with this many steps. You can approve more as needed.</p>
       <label class="settings-workspace-field">Environment
         <input name="environmentId" list="settings-t3-environments" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
@@ -54,9 +49,9 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   const edit = element.querySelector('.settings-card-edit');
   const missing = element.querySelector('.settings-workspace-missing');
   const facts = element.querySelector('.settings-workspace-facts');
-  const [modelText, effortText, allowanceText, environmentText, projectText] = facts.querySelectorAll('dd');
+  const [modelText, effortText, environmentText, projectText] = facts.querySelectorAll('dd');
   const form = element.querySelector('form');
-  const { model, reasoningEffort, modelCallLimit: allowance, environmentId: environment, projectId: project } = form.elements;
+  const { model, reasoningEffort, environmentId: environment, projectId: project } = form.elements;
   const modelFeedback = form.querySelector('#settings-model-feedback');
   const suggestions = form.querySelector('datalist');
   const cancel = form.querySelector('button[type="button"]');
@@ -82,12 +77,11 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     missing.hidden = !!draft || configured;
     modelText.textContent = catalogModel(workspace.model)?.displayName ?? workspace.model;
     effortText.textContent = effortLabel(workspace.reasoningEffort);
-    allowanceText.textContent = workspace.modelCallLimit || 'Not set';
     environmentText.textContent = workspace.environmentId || 'Not set';
     projectText.textContent = workspace.projectId || 'Not set';
   }
-  function update({ model = '', reasoningEffort = '', modelCallLimit = '', environmentId = '', projectId = '' }, canEdit = editable) {
-    const current = { model, reasoningEffort, modelCallLimit, environmentId, projectId };
+  function update({ model = '', reasoningEffort = '', environmentId = '', projectId = '' }, canEdit = editable) {
+    const current = { model, reasoningEffort, environmentId, projectId };
     if (editable === canEdit && workspace && Object.keys(current).every((key) => workspace[key] === current[key])) return;
     editable = canEdit;
     workspace = current;
@@ -156,7 +150,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     if (!editable) return;
     draft = { initial: workspace };
     showModelOptions([], workspace.model, 'Loading models…');
-    allowance.value = workspace.modelCallLimit;
     showEffortOptions(workspace.reasoningEffort, true);
     modelFeedback.hidden = true;
     for (const field of [environment, project]) {
@@ -196,8 +189,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     project.setCustomValidity(!projectId && project.value ? 'Enter the project ID shown in T3.' : '');
     if (!form.reportValidity()) return;
     const patch = {};
-    const edits = { model: model.value, reasoningEffort: reasoningEffort.value, modelCallLimit: allowance.valueAsNumber,
-      environmentId, projectId };
+    const edits = { model: model.value, reasoningEffort: reasoningEffort.value, environmentId, projectId };
     for (const [key, value] of Object.entries(edits)) {
       if (value !== draft.initial[key]) patch[key] = value;
     }
@@ -216,7 +208,6 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       const messages = {
         invalid_workspace: 'Check the environment and project IDs shown in T3.',
         invalid_reasoning_effort: 'Choose an effort this model supports or use Model default.',
-        invalid_model_call_limit: 'Enter a whole number between 1 and 2,147,483,647.',
       };
       showFeedback(messages[error.message] ?? 'Couldn’t save these settings. Try again.', true);
     } finally {

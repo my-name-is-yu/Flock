@@ -1,7 +1,7 @@
 import '/tooltip.js';
 import { handleComposerEnter, isComposerSuggestionKey } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { actionLabel, approvalSummary, continuationLabel } from '/action-labels.mjs';
+import { actionLabel, approvalSummary } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from '/browser-notifications.mjs';
@@ -94,28 +94,25 @@ const stateLabels = {
 // Bot's own first-person wording for its conversation bubble.
 const waitLabels = {
   user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
-  budget: ['Follow-up allowance used', 'This request used its allowance for follow-up work.'],
   policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  model_budget: ['Step allowance used', 'This request used its step allowance.'],
   model_failure: ['$BOT got stuck', '$BOT couldn’t choose its next step after several attempts. Try again to continue.',
     'I couldn’t choose my next step after several attempts. Try again to continue.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s role and memory, then try again.'],
   t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
-  deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
   unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
   settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then check again.'],
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
-  budget: 'Continue…', model_budget: 'Continue…', model_failure: 'Try again…',
+  model_failure: 'Try again…',
   bot_notes_unavailable: 'Try again…',
-  deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
+  t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
   session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
-  approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
+  approve: 'Approved', reconcile: 'Check requested', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
@@ -129,14 +126,13 @@ const decisionConfirmations = {
   deny: () => 'Denied.',
   approve: () => 'Approved.',
   request_changes: (name) => `Change request recorded for ${name}.`,
-  extend: () => 'Deadline extended.',
   reconcile: () => 'Check requested.',
   supply: () => 'Secret saved.',
   link_pr: () => 'Pull request linked.',
   reject_pr: () => 'Pull request link rejected.',
 };
 const errors = {
-  invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
+  invalid_text: 'Check the message and its length.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   request_changed: 'The request changed. Review its current details before acting again.',
@@ -1009,10 +1005,6 @@ const decisionKindLabels = {
   user_question: 'Question for you',
   pr_review: 'Review requested',
   pr_reconciliation: 'Confirm the pull request',
-  extra_run: 'Follow-up allowance used',
-  deadline: 'Deadline reached',
-  model_budget: 'Step allowance used',
-  conversation_model_budget: 'Step allowance used',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
   policy_approval: 'Approval needed',
@@ -1203,22 +1195,6 @@ function readOnlyChoices(choices) {
   for (const choice of choices) options.append(node('li', null, choice));
   return options;
 }
-function pausedDecision(botId, turn) {
-  return { botId, itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: turn.messageId,
-    taskId: 0, targetRevision: 0, targetGeneration: turn.messageId };
-}
-function pausedActions(turn) {
-  const context = view;
-  const item = pausedDecision(context.id, turn);
-  const actions = node('div', 'event-actions');
-  const approve = button(continuationLabel(turn.allowance), 'button', () => {
-    const current = context.data?.pausedConversations?.find((entry) => entry.messageId === item.waitId);
-    void submitConversationDecision(context, item, current && pausedDecision(context.id, current), 'approve');
-  });
-  approve.disabled = decisions.busy(item);
-  actions.append(approve);
-  return actions;
-}
 function nextSuggestion(context) {
   const composer = context?.composer;
   if (context?.data?.canDecide !== true || context.dm || context.source || !composer) return null;
@@ -1229,8 +1205,7 @@ function nextSuggestion(context) {
   for (const event of context.events.values()) if (event.kind !== 'wait_closed' && (!latest || event.id > latest.id)) latest = event;
   if (latest?.kind !== 'conversation_reply') return null;
   const text = latest.data.suggestions?.[0];
-  if (typeof text !== 'string' || !text.trim() ||
-      context.data.pausedConversations?.some((item) => item.messageId === latest.data.messageId)) return null;
+  if (typeof text !== 'string' || !text.trim()) return null;
   const drafts = screenshotsFor(composer);
   if ([0, latest.id].some((anchor) => {
     const draft = drafts?.get(anchor);
@@ -1602,20 +1577,17 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    const paused = context.paused.get(data.messageId);
-    if (paused) text.textContent = copy = paused.text;
-    else if (typeof data.textHtml === 'string') {
+    if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
       setMessageHtml(text, data.textHtml);
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
-    if (paused && context.canDecide) extras.push(pausedActions(paused));
-    else if (data.suggestions?.length) {
+    if (data.suggestions?.length) {
       if (context.canDecide) extras.push(suggestionActions(event));
       else bubble.append(readOnlyChoices(data.suggestions));
     }
-    if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
+    replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'pr_review_requested') {
     text.textContent = data.title;
     bubble.append(text);
@@ -1996,7 +1968,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   }
   if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
     decisions.pendingKeys(), listLoaded, data?.presence, data?.activeSessions, data?.parallelTasks, data?.sessionTasks,
-    data?.pausedConversations, bots, dayFormat.format(Date.now()),
+    bots, dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -2091,7 +2063,6 @@ function conversationRows(data, events, keep, source) {
     canDecide: !source && !!view?.composer,
     readOnly: !!source,
     revealedTimeRow: view?.revealedTimeRow,
-    paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
@@ -2112,7 +2083,6 @@ function conversationRows(data, events, keep, source) {
       anchoredToWait.add(item.itemId);
     }
   }
-  const sharedBudgetWaits = new Set((data?.pausedConversations ?? []).flatMap((turn) => turn.sharedWaitIds ?? []));
   const shown = timelineMessages(events, dayLabel);
   const eventsById = new Map(events.map((event) => [event.id, event]));
   const rows = [];
@@ -2131,7 +2101,6 @@ function conversationRows(data, events, keep, source) {
   let previous = null;
   let previousReport = null;
   shown.forEach(({ event, report }, index) => {
-    if (event.kind === 'waiting' && sharedBudgetWaits.has(event.data.id)) return;
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
@@ -2158,7 +2127,6 @@ function conversationRows(data, events, keep, source) {
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
     const waitDecision = wait && taskWaitDecision(view.id, wait);
-    const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const row = keep(`event-${report?.id ?? event.id}`,
@@ -2166,8 +2134,7 @@ function conversationRows(data, events, keep, source) {
         place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
-        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
-        paused && decisions.busy(pausedDecision(view.id, paused)), blocker,
+        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), blocker,
         request ? timeline.parallelTasks.get(event.taskId) : null,
         event.kind === 'memory_remembered' && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
@@ -2848,31 +2815,7 @@ function settingsContent(bot, section = 'general') {
   if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
   return generalContent(bot);
 }
-function waitForm(label, fields, submit, id) {
-  const form = node('form', 'wait-form');
-  if (id) form.id = id;
-  for (const field of fields) {
-    const wrapper = node('label', null, field.label);
-    const input = node('input');
-    Object.assign(input, { name: field.name, type: field.type ?? 'text', value: field.value ?? '', required: field.required ?? false });
-    wrapper.append(input);
-    form.append(wrapper);
-  }
-  const action = button(label, 'dialog-button');
-  action.type = 'submit';
-  if (id) action.setAttribute('form', id);
-  else form.append(action);
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    submit(Object.fromEntries(new FormData(form)));
-  });
-  return [form, action];
-}
-function localDateTime(timestamp) {
-  const date = new Date(timestamp);
-  return new Date(timestamp - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
-function waitContent(context, task, deadlineDraft) {
+function waitContent(context, task) {
   const wait = task.wait;
   const canDecide = !!context.composer;
   elements['detail-title'].textContent = waitLabel(wait.reason);
@@ -2880,10 +2823,7 @@ function waitContent(context, task, deadlineDraft) {
   request.append(node('p', 'wait-request-text', task.request));
   if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
-  if (!['budget', 'model_budget'].includes(wait.reason) || (wait.text && wait.text !== waitLabels[wait.reason][1]))
-    reason.append(node('p', 'wait-text', waitText(wait)));
-  if (wait.reason === 'deadline' && task.deadline)
-    reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
+  reason.append(node('p', 'wait-text', waitText(wait)));
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
@@ -2905,20 +2845,8 @@ function waitContent(context, task, deadlineDraft) {
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
-  } else if (wait.reason === 'budget' || wait.reason === 'model_budget') {
-    primary.append(action(continuationLabel(wait.allowance, wait.reason === 'budget' ? 'round' : 'step'), 'approve'));
-  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) primary.append(action('Try again', 'retry'));
-  else if (wait.reason === 'deadline') {
-    const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
-      type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
-      const next = Math.floor(new Date(deadline).getTime() / 1000);
-      if (next > Date.now() / 1000) perform('extend', { deadline: next });
-      else showDetailError(errors.invalid_deadline);
-    }, 'wait-deadline-form');
-    form.dataset.waitId = String(wait.id);
-    submit.classList.add('primary');
-    content.push(form);
-    primary.append(submit);
+  } else if (['model_failure', 'bot_notes_unavailable'].includes(wait.reason)) {
+    primary.append(action('Try again', 'retry'));
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
     primary.append(action('Check again', 'reconcile'));
   }
@@ -2976,11 +2904,11 @@ function renderDetail() {
     const bot = view.data.bot;
     labelDetail(`${bot.name} settings`);
     renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, reasoningEffort, modelCallLimit, ...settings } = bot;
+    const { soul, environmentId, projectId, model, reasoningEffort, ...settings } = bot;
     if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
     const canEdit = bot.canDelete === true;
     detailRole?.update(soul, canEdit);
-    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort, modelCallLimit }, canEdit);
+    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
     return;
   }
   labelDetail(null);
@@ -3013,15 +2941,8 @@ function renderDetail() {
     }
     return;
   }
-  const { generation, ...waitDetails } = task;
-  const waitGeneration = task.wait.reason === 'deadline' ? null : generation;
-  if (changed('detail', detail, waitDetails, waitGeneration, waitLabel(task.wait.reason), waitText(task.wait))) {
-    const input = elements['detail-body'].querySelector('#wait-deadline-form input');
-    const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
-    const restoreFocus = sameWait && input === document.activeElement;
-    replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
-    if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
-  }
+  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
+    replaceDetail(() => waitContent(view, task));
   const item = taskWaitDecision(view.id, task);
   const busy = decisions.busy(item);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {

@@ -506,8 +506,9 @@ void selfTest() {
     test("two requests", {start(audit), start(notes), done},
          {{SplitRequest, audit, "license_audit"}, {SplitRequest, notes, "release_notes"}});
     test("two requests", {start(notes), done}, {}, "expected 2 new tasks");
-    test("two requests", {start(notes), start(notes), done},
-         {{SplitRequest, notes, "release_notes"}, {SplitRequest, notes, "release_notes"}}, "one-to-one");
+    constexpr auto rephrasedNotes = "Write this release's notes.";
+    test("two requests", {start(notes), start(rephrasedNotes), done},
+         {{SplitRequest, notes, "release_notes"}, {SplitRequest, rephrasedNotes, "release_notes"}}, "one-to-one");
     test("explaining", {say(explain)}, {{CanaryExplanation, explain}});
     constexpr auto contradictory = "Use rollout_canary for 5% for a day, then expand to everyone. Never expand beyond 5%.";
     test("explaining", {say(contradictory)}, {{CanaryExplanation, contradictory, "mismatch"}}, "did not explain");

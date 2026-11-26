@@ -171,7 +171,7 @@ int main() {
             tickUntil(runtime, [&] { return Tasks(store).task(id).task.state == TaskState::completed; }, "restart did not complete");
             const auto task = taskJson(Tasks(store).task(id));
             check(task["runs"].size() == 1 && task["runs"][0]["threadId"] == "thread-1" && task["runs"][0]["runId"] == "run-1" &&
-                      task["additionalUsed"] == 0 && t3.launches == 1 && t3.replies == 1,
+                      t3.launches == 1 && t3.replies == 1,
                   "restart duplicated the Run or consumed additional work");
             const auto history = TaskHistory(store).history(id);
             const auto isCompletion = [](const Json& entry) { return entry["kind"] == "completed"; };

@@ -34,7 +34,6 @@ constexpr std::array kinds{
     std::pair{JournalKind::git_pr_followup_requested, std::string_view{"git_pr_followup_requested"}},
     std::pair{JournalKind::conversation_message, std::string_view{"conversation_message"}},
     std::pair{JournalKind::conversation_reply, std::string_view{"conversation_reply"}},
-    std::pair{JournalKind::conversation_budget_approved, std::string_view{"conversation_budget_approved"}},
     std::pair{JournalKind::completed, std::string_view{"completed"}},
     std::pair{JournalKind::cancel_requested, std::string_view{"cancel_requested"}},
     std::pair{JournalKind::cancelled, std::string_view{"cancelled"}},
@@ -179,9 +178,9 @@ Id Database::writeJournal(std::optional<Id> task, JournalKind kind, const Json& 
 INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,wait_id,wait_reason,user_answer_conversation,
                     action_id,run_environment_id,run_thread_id,run_id,run_gateway_id,result_run_id,run_status,revision_id,stop_requested,
                     message_id,instruction_step,exchange_id,peer_message_id,forwarded_source_message_id,pr_review_item_id,
-                    git_event_id,operation_id,reply_to_message_id,task_question_message_id,wait_message_id,conversation_route,
+                    git_event_id,operation_id,reply_to_message_id,task_question_message_id,conversation_route,
                     conversation_status,session_participation_id,session_stop_id,feedback_event_id,workflow_outcome)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 )SQL",
          {sqlValue(task),
           unixTime(),
@@ -210,7 +209,6 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           sqlValue(keys.operationId),
           sqlValue(keys.replyToMessageId),
           sqlValue(keys.taskQuestionMessageId),
-          sqlValue(keys.waitMessageId),
           sqlValue(keys.conversationRoute),
           sqlValue(keys.conversationStatus),
           sqlValue(keys.sessionParticipationId),

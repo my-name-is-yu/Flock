@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 16;
+constexpr Id schemaVersion = 17;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -44,7 +44,7 @@ CREATE TABLE journal(
   message_id INTEGER, instruction_step INTEGER,
   exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   pr_review_item_id INTEGER, git_event_id TEXT, operation_id TEXT,
-  reply_to_message_id INTEGER, wait_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
+  reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER, workflow_outcome TEXT,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL),
   CHECK(kind<>'pr_review_requested' OR (task_id IS NOT NULL AND pr_review_item_id IS NOT NULL)));
@@ -60,7 +60,6 @@ CREATE TABLE events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   dedupe TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
   retry_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '[]',
-  reserved_attempt INTEGER REFERENCES model_attempts(id),
   UNIQUE(task_id,dedupe));
 CREATE TABLE t3_events(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, item_type TEXT NOT NULL, item_id TEXT NOT NULL,
@@ -99,7 +98,7 @@ CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<
 CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('run_started','report');
 CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind='bot_message';
 CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind='read_bot_evidence';
-CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,id) WHERE kind='git_pr_followup_requested';
+CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind='git_pr_followup_requested';
 CREATE INDEX journal_tool_feedback ON journal(task_id,feedback_event_id,id) WHERE kind='tool_error';
 
 CREATE TABLE web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
@@ -130,7 +129,6 @@ CREATE TABLE bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target T
  request_key TEXT UNIQUE NOT NULL,source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE bot_creation_intents(
  request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);
-CREATE TABLE environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 
 CREATE INDEX journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX journal_task_results ON journal(task_id,id DESC)
@@ -152,14 +150,13 @@ CREATE TABLE messages(
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  status TEXT NOT NULL CHECK(status IN ('running','paused','policy_waiting','done')),
-  pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
+  status TEXT NOT NULL CHECK(status IN ('running','policy_waiting','done')),
+  reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE INDEX conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
 CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
-  CASE t.status WHEN 'paused' THEN 'needs_you'
-                WHEN 'policy_waiting' THEN 'needs_you'
+  CASE t.status WHEN 'policy_waiting' THEN 'needs_you'
                 WHEN 'done' THEN coalesce(
                   (SELECT conversation_status FROM journal WHERE id=t.reply_id),'access_revoked')
   END AS status
@@ -272,11 +269,8 @@ CREATE UNIQUE INDEX local_machine_open_request
       ON local_machine_connections(bot_id,task_id,environment_id,thread_id,machine_id)
       WHERE status IN ('pending','approved');
 
-CREATE TABLE model_budgets(
-  id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-  CHECK(attempts>=0 AND attempts<=call_limit));
 CREATE TABLE model_attempts(
-  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
+  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL,
   purpose TEXT NOT NULL, time INTEGER NOT NULL,
   message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
   event_id INTEGER REFERENCES events(id), usage TEXT);

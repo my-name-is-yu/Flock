@@ -41,7 +41,6 @@ BotMessageEntry readBotMessage(const Json& data, const RecordDecoder& row) {
                           .requestKind = row.get<std::string>(data, "requestKind"),
                           .text = row.get<std::string>(data, "text"),
                           .replyTo = row.optional<std::string>(data, "replyTo"),
-                          .chargesBudget = row.optional<bool>(data, "chargesBudget"),
                           .status = row.optional<std::string>(data, "status")};
     if (const auto forwarded = row.find(data, "forwardedMessage"); forwarded != data.end())
         entry.forwarded = row.nested("forwardedMessage").decodeClosed(*forwarded, readForwardedPeerMessage);
@@ -75,7 +74,6 @@ Json encodeBotMessage(const BotMessageEntry& entry) {
               {"requestKind", entry.requestKind},
               {"text", entry.text}};
     if (entry.replyTo) data["replyTo"] = *entry.replyTo;
-    if (entry.chargesBudget) data["chargesBudget"] = *entry.chargesBudget;
     if (entry.forwarded) data["forwardedMessage"] = encodeForwardedPeerMessage(*entry.forwarded);
     if (entry.status) data["status"] = *entry.status;
     if (!entry.evidence.empty()) {

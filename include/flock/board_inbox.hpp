@@ -7,18 +7,7 @@
 #include <string_view>
 
 namespace flockv0 {
-enum class InboxKind {
-    user_question,
-    extra_run,
-    deadline,
-    model_budget,
-    conversation_model_budget,
-    unknown_delivery,
-    protected_input,
-    pr_review,
-    pr_reconciliation,
-    policy_approval
-};
+enum class InboxKind { user_question, unknown_delivery, protected_input, pr_review, pr_reconciliation, policy_approval };
 
 std::string_view inboxKindName(InboxKind);
 InboxKind parseInboxKind(std::string_view);

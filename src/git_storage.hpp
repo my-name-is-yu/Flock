@@ -62,7 +62,7 @@ public:
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const TaskData&);
 
     struct GitPrFollowup {
-        enum class Status { available, attempted, limitReached };
+        enum class Status { available, attempted };
         SessionTarget session;
         PolicyOrigin origin;
         std::string operation;

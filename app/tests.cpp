@@ -124,7 +124,6 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     const auto folder = temp.path / "bots";
     auto config = botConfig("old-model");
     config["reasoningEffort"] = "high";
-    config["modelCallLimit"] = 9;
     createBot(folder / "release", config, "", "");
     Bots bots(folder);
     Store store(temp.path / "state.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
@@ -151,11 +150,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     check(model.requests.size() == 1 && failure && failure->code == WaitFailureCode::unsupported_reasoning_effort,
           "The rejected effort did not stop repeat attempts or preserve the failure type");
     bots.updateRunSettings(store, "release",
-                           {{"model", "new-model"},
-                            {"reasoningEffort", ""},
-                            {"environmentId", "new-env"},
-                            {"projectId", "new-project"},
-                            {"modelCallLimit", 7}},
+                           {{"model", "new-model"}, {"reasoningEffort", ""}, {"environmentId", "new-env"}, {"projectId", "new-project"}},
                            now + 1, [](auto, auto) {});
     TaskControl(store).operate(localOwner, TaskTarget::from(rejected.task, rejected.wait.value().id), "retry");
     for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
@@ -163,8 +158,8 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
               !model.requests.back().contains("reasoningEffort") && retried.wait && retried.wait->reason() == WaitReason::user_question &&
               retried.task.environmentId == saved.environmentId && retried.task.projectId == saved.projectId &&
-              retried.task.config.at("session") == saved.config.at("session") && retried.task.config.at("modelCallLimit") == 9,
-          "Retry did not preserve the original task route and allowance while correcting its model");
+              retried.task.config.at("session") == saved.config.at("session"),
+          "Retry did not preserve the original task route and Session settings while correcting its model");
 }
 
 enum class NotesRecovery { Retry, Edit };
@@ -269,9 +264,8 @@ void notesAndRoutingOnRestart() {
         check(t3.commands[0].config["session"]["model"] == "child-model" &&
                   t3.commands[0].config["session"]["providerInstanceId"] == "child-provider" &&
                   t3.commands[0].config["session"]["runtimeMode"] == "auto" &&
-                  t3.commands[0].config["session"]["workspaceStrategy"]["baseRef"] == "origin/main" &&
-                  t3.commands[0].config["runTimeoutSeconds"] == 999,
-              "child settings and timeout must survive intake");
+                  t3.commands[0].config["session"]["workspaceStrategy"]["baseRef"] == "origin/main",
+              "child settings must survive intake");
     }
 
     createBot(folder / "first", botConfig("new-model"), "New SOUL would now ask for something different", "First updated memory");
@@ -594,7 +588,6 @@ void responseContract() {
                    "request_secret_input",
                    "list_connections",
                    "check_environment_readiness",
-                   "update_bot_settings",
                    "request_bot_change",
                    "read_memory",
                    "propose_memory_edit",
@@ -646,11 +639,9 @@ void responseContract() {
           "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_secrets", "list_connections", "check_environment_readiness"})
         check(turnTool(name).at("required") == Json::array(), "unexpected mandatory access-tool parameter");
-    check(turnTool("update_bot_settings").at("required") == Json::array({"environmentId", "runTimeoutSeconds"}) &&
-              turnTool("update_bot_settings").at("properties").at("runTimeoutSeconds").at("maximum") == 2147483647 &&
-              turnTool("request_bot_change").at("required") == Json::array({"operation", "targetBotId", "name"}) &&
+    check(turnTool("request_bot_change").at("required") == Json::array({"operation", "targetBotId", "name"}) &&
               turnTool("request_bot_change").at("properties").at("operation").at("enum") == Json::array({"create_bot", "rename_bot"}),
-          "access request and settings schemas do not match dispatch");
+          "Bot change schema does not match dispatch");
     const std::map<std::string, Json> memoryAutomationRequired{{"read_memory", Json::array()},
                                                                {"memory_history", Json::array()},
                                                                {"propose_memory_edit", {"baseVersion", "content", "rationale"}},
@@ -929,7 +920,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         tickUntil(runtime, [&] { return Tasks(store).task(task).task.state == TaskState::running; }, "the fixed demo never started");
     }
     const auto first = Tasks(store).task(task);
-    check(first.task.doneWhen == "Confirm the output" && first.task.allowance.remaining == 3 && first.runs.size() == 1,
+    check(first.task.doneWhen == "Confirm the output" && first.runs.size() == 1,
           "the fixed demo failed to delegate with the user's provisional criteria");
     {
         Runtime routing(store, changes, *t3, notes);

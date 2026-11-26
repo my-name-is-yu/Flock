@@ -47,7 +47,6 @@ Json payload() {
                                            {"source", instructionSource}}})},
             {"contextIds", {{"answerEventId", 15}, {"peerMessageId", "peer-message"}, {"sourceMessageId", 17}}},
             {"sourceResultRefs", Json::array({source})},
-            {"chargesBudget", true},
             {"destinationAction", true},
             {"expectedCommit", "abc123"},
             {"markedCommitChecks", true},

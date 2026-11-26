@@ -735,8 +735,8 @@ void sessionInvitations() {
           "Inviting a Bot back did not reactivate just that Bot");
 }
 
-void syntheticTurnsShareModelBudget() {
-    struct BudgetT3 : FixedT3 {
+void syntheticTurnsFollowSessionProgress() {
+    struct FollowupT3 : FixedT3 {
         int sends = 0;
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
             if (target != SessionTarget{"env-1", "thread"} && target != SessionTarget{"env-2", "outside"}) return {};
@@ -747,13 +747,15 @@ void syntheticTurnsShareModelBudget() {
         }
         std::string sessionMessageWake(const SessionTarget&, const RunRef&) override { return "finished"; }
     } t3;
-    struct BudgetModel : Model {
-        int calls = 0, inviteeCalls = 0;
+    struct FollowupModel : Model {
+        int calls = 0, wakes = 0, inviteeCalls = 0;
         ModelTurn decide(const ModelInput& input) override {
             ++calls;
             const auto& event = input.event;
             if (event.contains("sessionInvitation")) ++inviteeCalls;
             if (event.at("turn").empty() && !event.contains("sessionInvitation")) {
+                if (event.contains("sessionWake") && ++wakes >= 5)
+                    return {{{"reply", {{"text", "Finished checking."}}, "Finish the follow-ups"}}};
                 if (event.at("text") == "Invite Triage")
                     return {{{"invite_bot",
                               {{"botId", "triage"}, {"environmentId", "env-1"}, {"threadId", "thread"}, {"note", "Review the checks."}},
@@ -774,8 +776,7 @@ void syntheticTurnsShareModelBudget() {
     auto cb = callbacks();
     cb.sessionT3 = &t3;
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        const int limit = bot == "triage" ? 20 : request == "Invite Triage" ? 1 : 2;
-        return {std::string(bot), std::string(request), "env-1", "project", {{"modelCallLimit", limit}}};
+        return {std::string(bot), std::string(request), "env-1", "project"};
     };
     const auto server = startWeb(store, 0, cb);
     Mcp mcp(*server, token);
@@ -784,44 +785,24 @@ void syntheticTurnsShareModelBudget() {
     const auto ask = [&](const char* key, const char* text) {
         mcp.call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", key}, {"text", text}}).at("structuredContent");
     };
-    const auto approve = [&](const Json& item) {
-        Inbox(store).decideInbox(localOwner,
-                                 {item.at("botId"), InboxKind::conversation_model_budget, item.at("itemId"), item.at("waitId"),
-                                  item.at("taskId"), item.at("targetRevision"), item.at("targetGeneration")},
-                                 "approve");
-    };
     ask("follow-ups", "Keep checking");
-    runtime.runConversations();
-    runtime.runConversations();
-    const auto wakeApproval = Inbox(store).inbox(localOwner, "release").at(0);
-    check(model.calls == 2 && t3.sends == 1 && wakeApproval.at("itemKind") == "conversation_model_budget" &&
-              wakeApproval.at("allowance") == 2,
-          "A synthetic wake got a new two-call allowance");
-    approve(wakeApproval);
-    for (int i = 0; i < 3; ++i) runtime.runConversations();
-    const auto nextWake = Inbox(store).inbox(localOwner, "release").at(0);
-    check(model.calls == 4 && t3.sends == 2 && nextWake.at("waitId") != wakeApproval.at("waitId"),
-          "Synthetic wakes did not share the renewed root allowance");
+    for (int tick = 0; tick < 6; ++tick) runtime.runConversations();
+    check(t3.sends == 5 && model.wakes == 5 && Inbox(store).inbox(localOwner, "release").empty(),
+          "fresh Session results did not allow five autonomous follow-ups");
+
     ask("invite", "Invite Triage");
     runtime.runConversations();
-    const auto inviteApproval = Inbox(store).inbox(localOwner, "triage").at(0);
-    check(model.calls == 5 && model.inviteeCalls == 0 && inviteApproval.at("itemKind") == "conversation_model_budget" &&
-              inviteApproval.at("allowance") == 1,
-          "The fresh ask did not get one call, or the invitation used the invitee's allowance");
-    approve(inviteApproval);
-    runtime.runConversations();
-    check(model.calls == 6 && model.inviteeCalls == 1, "The invitee's approval did not restore the originating allowance");
+    check(model.inviteeCalls == 1, "the invitee did not receive its own turn");
 
     connector.connect("env-2", localOwner.id, 4173);
     ask("cross-environment", "Check the other Session.");
     runtime.runConversations();
-    check(t3.sends == 3, "The Bot did not queue a message in the other environment");
-    const auto pausedCount = Conversations(store).pausedConversations("release").size();
+    check(t3.sends == 6, "the Bot did not queue a message in the other environment");
+    const auto calls = model.calls;
     connector.disconnect("env-1");
     connector.connect("env-1", localOwner.id, 4173);
     runtime.runConversations();
-    check(model.calls == 8 && Conversations(store).pausedConversations("release").size() < pausedCount,
-          "Reconnecting the origin revived a wake in a different environment");
+    check(model.calls == calls, "reconnecting the origin revived a wake in a different environment");
 }
 
 void slowProbeAndStoppedApproval() {
@@ -1469,8 +1450,8 @@ int main(int argc, char** argv) {
         webSendParticipation();
         scenario = "Session invitations";
         sessionInvitations();
-        scenario = "synthetic turn model budget";
-        syntheticTurnsShareModelBudget();
+        scenario = "synthetic turns follow Session progress";
+        syntheticTurnsFollowSessionProgress();
         scenario = "slow Session probe and stopped approval";
         slowProbeAndStoppedApproval();
         scenario = "stop selected tasks and consultations";

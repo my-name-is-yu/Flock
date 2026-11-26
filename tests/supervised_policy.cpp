@@ -63,8 +63,10 @@ template <class Error = Conflict, class F> void rejected(F&& action) {
 }
 
 InboxTarget target(const Json& item) {
-    return {item.at("botId"),  InboxKind::policy_approval, item.at("itemId"),          item.at("waitId"),
-            item.at("taskId"), item.at("targetRevision"),  item.at("targetGeneration")};
+    return {item.at("botId"),           parseInboxKind(item.at("itemKind").get_ref<const std::string&>()),
+            item.at("itemId"),          item.at("waitId"),
+            item.at("taskId"),          item.at("targetRevision"),
+            item.at("targetGeneration")};
 }
 
 struct FixtureModel : Model {
@@ -261,7 +263,8 @@ void turns(const std::filesystem::path& path) {
     item = card();
     Inbox(store).decideInbox(requester, target(item), "deny");
     runtime.runConversations();
-    check(actions == 1 && Inbox(store).inbox(requester).empty(), "denied operation retried within the same request");
+    check(actions == 1 && model.outcome.size() == 2 && Inbox(store).inbox(requester).empty(),
+          "Retrying a denied operation created another approval or ran the operation");
     model.retry = false;
 
     constexpr int rulesPerKind = 32;
@@ -527,7 +530,6 @@ void stopRequesterDecidesCurrentStopApproval(const std::filesystem::path& path) 
                          {"instructions", Json::array()},
                          {"contextIds", Json::object()},
                          {"sourceResultRefs", Json::array()},
-                         {"chargesBudget", false},
                          {"destinationAction", true}};
     check(sqlite3_prepare_v2(db.get(),
                              "INSERT INTO outbox(id,task_id,phase,tool,environment_id,project_id,instruction,stop_operation,data)"
