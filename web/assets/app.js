@@ -2545,11 +2545,12 @@ function settingsRow(label, value, click) {
 }
 function pullRequestSetting(bot) {
   const row = node('label', 'settings-row');
-  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback');
+  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback on its pull requests');
   const toggle = node('input', 'settings-row-switch');
   const feedback = node('span', 'settings-card-feedback error');
   feedback.setAttribute('role', 'status');
   toggle.type = 'checkbox';
+  toggle.setAttribute('role', 'switch');
   toggle.checked = bot.fixPullRequests;
   toggle.disabled = !bot.canDelete;
   toggle.addEventListener('change', async () => {
