@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/t3_mcp.hpp"
@@ -251,7 +252,7 @@ void stopDuringSendDispatch() {
               t3.cancelled == std::vector<std::string>{"in-flight-run"},
           "Stop committed before recording and cancelling the in-flight Run");
 
-    store.receive(localOwner, cb.intake("release", ""), "after-wire-race", "Send another update");
+    Conversations(store).receive(localOwner, cb.intake("release", ""), "after-wire-race", "Send another update");
     runtime.runConversations();
     check(t3.sends == 1 && model.wakes == 0 && model.send.at("error") == "This Bot's participation in the Session has stopped",
           "A send or wake passed the committed stop");
@@ -458,9 +459,9 @@ void webSendParticipation() {
         if (id == alice.id || id == admin.id) return true;
         return {};
     });
-    store.receiveWeb(admin, cb.intake("release", ""), "admin-send", "Post as admin.");
+    Conversations(store).receiveWeb(admin, cb.intake("release", ""), "admin-send", "Post as admin.");
     runtime.runConversations();
-    store.receiveWeb(admin, cb.intake("release", ""), "admin-leave", "Leave as admin.");
+    Conversations(store).receiveWeb(admin, cb.intake("release", ""), "admin-leave", "Leave as admin.");
     runtime.runConversations();
     check(t3.sends == 2 && model.leave.value("ok", false) && model.leave.at("cancelled") == 1 &&
               t3.cancelled.back() == "admin-thread/web-send-run",
@@ -621,10 +622,10 @@ void sessionInvitations() {
                        "UPDATE conversation_turns SET status='running',reply_id=NULL" +
                        where;
     check(sqlite3_exec(sql.get(), reset.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "Could not replay the invitation step");
-    const auto before = store.conversation("triage");
+    const auto before = Conversations(store).conversation("triage");
     runtime = std::make_unique<Runtime>(store, model, t3, soul, options);
     runtime->runConversations();
-    check(model.receipts.at("Release Bot") == first && store.conversation("triage") == before && model.invitations == 3 &&
+    check(model.receipts.at("Release Bot") == first && Conversations(store).conversation("triage") == before && model.invitations == 3 &&
               model.wakes == 0 && t3.checkedRuns == std::vector<std::string>{"triage-run"},
           "A retried invitation duplicated an event or a different Run caused a wake");
     check(std::ranges::count_if(before, [](const Json& row) { return row.at("data").contains("sessionInvitation"); }) == 1,
@@ -651,7 +652,7 @@ void sessionInvitations() {
 
     const auto reject = [&](const char* request, const char* recipient, std::string_view error) {
         model.target = recipient;
-        store.receiveWeb(bob, cb.intake("release", ""), request, "Try another invitation.");
+        Conversations(store).receiveWeb(bob, cb.intake("release", ""), request, "Try another invitation.");
         runtime->runConversations();
         check(model.receipts.at("Release Bot") == Json{{"ok", false}, {"error", error}},
               "Unexpected invitation result: " + model.receipts.at("Release Bot").dump());
@@ -803,11 +804,11 @@ void syntheticTurnsShareModelBudget() {
     ask("cross-environment", "Check the other Session.");
     runtime.runConversations();
     check(t3.sends == 3, "The Bot did not queue a message in the other environment");
-    const auto pausedCount = store.pausedConversations("release").size();
+    const auto pausedCount = Conversations(store).pausedConversations("release").size();
     connector.disconnect("env-1");
     connector.connect("env-1", localOwner.id, 4173);
     runtime.runConversations();
-    check(model.calls == 8 && store.pausedConversations("release").size() < pausedCount,
+    check(model.calls == 8 && Conversations(store).pausedConversations("release").size() < pausedCount,
           "Reconnecting the origin revived a wake in a different environment");
 }
 
@@ -1017,7 +1018,7 @@ void inviteIntoPeerLaunch() {
     });
     const auto invite = [&](const Person& actor, const char* id) {
         connector.connect("env-1", actor.id, 4173);
-        store.receiveWeb(actor, cb.intake("triage", ""), id, "Invite the verifier.");
+        Conversations(store).receiveWeb(actor, cb.intake("triage", ""), id, "Invite the verifier.");
         runtime.runConversations();
     };
     invite(other, "foreign-peer-launch");
@@ -1114,7 +1115,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     changed = ask;
     changed["threadId"] = "other-thread";
     check(mcp.call("flock_ask", changed).value("isError", false), "Changed threadId with the same requestId was accepted");
-    check(db->conversation("release").size() == 1, "Ask retries created multiple conversation messages");
+    check(Conversations(*db).conversation("release").size() == 1, "Ask retries created multiple conversation messages");
 
     AskModel model;
     const auto soul = [](std::string_view) { return std::string{}; };
@@ -1244,7 +1245,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     server = startWeb(*db, 0, cb);
     runtime = std::make_unique<Runtime>(*db, model, *t3, soul, options);
     // Simulate a non-Session-origin wake that was already queued for a model turn.
-    const auto queuedWake = db->receive(localOwner, cb.intake("release", ""), "queued-before-stop", "Pending wake");
+    const auto queuedWake = Conversations(*db).receive(localOwner, cb.intake("release", ""), "queued-before-stop", "Pending wake");
     const auto markWake = "UPDATE messages SET routing=json_set(routing,'$.sessionWake',json_object("
                           "'environmentId','env-1','threadId','thread','reason','finished')) WHERE id=" +
                           std::to_string(queuedWake.at("messageId").get<Id>());
@@ -1298,12 +1299,12 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     check(ask("triage", "leave", "Leave this Session").contains("structuredContent"), "The other Bot stopped participating");
     runtime->runConversations();
     check(participationState(database, "triage") == "left" &&
-              db->conversation("triage").back().at("data").at("text").get<std::string>().find("cancelled 1 queued message") !=
-                  std::string::npos &&
+              Conversations(*db).conversation("triage").back().at("data").at("text").get<std::string>().find(
+                  "cancelled 1 queued message") != std::string::npos &&
               effects().at("t3_queue").back() == cancel("bot-run-4") && effects().at("t3_queue").size() == 5 &&
               !effects().contains("t3_thread_interrupt") && runs().at("person-queued") == "queued",
           "leave_session did not perform and report the same stop as flock_stop");
-    db->receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
+    Conversations(*db).receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
     runtime->runConversations();
     auto sharedTools = model.ask.webTools;
     check(std::erase(sharedTools, "review_preference") == 1 && sharedTools == model.ask.sessionTools,

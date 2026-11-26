@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/limits.hpp"
@@ -363,7 +364,7 @@ struct Fixture {
     }
     Json enqueue(std::string_view key, std::string_view text, Id replyTo = 0) {
         Store httpWriter(dir / "state.db");
-        return httpWriter.receive(localOwner, routing(), key, text, replyTo);
+        return Conversations(httpWriter).receive(localOwner, routing(), key, text, replyTo);
     }
     void script(std::string_view text, std::vector<Step> steps) { model.turns.insert_or_assign(std::string(text), std::move(steps)); }
     Json receive(std::string_view key, std::string_view text, Id replyTo = 0) {
@@ -395,12 +396,12 @@ struct Fixture {
                      "state " + std::string(state) + " was not reached for task " + std::to_string(id));
     }
     Json conversationMessage(Id id) {
-        const auto timeline = store->conversation("alpha");
+        const auto timeline = Conversations(*store).conversation("alpha");
         const auto found = std::find_if(timeline.begin(), timeline.end(), [&](const Json& row) { return row["id"] == id; });
         return found == timeline.end() ? Json(nullptr) : (*found)["data"];
     }
     Json response(const Json& receipt, std::string_view bot = "alpha") {
-        for (const auto& row : store->conversation(bot))
+        for (const auto& row : Conversations(*store).conversation(bot))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == receipt["messageId"]) return row["data"];
         return nullptr;
     }
@@ -484,7 +485,7 @@ void durableInboxAndTargetedRevision() {
     f.tick();
     check(f.event(id, "completed").is_null() && f.t3.sent.size() == 2 && f.task(other)["state"] == "completed",
           "a saved revision accepted a stale completion or held another task");
-    const auto receipt = f.store->receipt(localOwner, "alpha", "raw", criteria);
+    const auto receipt = Conversations(*f.store).receipt(localOwner, "alpha", "raw", criteria);
     check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "stopping", "the accepted revision was not recorded");
     f.model.beforeComplete = {};
     f.restart();
@@ -518,12 +519,13 @@ void linkedResultStartsANewSession() {
                  check(input.event.at("sessionOrigin").at("threadId") == "origin", "The result reply lost the Session origin");
                  return Decision{"reply", {{"text", "The plan came from the linked child Session."}}, "Report the Session"};
              }});
-    const auto reply = f.store->receiveWeb(localOwner, f.routing(), "reply-to-plan", "Which Session produced the plan?", resultId);
+    const auto reply =
+        Conversations(*f.store).receiveWeb(localOwner, f.routing(), "reply-to-plan", "Which Session produced the plan?", resultId);
     f.runtime->runConversations();
     check(f.response(reply).at("text") == "The plan came from the linked child Session.", "The explicit result reply failed");
     participation.stop(*connection, "alpha", "origin");
     f.script("2案目を実装して", {start({{"request", "Implement option 2: capture a fixture trace"}, {"sourceResultMessageId", resultId}})});
-    f.store->receiveWeb(localOwner, f.routing(), "implement", "2案目を実装して");
+    Conversations(*f.store).receiveWeb(localOwner, f.routing(), "implement", "2案目を実装して");
     f.runtime->runConversations();
     const auto task = taskJson(f.store->tasks("alpha").front());
     const auto id = task["id"].get<Id>();
@@ -696,7 +698,8 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     check(!listed(f.model.turnInputs.back(), color).at("wait").at("answerable").get<bool>() && f.lastTurn()[0]["result"]["ok"] == false &&
               f.task(color)["wait"] == wait,
           "a reply to an unrelated message answered a task question");
-    const auto foreign = f.store->receive(localOwner, f.routing("", "beta"), "foreign-greeting", "hello", wait.at("messageId"));
+    const auto foreign =
+        Conversations(*f.store).receive(localOwner, f.routing("", "beta"), "foreign-greeting", "hello", wait.at("messageId"));
     f.runtime->runConversations();
     f.receive("foreign-yes", "yes", f.response(foreign, "beta").at("messageId"));
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
@@ -816,7 +819,7 @@ void attachedChoiceCanBeInspectedBeforeAnswering() {
                           return call;
                       },
                       say("I recorded your answer.")});
-    const auto receipt = f.store->receive(
+    const auto receipt = Conversations(*f.store).receive(
         localOwner, f.routing(), "attached-choice", choice, wait.at("messageId"),
         Json::array({{{"name", "screenshot.png"},
                       {"mimeType", "image/png"},
@@ -883,7 +886,8 @@ void directChoiceRechecksWebAuthority() {
     f.model.questions.emplace(task, Json{{"question", "Which name?"}, {"choices", {"Maple", "Juniper"}}});
     f.reach(task, "waiting");
     const auto wait = f.task(task).at("wait");
-    const auto receipt = f.store->receiveWeb({"web-root", true}, f.routing(), "queued-web-choice", "Maple", wait.at("messageId"));
+    const auto receipt =
+        Conversations(*f.store).receiveWeb({"web-root", true}, f.routing(), "queued-web-choice", "Maple", wait.at("messageId"));
     int lookups = 0;
     f.store->setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
         if (person == "web-root" && ++lookups == 1) return true;
@@ -957,7 +961,7 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
     const Intake automatic{"alpha", "", "", ""};
     const auto request = "Check the build";
     f.script(request, {start()});
-    f.store->receive(localOwner, automatic, "new-project", request);
+    Conversations(*f.store).receive(localOwner, automatic, "new-project", request);
     f.runtime->runConversations();
     const Id task = f.store->tasks("alpha").front().task.id;
     f.reach(task, "waiting");
@@ -1107,10 +1111,10 @@ void pausedTurnDoesNotHoldCompletion() {
                   readResult = input.event.at("turn").back().at("result").at("text") == "Timing evidence";
                   return Decision{"reply", {{"text", "It already finished."}}, "Report the current state"};
               }});
-    const auto message = f.store->receive(localOwner, limited, "paused", "Check what is running, then change the criteria");
+    const auto message = Conversations(*f.store).receive(localOwner, limited, "paused", "Check what is running, then change the criteria");
     f.tick();
     f.tick();
-    check(f.store->pausedConversations("alpha").size() == 1, "the conversation did not pause for model approval");
+    check(Conversations(*f.store).pausedConversations("alpha").size() == 1, "the conversation did not pause for model approval");
     f.t3.finish("run-1", "Timing evidence");
     f.reach(id, "completed");
     Id reportId = 0;
@@ -1118,14 +1122,14 @@ void pausedTurnDoesNotHoldCompletion() {
         if (row.at("kind") == "completed") reportId = row.at("id").get<Id>();
     check(reportId > message.at("messageId").get<Id>(), "the fixture report did not arrive after the conversation message");
     for (int call = 0; call < 3; ++call) {
-        const auto paused = f.store->pausedConversations("alpha").at(0);
+        const auto paused = Conversations(*f.store).pausedConversations("alpha").at(0);
         const Id pause = paused.at("messageId");
         f.store->decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, paused.at("replyToMessageId"), pause, 0, 0, pause},
                              "approve");
         f.tick();
     }
-    check(f.store->pausedConversations("alpha").empty() && seen == "completed" && latestResult.value("messageId", Id{0}) == reportId &&
-              latestResult.value("kind", std::string{}) == "completed" &&
+    check(Conversations(*f.store).pausedConversations("alpha").empty() && seen == "completed" &&
+              latestResult.value("messageId", Id{0}) == reportId && latestResult.value("kind", std::string{}) == "completed" &&
               latestResult.value("excerpt", std::string{}) == "Timing evidence" && reportInHistory && foundResult && readResult,
           "the approved turn did not see the task's latest report");
 }
@@ -1776,11 +1780,11 @@ void sessionReportsCannotBecomePreferences() {
     };
     const auto followUpReceipt = f.receive("session-report-review", followUp, source);
     const auto history = f.store->memory(localOwner, "alpha", "memory_history", Json::object());
-    check(
-        reviews == 1 && f.lastTurn().back().at("result").at("ok") == true && f.response(followUpReceipt).at("text") == "Done." &&
-            history.at("revisions").size() == 1 &&
-            std::ranges::none_of(f.store->conversation("alpha"), [](const Json& event) { return event.at("kind") == "memory_remembered"; }),
-        "A preference from a Session report was saved");
+    check(reviews == 1 && f.lastTurn().back().at("result").at("ok") == true && f.response(followUpReceipt).at("text") == "Done." &&
+              history.at("revisions").size() == 1 &&
+              std::ranges::none_of(Conversations(*f.store).conversation("alpha"),
+                                   [](const Json& event) { return event.at("kind") == "memory_remembered"; }),
+          "A preference from a Session report was saved");
 }
 
 void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
@@ -1841,7 +1845,7 @@ void unrelatedUpdatesDoNotDisturbATurn() {
     check(f.event(targetId, "instruction_accepted")["messageId"] == receipt["messageId"] &&
               f.event(other, "instruction_accepted").is_null() && f.response(receipt)["actions"].size() == 1,
           "an unrelated generation change or later receipt disturbed the turn");
-    const auto later = f.store->receipt(localOwner, "alpha", "arrived-later", "status");
+    const auto later = Conversations(*f.store).receipt(localOwner, "alpha", "arrived-later", "status");
     check(later && f.response(*later)["text"] == "Working on it.", "the later message did not get its own turn after the earlier one");
 }
 
@@ -1904,7 +1908,7 @@ void concurrentTasksShareModelBudget() {
                     start({{"request", "クラウドMacでメモリを計測して"}, {"environment", "クラウドMac"}})});
     auto routing = f.routing();
     routing.config["modelCallLimit"] = 4;
-    f.store->receive(localOwner, routing, "compound-budget", text);
+    Conversations(*f.store).receive(localOwner, routing, "compound-budget", text);
     f.runtime->runConversations();
     const auto tasks = taskJson(f.store->tasks("alpha"));
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "desktop" && f.task(tasks[0]["id"])["environmentId"] == "cloud",
@@ -2007,7 +2011,7 @@ void canonicalMoveKeepsProjectAndGateway() {
     f.script(text, {change(moving, {{"environment", "cloud"}})});
     auto intake = f.routing(text, "alpha", "desktop", "project");
     intake.config["conversationEnvironments"] = aliases;
-    f.store->receive(localOwner, intake, "canonical-move", text);
+    Conversations(*f.store).receive(localOwner, intake, "canonical-move", text);
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
               Json{{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}, {"pinned", true}},
@@ -2040,7 +2044,7 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
     f.script(text, {change(moving, {{"environment", "cloud"}})});
     auto intake = f.routing(text, "alpha", "desktop", "conversation-project");
     intake.config["conversationEnvironments"] = aliases;
-    f.store->receive(localOwner, intake, "non-default-canonical-move", text);
+    Conversations(*f.store).receive(localOwner, intake, "non-default-canonical-move", text);
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
               Json{{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}, {"pinned", true}},
@@ -2063,7 +2067,7 @@ void sameEnvironmentMoveKeepsGateway() {
     initial.config["conversationEnvironments"] = aliases;
     const auto request = "Start linked cloud work";
     f.script(request, {start({{"request", request}, {"environment", "cloud-target"}})});
-    f.store->receive(localOwner, initial, "same-environment-start", request);
+    Conversations(*f.store).receive(localOwner, initial, "same-environment-start", request);
     f.runtime->runConversations();
     const auto moving = f.store->tasks("alpha").front().task.id;
     f.reach(moving, "running");
@@ -2074,7 +2078,7 @@ void sameEnvironmentMoveKeepsGateway() {
     f.script(text, {change(moving, {{"environment", "cloud"}})});
     auto intake = f.routing(text, "alpha", "desktop", "project");
     intake.config["conversationEnvironments"] = aliases;
-    f.store->receive(localOwner, intake, "same-environment-change", text);
+    Conversations(*f.store).receive(localOwner, intake, "same-environment-change", text);
     f.runtime->runConversations();
     f.t3.finish("run-1", "Old linked destination settled");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the same-environment edit was not relaunched");
@@ -2094,7 +2098,7 @@ void productionGatewayOnlyLaunch() {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     constexpr auto request = "Start linked cloud work";
     f.script(request, {start({{"environment", "cloud-target"}})});
-    f.store->receive(localOwner, route, "gateway-only-launch", request);
+    Conversations(*f.store).receive(localOwner, route, "gateway-only-launch", request);
     f.runtime->runConversations();
     const auto id = f.store->tasks("alpha").front().task.id;
     f.reach(id, "running");
@@ -2173,7 +2177,7 @@ void conflictingDiscoveryDoesNotMoveTask() {
         const auto original = f.task(id);
         constexpr auto request = "Move the existing work to cloud";
         f.script(request, {change(id, {{"environment", "cloud"}}), start({{"environment", "cloud"}})});
-        f.store->receive(localOwner, intake, "conflicting-discovery", request);
+        Conversations(*f.store).receive(localOwner, intake, "conflicting-discovery", request);
         f.runtime->runConversations();
         const auto steps = f.lastTurn();
         check(steps.size() == 2 && !steps[0].at("result").at("ok").get<bool>() && !steps[1].at("result").at("ok").get<bool>(),
@@ -2198,7 +2202,7 @@ Id twoLinkedDestinationTask(Fixture& f) {
     f.t3.projectsByEnvironment["other"] = {{"other-project", "Other fixture", {}}};
     constexpr auto request = "Start work on both linked targets";
     f.script(request, {start({{"environments", {"cloud-target", "other-target"}}})});
-    f.store->receive(localOwner, route, "two-linked-targets", request);
+    Conversations(*f.store).receive(localOwner, route, "two-linked-targets", request);
     f.runtime->runConversations();
     const auto id = f.store->tasks("alpha").front().task.id;
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "both linked destinations were not dispatched");
@@ -2390,7 +2394,7 @@ Id oneLinkedDestinationTask(Fixture& f, std::string_view key, std::string_view r
         {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.script(request, {start({{"environments", {"cloud-target"}}})});
-    f.store->receive(localOwner, route, key, request);
+    Conversations(*f.store).receive(localOwner, route, key, request);
     f.runtime->runConversations();
     return f.lastTurn().front().at("result").at("taskId").get<Id>();
 }
@@ -2672,7 +2676,7 @@ Id otherAndCloudDestinationTask(Fixture& f, std::string_view key, std::string_vi
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.t3.projectsByEnvironment["other"] = {{"other-project", "Other fixture", {}}};
     f.script(request, {start({{"environments", {"other-target", "cloud-target"}}})});
-    f.store->receive(localOwner, route, key, request);
+    Conversations(*f.store).receive(localOwner, route, key, request);
     f.runtime->runConversations();
     return f.lastTurn().front().at("result").at("taskId").get<Id>();
 }
@@ -2873,7 +2877,7 @@ void pinnedDestinationFollowupKeepsVerificationContract() {
         {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.script(request, {start({{"environments", {"cloud-target"}}, {"commit", commit}})});
-    f.store->receive(localOwner, route, "pinned-followup-parent", request);
+    Conversations(*f.store).receive(localOwner, route, "pinned-followup-parent", request);
     f.runtime->runConversations();
     const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
     f.advanceUntil(
@@ -2931,7 +2935,8 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
     } else if (closeRoute == "access") {
         f.store->policy().setMember(localOwner, "alpha", accessMember.id, true);
         Store writer(f.dir / "state.db");
-        receipt = writer.receive(accessMember, f.routing(), "prepared-session-send", "Send a follow-up before access closes");
+        receipt =
+            Conversations(writer).receive(accessMember, f.routing(), "prepared-session-send", "Send a follow-up before access closes");
     } else if (closeRoute == "channel_access") {
         struct Transport final : ChannelTransport {
             ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view, const Json&) override {
@@ -3091,7 +3096,7 @@ void savedFollowupHoldsSlotUntilItsReceiptAndRunSettle() {
             };
         constexpr auto instruction = "Send a follow-up in the saved destination";
         f.script(instruction, {sendCloudFollowup(taskId)});
-        const auto receipt = f.store->receive(member, f.routing(), "receipt-followup", instruction);
+        const auto receipt = Conversations(*f.store).receive(member, f.routing(), "receipt-followup", instruction);
         bool contended = false;
         try {
             f.runtime->runConversations();
@@ -3208,7 +3213,7 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
     route.config["conversationEnvironments"]["cloud-target"] = {
         {"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "desktop"}};
     f.script(startText, {start({{"environments", {"cloud-target"}}})});
-    f.store->receive(taskRequester, route, "requester-bound-stop-task", startText);
+    Conversations(*f.store).receive(taskRequester, route, "requester-bound-stop-task", startText);
     f.runtime->runConversations();
     const auto taskId = f.lastTurn().front().at("result").at("taskId").get<Id>();
     f.advanceUntil(
@@ -3233,7 +3238,7 @@ void recoveredStopApprovalBelongsToTheStopRequester() {
                                   {"gatewayEnvironmentId", "desktop"}},
                                  "Stop the recovered destination Run"};
              }});
-    f.store->receive(stopRequester, route, "requester-bound-stop", stopText);
+    Conversations(*f.store).receive(stopRequester, route, "requester-bound-stop", stopText);
     f.runtime->runConversations();
     f.t3.deliveryVisible = true;
     auto stopCards = f.store->inbox(stopRequester, "alpha");
@@ -3543,13 +3548,13 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     const Intake automatic{"alpha", "", "", ""};
     constexpr auto request = "Start work on desktop";
     f.script(request, {start({{"environment", "desktop"}})});
-    f.store->receive(localOwner, automatic, "create-on-desktop", request);
+    Conversations(*f.store).receive(localOwner, automatic, "create-on-desktop", request);
     f.runtime->runConversations();
     const Id moving = f.store->tasks("alpha").front().task.id;
     f.reach(owner, "running");
     f.reach(moving, "running");
     f.script("Move the work to cloud", {change(moving, {{"environment", "cloud"}})});
-    f.store->receive(localOwner, automatic, "select-cloud-project", "Move the work to cloud");
+    Conversations(*f.store).receive(localOwner, automatic, "select-cloud-project", "Move the work to cloud");
     f.runtime->runConversations();
     check(f.task(moving)["pendingDestination"] ==
               Json{{"environmentId", "cloud"}, {"projectId", "cloud-project"}, {"gatewayEnvironmentId", "cloud"}, {"pinned", false}},
@@ -4029,7 +4034,7 @@ void environmentsResolveByNameOrId() {
     };
     f.script(text, {start({{"request", "Benchmark"}, {"environment", "cloud"}}),
                     start({{"request", "Archive"}, {"environment", "z-final"}}), start({{"request", "Audit"}, {"environment", "mars"}})});
-    const auto message = f.store->receive(localOwner, routing, "environments", text);
+    const auto message = Conversations(*f.store).receive(localOwner, routing, "environments", text);
     f.runtime->runConversations();
     const auto tasks = taskJson(f.store->tasks("alpha"));
     const auto cloudTask = tasks.size() > 1 ? f.task(tasks[1]["id"]) : Json::object();
@@ -4073,7 +4078,7 @@ void existingSessionStartsNormalWork() {
                                       {{"request", request}, {"sessionRef", sessions.front().at("sessionRef")}},
                                       "Start work in the chosen Session"};
                   }});
-        f.store->receive(localOwner, f.routing(request, "alpha", "", ""), request, request);
+        Conversations(*f.store).receive(localOwner, f.routing(request, "alpha", "", ""), request, request);
         f.runtime->runConversations();
         const auto taskId = f.store->tasks("alpha").front().task.id;
         f.reach(taskId, "running");

@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
@@ -204,7 +205,7 @@ void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const st
     store.policy().setMode(localOwner, "full");
     const auto call = [&](const char* clientId, std::string tool, const Json& args) {
         model.next = {std::move(tool), args, "Check a Session from the origin turn"};
-        store.receiveWeb(member, intake, clientId, "Follow up on this work.", message);
+        Conversations(store).receiveWeb(member, intake, clientId, "Follow up on this work.", message);
         runtime.runConversations();
         check(model.origin == origin, "An explicit reply lost the original Session context");
         return model.result;

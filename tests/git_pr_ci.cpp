@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "model.hpp"
 #include "flock/decision.hpp"
@@ -114,7 +115,7 @@ private:
 
 Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::string tool, Json args) {
     model.calls.insert_or_assign(id, Decision{std::move(tool), std::move(args), {}});
-    store.receive(localOwner, intake(), id, id);
+    Conversations(store).receive(localOwner, intake(), id, id);
     runtime.runConversations();
     if (!model.results.contains(id)) throw std::runtime_error("No result for " + id);
     return model.results.at(id);
@@ -220,7 +221,8 @@ void runner() {
         runtime.runConversations();
         check(script.notifications == 1 && host->logCalls == 1 && historyCount(store, task, "git_webhook") == 1,
               "CI event did not wake exactly the persistent PR owner");
-        check(store.history(other) == otherHistory && store.conversation("other").dump().find("CI failed") == std::string::npos,
+        check(store.history(other) == otherHistory &&
+                  Conversations(store).conversation("other").dump().find("CI failed") == std::string::npos,
               "unrelated task was woken");
         check(store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
               "CI report is missing from the owning task");

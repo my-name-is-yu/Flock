@@ -1,4 +1,5 @@
 #include "change_feed.hpp"
+#include "flock/conversations.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/store.hpp"
@@ -109,7 +110,7 @@ void ChangeFeed::stop() {
     if (worker_.joinable()) worker_.join();
 }
 
-void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::ConversationChanges& changes) {
+void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Conversations::ConversationChanges& changes) {
     std::map<Scope, std::shared_ptr<const Projection>> snapshots;
     for (const auto& scope : scopes) {
         auto& snapshot = snapshots[scope];
@@ -162,8 +163,8 @@ void ChangeFeed::monitor() {
             const auto stamp = store_.changeStamp();
             if (!requested && !profileCheck && stamp == lastStamp) scopes = std::move(pending);
             if (!scopes.empty()) {
-                Store::ConversationChanges changes{journalCursor.value_or(0), {}};
-                if (!journalCursor || stamp != lastStamp) changes = store_.conversationChangesSince(journalCursor);
+                Conversations::ConversationChanges changes{journalCursor.value_or(0), {}};
+                if (!journalCursor || stamp != lastStamp) changes = Conversations(store_).conversationChangesSince(journalCursor);
                 refresh(scopes, changes);
                 journalCursor = changes.through;
             }

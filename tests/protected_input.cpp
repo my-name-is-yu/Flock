@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/bot_change.hpp"
@@ -245,7 +246,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
         runtime.runConversations();
     };
     model.next = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "NewBot"}, {"name", "New Bot"}}, {}};
-    store.receive(creator, Intake{"Ernest", "", "env", "project"}, "create", "Create a Bot");
+    Conversations(store).receive(creator, Intake{"Ernest", "", "env", "project"}, "create", "Create a Bot");
     run(store);
     check(model.result.is_null() && attempts == 1, "Uncertain creation saved a terminal tool result");
     check(!store.policy().allows(creator, Action::bot_settings, "NewBot"), "Interrupted creation finalized ownership prematurely");
@@ -269,7 +270,7 @@ void creationRecoversWithOriginalOwner(const std::filesystem::path& path, bool p
         appliedKey.clear();
         failing = false;
         model.next = {"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "NewBot"}, {"name", "New Bot"}}, {}};
-        restarted.receive(creator, Intake{"Ernest", "", "env", "project"}, "recreate", "Create a Bot again");
+        Conversations(restarted).receive(creator, Intake{"Ernest", "", "env", "project"}, "recreate", "Create a Bot again");
         run(restarted);
     }
     check(!publishedKey.empty() && model.result.at("turn").back().at("result").at("status") == "applied",
@@ -293,7 +294,7 @@ void exercise(const std::filesystem::path& dir) {
     unsigned message = 0;
     auto turn = [&](std::string name, Json args = Json::object(), std::string text = "acknowledged") {
         model.next = {std::move(name), std::move(args), ""};
-        store.receive(localOwner, ernest, std::to_string(++message), text);
+        Conversations(store).receive(localOwner, ernest, std::to_string(++message), text);
         runtime.runConversations();
         return model.result.dump();
     };
@@ -364,7 +365,7 @@ void exercise(const std::filesystem::path& dir) {
                 std::string::npos &&
             applied.size() == 2,
         "Never allowed a Bot change");
-    check(store.conversation("Ernest").dump().find(credential) == std::string::npos &&
+    check(Conversations(store).conversation("Ernest").dump().find(credential) == std::string::npos &&
               policy.botSettings(owner, "Ernest").dump().find(credential) == std::string::npos,
           "value in conversation or audit");
     check(chmod(vaultFile.c_str(), 0644) == 0, "fixture mode");
@@ -382,7 +383,7 @@ void exercise(const std::filesystem::path& dir) {
     std::filesystem::remove(dir / "secrets");
     std::filesystem::rename(dir / "original-vault", dir / "secrets");
     model.next = {"list_secrets", Json::object(), "list"};
-    store.receive(localOwner, reviewer, "peer-names", "show names", 0);
+    Conversations(store).receive(localOwner, reviewer, "peer-names", "show names", 0);
     runtime.runConversations();
     check(model.result.at("turn").at(0).at("result").at("names") == Json::array({"repo-token"}), "shared secret names unavailable");
     check(policy.redactSecrets("Reviewer", Json(credential)) == "[redacted]" &&

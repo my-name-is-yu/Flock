@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "conversation_context_storage.hpp"
 
 #include "attachment_storage.hpp"
@@ -91,9 +92,9 @@ Json ConversationContextStorage::compactions(std::string_view bot, Id before, un
     return result;
 }
 
-Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
-    return p_->conversationContextStorage.compactions(bot, before, limit);
+Json Conversations::compactions(std::string_view bot, Id before, unsigned limit) const {
+    std::lock_guard lock(database_.mutex);
+    return context_.compactions(bot, before, limit);
 }
 
 Json ConversationContextStorage::conversationHistory(const conversation::Message& message, const Json& summaries,

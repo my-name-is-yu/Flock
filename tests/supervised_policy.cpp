@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "flock/bot_change.hpp"
@@ -125,7 +126,7 @@ void reopen(const std::filesystem::path& path) {
         Store store(path);
         store.policy().setOwner(requester, "release");
         store.policy().changeNeverRule(localOwner, Action::repository_read, "github.com/example/private", true);
-        oldMessage = store.receive(requester, intake, "existing", "Existing turn").at("messageId");
+        oldMessage = Conversations(store).receive(requester, intake, "existing", "Existing turn").at("messageId");
     }
     Store reopened(path);
     auto policy = reopened.policy();
@@ -191,7 +192,7 @@ void turns(const std::filesystem::path& path) {
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
     int sequence = 0;
     auto send = [&](std::string_view text, const Person& actor = requester) {
-        const auto receipt = store.receive(actor, intake, std::to_string(++sequence), text);
+        const auto receipt = Conversations(store).receive(actor, intake, std::to_string(++sequence), text);
         runtime.runConversations();
         return receipt.at("messageId").get<Id>();
     };
@@ -316,7 +317,7 @@ void downstreamApproval(const std::filesystem::path& path) {
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     const auto approve = [&](std::string_view id, Decision action) {
         model.action = std::move(action);
-        store.receive(localOwner, intake, id, "Use this tool");
+        Conversations(store).receive(localOwner, intake, id, "Use this tool");
         runtime.runConversations();
         const auto items = store.inbox(localOwner);
         check(items.size() == 1 && items.at(0).at("status") == "pending", "Tool did not await its one-shot approval");
@@ -333,7 +334,7 @@ void downstreamApproval(const std::filesystem::path& path) {
 
     const Decision privateEdit{"apply_memory_edit", {{"baseVersion", 0}, {"content", "Use Markdown"}}, "Edit"};
     model.action = privateEdit;
-    store.receive(member, intake, "member-edit", "Remember to use Markdown");
+    Conversations(store).receive(member, intake, "member-edit", "Remember to use Markdown");
     runtime.runConversations();
     check(store.inbox(localOwner).empty(), "An ineligible private memory edit requested approval");
     check(model.outcome.at(0).at("result") == Json{{"ok", false}, {"error", "Memory access denied"}},

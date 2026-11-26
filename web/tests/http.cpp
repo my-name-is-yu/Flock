@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/t3_connection.hpp"
 #include "http_fixture.hpp"
 #include "../change_feed.hpp"
@@ -249,7 +250,8 @@ void messageReceipts(const std::filesystem::path& path) {
         const Json revoked{{"botId", "release"}, {"clientMessageId", "revoked"}, {"text", "Revoke while loading settings"}};
         requester.post("/api/messages", revoked, 403);
         requester.post("/api/messages", message, 403);
-        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+        check(Conversations(store).conversation("release").size() == 2 && Conversations(store).conversation("triage").size() == 1 &&
+                  store.tasks().empty(),
               "denied or replayed messages duplicated conversation entries or started work");
         access.setMember(owner, "release", "requester", true);
     }
@@ -269,7 +271,8 @@ void messageReceipts(const std::filesystem::path& path) {
         changed["text"] = "Draft something else";
         check(requester.post("/api/messages", changed, 409).at("error") == "message_conflict",
               "changing the text behind a receipt did not conflict");
-        check(store.conversation("release").size() == 2 && store.conversation("triage").size() == 1 && store.tasks().empty(),
+        check(Conversations(store).conversation("release").size() == 2 && Conversations(store).conversation("triage").size() == 1 &&
+                  store.tasks().empty(),
               "replaying persisted receipts duplicated conversation entries or started work");
     }
 }
@@ -646,7 +649,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
 
-    const auto recipient = store.conversation("triage", 0, 200);
+    const auto recipient = Conversations(store).conversation("triage", 0, 200);
     const auto sender = store.peerConversation("release", "triage", 0, 200);
     check(sender.size() == 72, "historical DM fixture did not span multiple pages");
     const auto& target = sender.at(24);
@@ -770,7 +773,8 @@ void exercise(const std::filesystem::path& path) {
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(cli.tasks().empty() && cli.conversation("release").empty(), "rejected HTTP requests still submitted messages or work");
+    check(cli.tasks().empty() && Conversations(cli).conversation("release").empty(),
+          "rejected HTTP requests still submitted messages or work");
     const auto release = cli.submit(web.intake("release", "下書きの掲載範囲を確認する"));
     const auto triage = cli.submit(web.intake("triage", "昨日届いた不具合を確認する"));
     const auto settings = cli.submit(web.intake("settings", "接続設定を確認する"));
@@ -954,7 +958,8 @@ void sidebarReplies(const std::filesystem::path& path) {
         return *row;
     };
     const auto send = [&](unsigned sequence) {
-        store.receive(Person{"owner", true}, cb.intake("release", "Same request"), "sidebar-" + std::to_string(sequence), "Same request");
+        Conversations(store).receive(Person{"owner", true}, cb.intake("release", "Same request"), "sidebar-" + std::to_string(sequence),
+                                     "Same request");
     };
     send(0);
     check(release().at("latestIncomingEventId") == 0, "an outgoing message appeared as an incoming reply");
@@ -1040,7 +1045,7 @@ void notificationEvents(const std::filesystem::path& path) {
     administrator.client.set_default_headers({{"Authorization", "Bearer owner"}});
 
     const auto reply = [&](std::string_view bot, std::string_view key) {
-        store.receive(owner, web.intake(bot, "Can you help?"), key, "Can you help?");
+        Conversations(store).receive(owner, web.intake(bot, "Can you help?"), key, "Can you help?");
     };
     constexpr auto endpoint = "/api/notifications";
     const auto cursor = [](const Json& page) { return Json{{"after", page.at("through")}, {"scope", page.at("scope")}}; };
@@ -1132,7 +1137,7 @@ void notificationEvents(const std::filesystem::path& path) {
 
     auto limited = web.intake("release", "Check in several steps");
     limited.config["modelCallLimit"] = 1;
-    const auto receipt = store.receive(owner, limited, "repeat-approval", limited.request);
+    const auto receipt = Conversations(store).receive(owner, limited, "repeat-approval", limited.request);
     runtime.runConversations();
     const auto budgetItem = [](const Json& items, const char* kind) {
         const auto found = std::ranges::find_if(items, [&](const Json& item) { return item.at(kind) == "conversation_model_budget"; });
@@ -1248,7 +1253,8 @@ void watchedBotView(const std::filesystem::path& path) {
     FixedT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     tick(runtime, 3);
-    const auto link = store.receive(localOwner, intake, "link", "[docs](https://example.com/A%26Bcache-test)").at("messageId");
+    const auto link =
+        Conversations(store).receive(localOwner, intake, "link", "[docs](https://example.com/A%26Bcache-test)").at("messageId");
 
     const auto server = startWeb(store, 0, web);
     Browser reader(*server), owner(*server), stream(*server);
@@ -1274,7 +1280,7 @@ void watchedBotView(const std::filesystem::path& path) {
             renamed = true;
             check(reader.get(viewPath).at("bot").at("name") == "Release Notes", "the watched projection hid a descriptor change");
             renamed = false;
-            arrival = cli.receive(localOwner, intake, "cli", "Written by the CLI").at("messageId");
+            arrival = Conversations(cli).receive(localOwner, intake, "cli", "Written by the CLI").at("messageId");
             check(reader.get(viewPath).at("events").back().at("id") == arrival, "the watched projection hid a concurrent CLI write");
             return true;
         }
@@ -1330,7 +1336,7 @@ void eventStream(const std::filesystem::path& path) {
                 if (changes == 3) {
                     check(change == Json{{"list", true}}, "another Bot invalidated the selected view");
                     model.task = releaseTask;
-                    cli.receive(localOwner, web.intake("release", "unused"), "pr-review", "Open a pull request for review.");
+                    Conversations(cli).receive(localOwner, web.intake("release", "unused"), "pr-review", "Open a pull request for review.");
                     runtime.runConversations();
                 } else if (changes == 4) {
                     check(change == Json{{"list", true}, {"bot", "release"}}, "the PR review source did not invalidate its conversation");
@@ -1401,7 +1407,7 @@ void conversationPermissions(const std::filesystem::path& path) {
         decider.client.set_default_headers({{"Authorization", "Bearer decider"}});
         check(decider.get("/api/view?bot=release").at("canDecide") == true, "custom authentication without a resolver prevented reads");
         decider.post("/api/messages", message, 503);
-        check(store.conversation("release").empty(), "a listener without a resolver queued a message");
+        check(Conversations(store).conversation("release").empty(), "a listener without a resolver queued a message");
     }
     bool deciderAvailable = true;
     web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
@@ -1501,8 +1507,8 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
     auto web = callbacks();
     const auto task = store.submit(web.intake("release", "Release notes"));
     const auto intake = web.intake("release", "Follow up");
-    const auto message = store.receive(Person{"owner", true}, intake, "old", "Follow up").at("messageId").get<Id>();
-    for (int i = 0; i < 40; ++i) store.receive(Person{"owner", true}, intake, "new-" + std::to_string(i), "Newer message");
+    const auto message = Conversations(store).receive(Person{"owner", true}, intake, "old", "Follow up").at("messageId").get<Id>();
+    for (int i = 0; i < 40; ++i) Conversations(store).receive(Person{"owner", true}, intake, "new-" + std::to_string(i), "Newer message");
 
     std::atomic<bool> projectionUnavailable = false;
     std::atomic<bool> projectionFailed = false;
@@ -1566,9 +1572,9 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     Store store(path), writer(path);
     const auto web = callbacks();
     const auto intake = web.intake("release", "Follow up");
-    const auto message = writer.receive(localOwner, intake, "old", "Follow up").at("messageId").get<Id>();
+    const auto message = Conversations(writer).receive(localOwner, intake, "old", "Follow up").at("messageId").get<Id>();
     const auto task = writer.submit(web.intake("release", "Latest release request"));
-    const auto latest = store.conversation("release", 0, 1);
+    const auto latest = Conversations(store).conversation("release", 0, 1);
     std::atomic<bool> releaseAvailable = true;
     std::atomic<bool> releaseFailed = false;
     ChangeFeed feed(store, [&](const ChangeFeed::Scope& scope) {
@@ -1578,7 +1584,7 @@ void retryOneBotProjection(const std::filesystem::path& path) {
             releaseFailed = true;
             throw std::runtime_error("release projection unavailable");
         }
-        return store.conversation(view->bot, 0, 1);
+        return Conversations(store).conversation(view->bot, 0, 1);
     });
     auto release = feed.subscribe({localOwner, ChangeFeed::BotView{"release"}}).value();
     auto triage = feed.subscribe({localOwner, ChangeFeed::BotView{"triage"}}).value();
@@ -1608,8 +1614,8 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     check(feed.next(release).value().empty() && releaseFailed.load(), "release did not remain pending during the failed projection");
     releaseAvailable = true;
     expectBot(release, "release");
-    check(store.conversation("release", 0, 1) == latest, "history invalidation unexpectedly changed the latest page");
-    check(store.conversation("release", message + 1, 1).back().at("data").at("deliveredToT3") == true,
+    check(Conversations(store).conversation("release", 0, 1) == latest, "history invalidation unexpectedly changed the latest page");
+    check(Conversations(store).conversation("release", message + 1, 1).back().at("data").at("deliveredToT3") == true,
           "the recovered Bot skipped the historical change");
     feed.release(release);
     feed.release(triage);

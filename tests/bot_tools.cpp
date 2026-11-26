@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
@@ -239,7 +240,9 @@ struct Fixture {
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
         model.seen = nullptr;
-        lastMessage = store->receive(owner, intake(std::move(bot), budget), std::to_string(++seq), "Check the fixture").at("messageId");
+        lastMessage = Conversations(*store)
+                          .receive(owner, intake(std::move(bot), budget), std::to_string(++seq), "Check the fixture")
+                          .at("messageId");
         runtime->runConversations();
         return model.seen;
     }
@@ -254,7 +257,7 @@ struct Fixture {
                            "approve");
     }
     void approve() {
-        const auto paused = store->pausedConversations("alpha");
+        const auto paused = Conversations(*store).pausedConversations("alpha");
         check(paused.size() == 1, "Expected one paused turn");
         approvePaused(paused.at(0));
         runtime->runConversations();
@@ -445,7 +448,8 @@ void externalTools(Fixture& f) {
                      {{"name", "corrupt.png"}, {"mimeType", "image/png"}, {"dataBase64", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQ"}},
                      {{"name", secretMarker}, {"mimeType", "audio/mpeg"}, {"dataBase64", "SUQzdmF1bHQtb25seS1tYXJrZXI="}}});
     f.model.next = {call("reply", {{"text", "Message received."}})};
-    const auto message = f.store->receive(owner, f.intake(), "media", "Please inspect these photos and audio", 0, media).at("messageId");
+    const auto message =
+        Conversations(*f.store).receive(owner, f.intake(), "media", "Please inspect these photos and audio", 0, media).at("messageId");
     f.block(Action::attachment_inspect, "alpha");
     f.runtime->runConversations();
     const auto image = call("inspect_attachment", {{"messageId", message}, {"attachmentId", "1"}});
@@ -466,7 +470,7 @@ void externalTools(Fixture& f) {
     check(corrupt.at("ok") == false && f.model.content.size() == 1, "A corrupt image reached the model or interrupted the turn");
     const auto opaque = f.run(call("inspect_attachment", {{"messageId", message}, {"attachmentId", "4"}}));
     check(opaque.at("ok") == true && opaque.at("data").at("name") == "[redacted]", "Attachment inspection exposed a shared secret value");
-    check(f.store->receipt(owner, "alpha", "media", "Please inspect these photos and audio", 0, media).has_value(),
+    check(Conversations(*f.store).receipt(owner, "alpha", "media", "Please inspect these photos and audio", 0, media).has_value(),
           "Attachment receipt was not idempotent");
     const auto jpeg =
         Json::array({{{"name", "pixel.jpg"},
@@ -476,7 +480,7 @@ void externalTools(Fixture& f) {
                                      "AAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z"}},
                      {{"name", "corrupt.jpg"}, {"mimeType", "image/jpeg"}, {"dataBase64", "/9j/4AAQSkZJRgABAQAAAQABAAA="}}});
     f.model.next = {call("reply", {{"text", "Message received."}})};
-    const auto pictures = f.store->receive(owner, f.intake(), "jpeg", "Please inspect these JPEGs", 0, jpeg).at("messageId");
+    const auto pictures = Conversations(*f.store).receive(owner, f.intake(), "jpeg", "Please inspect these JPEGs", 0, jpeg).at("messageId");
     f.runtime->runConversations();
     const auto jpegViews = f.batch({call("inspect_attachment", {{"messageId", pictures}, {"attachmentId", "1"}}),
                                     call("inspect_attachment", {{"messageId", pictures}, {"attachmentId", "2"}})});
@@ -499,7 +503,7 @@ void externalTools(Fixture& f) {
     f.block(Action::web_search, "public");
     f.approve();
     check(f.web->searches == searches + 1 && f.web->fetches == fetches + 1, "Approval did not execute exactly the pending call");
-    check(f.store->pausedConversations("alpha").empty() && f.model.seen[0].at("result").at("accessRevoked") == true &&
+    check(Conversations(*f.store).pausedConversations("alpha").empty() && f.model.seen[0].at("result").at("accessRevoked") == true &&
               f.model.seen[1].at("result").at("ok") == true,
           "The resumed model did not see the pending result and access revocation");
 }
@@ -579,7 +583,7 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     f.restart();
     f.block(Action::workspace_read, "alpha");
     f.runtime->runConversations();
-    check(revoked && requests == batches + 3 && f.store->pausedConversations("alpha").empty(),
+    check(revoked && requests == batches + 3 && Conversations(*f.store).pausedConversations("alpha").empty(),
           "The approved turn did not finish its recovery checks after restart");
     f.model.followStep = {};
     check(f.run(call("read_tool_result", firstRef)).at("ok") == false, "A reference was accepted from another turn");
@@ -608,7 +612,7 @@ void protectedArgumentsDoNotChangeToolTargets() {
         f.sql("SELECT decision || result FROM conversation_steps WHERE step=1 AND message_id=" + std::to_string(f.lastMessage));
     check(persisted.find(marker) == persisted.npos && steps.dump().find(marker) == std::string::npos &&
               f.model.content.dump().find(marker) == std::string::npos &&
-              f.store->conversation("alpha").dump().find(marker) == std::string::npos,
+              Conversations(*f.store).conversation("alpha").dump().find(marker) == std::string::npos,
           "Rejected arguments exposed protected material");
 
     const Json publicArgs{{"query", {{"[redacted]", "literal key"}}}};
@@ -734,7 +738,7 @@ void approvalWhileAnotherTurnIsInferring(Fixture& f) {
     f.block(Action::web_search, "public", false);
     const auto search = [](std::string query) { return call("web_search", {{"query", query}}); };
     f.batch({search("older")}, 1);
-    const auto paused = f.store->pausedConversations("alpha").at(0);
+    const auto paused = Conversations(*f.store).pausedConversations("alpha").at(0);
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (input.event.at("messageId") == f.lastMessage && input.event.at("turn").empty()) f.approvePaused(paused);
     };

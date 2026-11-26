@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "flock/conversations.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
@@ -109,8 +110,8 @@ void sessionConversationDispatch(Store& store, const Json& config) {
         }
     } model(store, shared);
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
-    store.receive(localOwner, {"release", "Read staging", "env-canonical", "project-canonical", config}, "read-staging",
-                  "How much work went into the staging investigation?");
+    Conversations(store).receive(localOwner, {"release", "Read staging", "env-canonical", "project-canonical", config}, "read-staging",
+                                 "How much work went into the staging investigation?");
     runtime.runConversations();
     check(model.paged && model.revoked && t3.sends == 0, "model schemas did not dispatch pagination and revocation");
 }

@@ -90,16 +90,6 @@ public:
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&, const Person* requester = nullptr);
-    // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
-    Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text, Id replyToMessageId = 0,
-                 const Json& attachments = Json::array());
-    // Refers to a person in the current Web identity directory when the Runtime executes the turn.
-    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text, Id replyToMessageId = 0,
-                    const Json& attachments = Json::array());
-    std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                                Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
-    // Conversation turns paused on the model call limit, newest first.
-    Json pausedConversations(std::string_view botId) const;
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(const Person&, const TaskTarget&, std::string_view operation, const Json& data = Json::object());
@@ -107,7 +97,6 @@ public:
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     std::vector<TaskView> tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
-    Json compactions(std::string_view bot, Id before = 0, unsigned limit = 50) const;
     Json workflows(std::string_view bot, Id before = 0, unsigned limit = 20) const;
     struct ActiveTask {
         TaskData task;
@@ -124,10 +113,6 @@ public:
     // On the initial read only the position is needed, before loading the first page.
     std::pair<Id, std::vector<TaskView>> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
-    // One page of chronological user-visible conversation, across this Bot's tasks.
-    enum class ConversationEvents { all, incoming };
-    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, ConversationEvents events = ConversationEvents::all,
-                      std::string_view viewer = {}) const;
     // Same chronological page for either participant.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50, Id from = 0,
                           std::string_view viewer = {}) const;
@@ -143,12 +128,6 @@ public:
     };
     // No reusable version when the view can depend on live channel permissions or vault files.
     std::optional<BotViewStamp> botViewStamp() const;
-    struct ConversationChanges {
-        Id through;
-        std::map<std::string, std::vector<Id>> messages;
-    };
-    // Original messages affected by replies and instruction delivery since a journal cursor.
-    ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
     struct NotificationEvents {
         Id through;
         Json events;
@@ -175,6 +154,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;
+    friend class Conversations;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

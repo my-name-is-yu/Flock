@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -222,7 +223,7 @@ struct Scenario {
                              {{"conversationEnvironments",
                                {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                                 {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-        store.receive(localOwner, routing, "start-fixture", request);
+        Conversations(store).receive(localOwner, routing, "start-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
               "conversation could not start the verification: " + model.startResult.dump());
@@ -248,7 +249,7 @@ struct Scenario {
             {{"conversationEnvironments",
               {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
-        store.receive(localOwner, routing, "linked-fixture", request);
+        Conversations(store).receive(localOwner, routing, "linked-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
               "conversation could not start linked-environment work: " + model.startResult.dump());
@@ -278,7 +279,7 @@ struct Scenario {
              {"multiCommit", model.commit},
              {"multiLinkedEnvironments", Json::array({{{"environmentId", mini.id()}, {"label", "Mini"}, {"status", "reachable"}}})}});
         const Intake routing{bot, {}, local.id(), local.project(), Json::object()};
-        store.receive(localOwner, routing, "native-linked-fixture", request);
+        Conversations(store).receive(localOwner, routing, "native-linked-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false) && model.nativeGatewayOptionsSeen,
               "the model must receive distinct gateway choices for the same linked target: " + model.nativeEnvironmentOptions.dump() +
@@ -382,7 +383,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
         {{"conversationEnvironments",
           {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
            {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
-    fixture.store.receive(localOwner, routing, "linked-send-fixture", "Send instruction to Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "linked-send-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false) && local.effects("t3_thread_send").size() == 1 &&
               mini.effects("t3_thread_send").empty() &&
@@ -390,7 +391,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
           "a saved linked-target follow-up must use the gateway credential and preserve the target Session URL");
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    fixture.store.receive(localOwner, routing, "linked-stop-fixture", "Stop Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "linked-stop-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     fixture.advanceUntil([&](const TaskView&) { return local.effects("t3_thread_interrupt").size() == 1; },
                          "the linked target stop should dispatch through the gateway");
@@ -422,19 +423,20 @@ void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini, const 
     resumed.model.followUpTask = resumed.taskId;
     resumed.model.followUpGeneration = resumed.task().task.generation;
     const Intake changedContext{bot, {}, mini.id(), mini.project(), Json::object()};
-    resumed.store.receive(localOwner, changedContext, "native-linked-wrong-gateway", "Send linked instruction through other gateway");
+    Conversations(resumed.store)
+        .receive(localOwner, changedContext, "native-linked-wrong-gateway", "Send linked instruction through other gateway");
     resumed.runtime.runConversations();
     check(!resumed.model.wrongGatewaySendResult.value("ok", true) && local.effects("t3_thread_send").empty() &&
               mini.effects("t3_thread_send").empty(),
           "a saved target selector with a different gateway must fail without switching credentials");
-    resumed.store.receive(localOwner, changedContext, "native-linked-restart-followup", "Send linked instruction");
+    Conversations(resumed.store).receive(localOwner, changedContext, "native-linked-restart-followup", "Send linked instruction");
     resumed.runtime.runConversations();
     check(resumed.model.sendResult.value("ok", false) && local.effects("t3_thread_send").size() == 1 &&
               mini.effects("t3_thread_send").empty(),
           "after restart and a changed client context, follow-up must use the saved gateway and target");
     resumed.model.cancelTask = resumed.taskId;
     resumed.model.cancelGeneration = resumed.task().task.generation;
-    resumed.store.receive(localOwner, changedContext, "native-linked-restart-stop", "Stop linked target");
+    Conversations(resumed.store).receive(localOwner, changedContext, "native-linked-restart-stop", "Stop linked target");
     resumed.runtime.runConversations();
     resumed.advanceUntil([&](const TaskView&) { return local.effects("t3_thread_interrupt").size() == 1; },
                          "the saved linked Run should be interrupted through its original gateway");
@@ -466,7 +468,7 @@ void nativeLinkedUnknownAcceptance(const Endpoint& local, const Endpoint& mini, 
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().task.generation;
     const Intake changedContext{bot, {}, mini.id(), mini.project(), Json::object()};
-    fixture.store.receive(localOwner, changedContext, "native-linked-unknown-stop", "Stop linked target");
+    Conversations(fixture.store).receive(localOwner, changedContext, "native-linked-unknown-stop", "Stop linked target");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false), "an uncertain linked destination must accept a local stop intent");
     const auto authGeneration = fixture.adapter->authGeneration(local.id(), Json::object());
@@ -521,13 +523,14 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
                          {{"conversationEnvironments",
                            {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                             {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-    fixture.store.receive(localOwner, routing, "conflicting-follow-up-fixture", "Send instruction with conflicting selectors");
+    Conversations(fixture.store)
+        .receive(localOwner, routing, "conflicting-follow-up-fixture", "Send instruction with conflicting selectors");
     fixture.runtime.runConversations();
     check(!fixture.model.conflictingResult.value("ok", true) &&
               fixture.model.conflictingResult.value("error", "").find("either by friendly name") != std::string::npos &&
               local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
           "contradictory selector forms must be rejected without contacting either destination");
-    fixture.store.receive(localOwner, routing, "ambiguous-follow-up-fixture", "Send instruction without destination");
+    Conversations(fixture.store).receive(localOwner, routing, "ambiguous-follow-up-fixture", "Send instruction without destination");
     fixture.runtime.runConversations();
     check(!fixture.model.ambiguousResult.value("ok", true) &&
               fixture.model.ambiguousResult.value("error", "").find("Choose a destination") != std::string::npos &&
@@ -535,12 +538,12 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
           "an omitted selector must be rejected as ambiguous without contacting either destination");
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
     fixture.store.policy().changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
-    fixture.store.receive(localOwner, routing, "policy-denied-follow-up-fixture", "Send instruction to Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "policy-denied-follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.sendResult.value("ok", true) && mini.effects("t3_thread_send").empty(),
           "saved-target follow-up must still obey the T3 send policy");
     fixture.store.policy().changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
-    fixture.store.receive(localOwner, routing, "follow-up-fixture", "Send instruction to Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false),
           "send_to_task did not deliver the selected destination message: " + fixture.model.sendResult.dump());
@@ -569,13 +572,13 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
     fixture.store.policy().changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    fixture.store.receive(localOwner, routing, "cancel-mini-denied-fixture", "Stop Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-denied-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.cancelResult.value("ok", true) && fixture.mini.effects("t3_thread_interrupt").empty(),
           "selected cancellation must obey the saved Run's T3 policy");
     fixture.store.policy().changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    fixture.store.receive(localOwner, routing, "cancel-mini-fixture", "Stop Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false) && fixture.model.cancelResult.value("effect", "") == "stop_requested",
           "selected cancellation should persist one destination stop intent");
@@ -592,7 +595,7 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
               fixture.store.tasks(bot).size() == 1,
           "selected cancellation must preserve the sibling and original request while settlement is pending");
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    fixture.store.receive(localOwner, routing, "cancel-mini-repeat-fixture", "Stop Mini again");
+    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-repeat-fixture", "Stop Mini again");
     fixture.runtime.runConversations();
     check(fixture.model.repeatCancelResult.value("ok", false) &&
               fixture.model.repeatCancelResult.value("effect", "") == "already_requested" &&
@@ -634,7 +637,7 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
                          {{"conversationEnvironments",
                            {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                             {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-    fixture.store.receive(localOwner, routing, "cancel-unknown-mini-fixture", "Stop Mini");
+    Conversations(fixture.store).receive(localOwner, routing, "cancel-unknown-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false), "an uncertain saved destination must accept a local stop intent");
     const auto authGeneration = fixture.adapter->authGeneration(mini.id(), Json::object());

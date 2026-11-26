@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/decision.hpp"
@@ -118,7 +119,7 @@ void memoryFlow(const std::filesystem::path& db) {
         const auto start = bot.inputs.size();
         choices.push_back(reply());
         bot.choices = std::move(choices);
-        store.receive(localOwner, target, id, id);
+        Conversations(store).receive(localOwner, target, id, id);
         runtime.runConversations();
         check(bot.choices.empty(), "Conversation did not complete");
         return start;
@@ -170,7 +171,7 @@ void memoryFlow(const std::filesystem::path& db) {
                    {"remove_schedule", {{"id", 1}}, "Remove schedule"},
                    {"update_bot_settings", {{"environmentId", alpha.environmentId}, {"runTimeoutSeconds", 1}}, "Change timeout"},
                    reply()};
-    store.receive(member, alpha, "member-mutation", "Change memory and schedules");
+    Conversations(store).receive(member, alpha, "member-mutation", "Change memory and schedules");
     runtime.runConversations();
     check(lastResult(bot.inputs.at(memberStep + 1)).at("error") == "Memory access denied" &&
               lastResult(bot.inputs.at(memberStep + 2)).at("error") == "Automation change denied" &&
@@ -258,9 +259,9 @@ void memoryFlow(const std::filesystem::path& db) {
     auto limited = beta;
     limited.config["modelCallLimit"] = 1;
     bot.choices = {{"read_memory", {{"docId", path}}, "Check the playbook"}, reply()};
-    const auto receipt = store.receive(localOwner, limited, "paused-shared-read", "Check the shared playbook");
+    const auto receipt = Conversations(store).receive(localOwner, limited, "paused-shared-read", "Check the shared playbook");
     runtime.runConversations();
-    const Id pauseId = store.pausedConversations(beta.botId).at(0).at("messageId");
+    const Id pauseId = Conversations(store).pausedConversations(beta.botId).at(0).at("messageId");
     policy.changeNeverRule(owner, Action::shared_memory_read, path, true);
     store.decideInbox(owner, {beta.botId, InboxKind::conversation_model_budget, receipt.at("messageId"), pauseId, 0, 0, pauseId},
                       "approve");
@@ -282,12 +283,12 @@ void proactiveMemory(const std::filesystem::path& db) {
     Runtime runtime(store, model, adapter, {});
     const auto send = [&](std::string_view key, std::string_view message, Decision edit) {
         model.choices = {{"review_preference", Json::object(), "Review a lasting preference"}, std::move(edit), reply()};
-        store.receive(localOwner, alpha, key, message);
+        Conversations(store).receive(localOwner, alpha, key, message);
         runtime.runConversations();
     };
     const auto notices = [&] {
         Json result = Json::array();
-        for (const auto& event : store.conversation(alpha.botId))
+        for (const auto& event : Conversations(store).conversation(alpha.botId))
             if (event.at("kind") == "memory_remembered") result.push_back(event.at("data"));
         return result;
     };
@@ -356,10 +357,10 @@ void unavailablePreferenceReviewStillReplies(const std::filesystem::path& db) {
     Adapter adapter;
     Runtime runtime(store, model, adapter, {});
     model.choices = {{"review_preference", Json::object(), "Review a lasting preference"}, reply()};
-    const auto receipt = store.receive(localOwner, alpha, "unavailable-review", "I prefer short release notes.");
+    const auto receipt = Conversations(store).receive(localOwner, alpha, "unavailable-review", "I prefer short release notes.");
     runtime.runConversations();
 
-    const auto events = store.conversation(alpha.botId);
+    const auto events = Conversations(store).conversation(alpha.botId);
     check(model.choices.empty() && model.inputs.size() == 2 && model.inputs.back().event.at("kind") == "conversation_turn" &&
               std::ranges::any_of(events,
                                   [&](const auto& event) {
@@ -594,7 +595,7 @@ void automationConversation(const std::filesystem::path& db) {
         {"list_schedules", Json::object(), "List managed automations"},
         reply(),
     };
-    store.receive(localOwner, alpha, "create", "Create my automation");
+    Conversations(store).receive(localOwner, alpha, "create", "Create my automation");
     runtime.runConversations();
     const auto list = lastResult(bot.inputs.back()).at("automations");
     check(list.size() == 3 && list.at(0).at("createdBy") == "bot:alpha", "Conversation automation tools did not create entries");
@@ -602,7 +603,7 @@ void automationConversation(const std::filesystem::path& db) {
           "Conversation reminder did not use the Runtime clock");
     const auto triggerId = list.at(0).at("id");
     bot.choices = {{"remove_schedule", {{"id", list.at(2).at("id")}}, "Cancel schedule"}, reply()};
-    store.receive(localOwner, alpha, "remove", "Cancel the weekly progress schedule");
+    Conversations(store).receive(localOwner, alpha, "remove", "Cancel the weekly progress schedule");
     runtime.runConversations();
     check(lastResult(bot.inputs.back()).at("status") == "canceled", "Conversation scheduler could not cancel");
     const auto delivery = store.receiveWebhook(owner, "deploy", "deployment-1", {{"status", "finished"}}, options.clock());
@@ -713,7 +714,7 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
           "A literal [redacted] event field did not match its trigger");
     const auto task = taskJson(store.tasks(alpha.botId).at(0));
     check(task.at("trigger").at("event").at("details").at("token") == "[redacted]" &&
-              store.conversation(alpha.botId).dump().find(secret) == std::string::npos,
+              Conversations(store).conversation(alpha.botId).dump().find(secret) == std::string::npos,
           "Webhook provenance retained a protected event value");
 }
 
@@ -752,7 +753,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
         const auto dump = data.dump();
         return dump.find(source) != dump.npos || dump.find(token) != dump.npos;
     };
-    check(!containsMetadata(store.history(taskId)) && !containsMetadata(store.conversation(alpha.botId)),
+    check(!containsMetadata(store.history(taskId)) && !containsMetadata(Conversations(store).conversation(alpha.botId)),
           "Webhook request or provenance leaked into a journal");
 
     Adapter adapter;
@@ -798,7 +799,7 @@ void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
               replay.at("tasks") == first.at("tasks") && store.tasks(beta.botId).empty(),
           "Webhook IDs did not deduplicate authorized deliveries independently");
     const auto tasks = taskJson(store.tasks(alpha.botId));
-    const auto conversation = store.conversation(alpha.botId).dump();
+    const auto conversation = Conversations(store).conversation(alpha.botId).dump();
     check(tasks.size() == 2 && !tasks.at(0).at("trigger").contains("externalEventId") &&
               !tasks.at(1).at("trigger").contains("externalEventId") && conversation.find(firstId) == std::string::npos &&
               conversation.find(secondId) == std::string::npos,

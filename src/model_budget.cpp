@@ -1,3 +1,5 @@
+#include "flock/conversations.hpp"
+#include "database.hpp"
 #include "storage.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
@@ -299,20 +301,20 @@ void ModelCalls::pauseTurn(const conversation::Message& message) {
     database.exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?", {reply, message.id});
 }
 
-Json Store::pausedConversations(std::string_view bot) const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+Json Conversations::pausedConversations(std::string_view bot) const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 -- Seek the populated pause IDs instead of visiting all journal entries for the Bot.
 SELECT j.data,t.message_id,m.text FROM conversation_turns t CROSS JOIN journal j ON j.id=t.pause_id
 CROSS JOIN messages m ON m.id=t.message_id
 WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? ORDER BY t.pause_id DESC
 )SQL",
-                          {bot});
+                                {bot});
     auto result = Json::array();
     while (rows.next()) {
         auto turn = rows.json(0);
         turn["text"] = modelBudgetPauseText(rows.string(2));
-        turn["allowance"] = p_->modelCalls.messageModelBudget(rows.number(1)).initialLimit;
+        turn["allowance"] = modelCalls_.messageModelBudget(rows.number(1)).initialLimit;
         result.push_back(std::move(turn));
     }
     return result;

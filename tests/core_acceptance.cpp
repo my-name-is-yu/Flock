@@ -1,3 +1,4 @@
+#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 #include "task_history.hpp"
@@ -322,7 +323,7 @@ struct Fixture {
     }
     std::vector<Json> botMessages(std::string_view bot) {
         std::vector<Json> messages;
-        for (const auto& item : store->conversation(bot))
+        for (const auto& item : Conversations(*store).conversation(bot))
             if (item["kind"] == "bot_message") messages.push_back(item["data"]);
         return messages;
     }
@@ -348,7 +349,7 @@ Id seedSelectedTask(Fixture& fixture) {
         if (input.event.at("kind") == "policy_outcome") return ask();
         return work();
     };
-    fixture.store->receive(localOwner, {"alpha", "", "e", "p"}, "select-thread", "Continue in the selected Session");
+    Conversations(*fixture.store).receive(localOwner, {"alpha", "", "e", "p"}, "select-thread", "Continue in the selected Session");
     fixture.runtime->runConversations();
     const auto id = fixture.submit();
     executeSql(fixture.directory / "state.db", R"SQL(
@@ -933,7 +934,7 @@ void connectionRecoveryReconsidersNewDirections() {
         answer.args["answers"]["branch"] = "dev";
         return answer;
     };
-    f.store->receive(localOwner, {"alpha", "", "e", "p"}, "new-direction-during-outage", "Use dev");
+    Conversations(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "new-direction-during-outage", "Use dev");
     f.runtime->runConversations();
     f.restart();
     f.t3.expectedBranch = "dev";
@@ -1765,7 +1766,7 @@ void revisionWaitsForPeerClarification(bool direct = false) {
 
     const auto oldWait = f.wait(root, "user_question");
     const auto old = TaskTarget::from(f.store->task(root).task, oldWait);
-    f.store->receive(localOwner, routing, "move-release-check", "Run Release check on cloud");
+    Conversations(*f.store).receive(localOwner, routing, "move-release-check", "Run Release check on cloud");
     f.runtime->runConversations();
     check(f.task(root).value("replanning", false) && f.task(root).at("pendingDestination").at("environmentId") == "cloud",
           "The requested destination change did not reach the task");
@@ -1784,7 +1785,7 @@ void revisionWaitsForPeerClarification(bool direct = false) {
                               current.at("targetRevision"), current.at("targetGeneration")},
                              "answer", {{"text", "Use main"}});
     } else {
-        f.store->receive(localOwner, routing, "branch-answer", "Use main", f.task(root).at("wait").at("messageId"));
+        Conversations(*f.store).receive(localOwner, routing, "branch-answer", "Use main", f.task(root).at("wait").at("messageId"));
         f.runtime->runConversations();
     }
     check(f.logs(root, "user_answer") == 1, "The conversation rejected the answer the peer is waiting for");
@@ -1826,7 +1827,7 @@ void peerCompletionAfterEnvironmentMove() {
         };
         f.reach(sender, "peer_waiting");
         f.peers.at("alpha").front().intake.environmentId = environment;
-        f.store->receive(localOwner, routing, "move-release-check", "Move Release check to cloud");
+        Conversations(*f.store).receive(localOwner, routing, "move-release-check", "Move Release check to cloud");
         f.runtime->runConversations();
         if (std::string_view(environment) != "cloud") {
             f.wait(sender, "user_question");
@@ -1863,7 +1864,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
         if (kind == "bot_request") return work();
         if (input.task.contains("userInstructions") && kind == "result") {
             if (!std::exchange(attemptedFailure, true)) {
-                f.store->receive(localOwner, {"beta", "", "e", "p", Json::object()}, "status", "How is verification going?");
+                Conversations(*f.store).receive(localOwner, {"beta", "", "e", "p", Json::object()}, "status", "How is verification going?");
                 return botReply("failed", "Unable to verify the original criteria");
             }
             return work("follow_up", false);
@@ -1878,7 +1879,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     f.reach(recipient, "running");
     const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
     const Intake betaRouting{"beta", revisionText, "e", "p", {{"runTimeoutSeconds", 10}, {"model", "beta-model"}}};
-    f.store->receive(localOwner, betaRouting, "recipient-revision", revisionText);
+    Conversations(*f.store).receive(localOwner, betaRouting, "recipient-revision", revisionText);
     f.runtime->runConversations();
     check(f.task(recipient).value("replanning", false) && f.task(recipient)["doneWhen"] == revisedCriteria &&
               f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
@@ -1986,7 +1987,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
                              "e",
                              "beta-project",
                              {{"runTimeoutSeconds", 10}, {"model", "beta-model"}, {"conversationEnvironments", {{"cloud", "cloud"}}}}};
-    f.store->receive(localOwner, betaRouting, "recipient-question-revision", revisionText);
+    Conversations(*f.store).receive(localOwner, betaRouting, "recipient-question-revision", revisionText);
     f.runtime->runConversations();
     for (int step = 0; step < 3; ++step) f.runtime->tick();
     check(f.task(recipient).value("replanning", false) && f.task(recipient)["state"] == "peer_waiting" &&
@@ -2066,7 +2067,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     unrelated = f.submit("Unrelated verification", "alpha", project);
     if (!sharesSenderQueue) f.reach(unrelated, "running");
     const auto launchesBeforeMove = f.t3.launches;
-    f.store->receive(localOwner, betaRouting, "recipient-move", "Move Verify the release to desktop");
+    Conversations(*f.store).receive(localOwner, betaRouting, "recipient-move", "Move Verify the release to desktop");
     f.runtime->runConversations();
     check(f.task(recipient).value("replanning", false) && f.task(recipient)["pendingDestination"]["environmentId"] == "e",
           "the destination change did not reach the task");
@@ -2142,7 +2143,7 @@ void consultationRepliesAfterUserInstructions() {
         f.reach(sender, "peer_waiting");
         recipient = f.store->tasks("beta").front().task.id;
         const auto wait = f.wait(sender, "user_question");
-        f.store->receive(localOwner, {"beta", "", "e", "p", Json::object()}, "consultation-instruction", instruction);
+        Conversations(*f.store).receive(localOwner, {"beta", "", "e", "p", Json::object()}, "consultation-instruction", instruction);
         f.runtime->runConversations();
         check(f.logs(recipient, "instruction_accepted") == 1 && f.task(recipient).value("replanning", false) == revise,
               "the instruction did not reach the open consultation");
@@ -2255,7 +2256,7 @@ void automaticPeerWorkResolvesTheProject() {
 void requestedCriteriaApplyToFirstPeerWork() {
     Fixture f;
     f.allowBeta();
-    const auto receipt = f.store->receive(localOwner, {"alpha", "", "e", "p"}, "work-with-criteria", "Check the release");
+    const auto receipt = Conversations(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work-with-criteria", "Check the release");
     f.model.script = [&](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "conversation_turn") return converse(input, "start_task", 0, {{"doneWhen", "Confirm the signature"}});
         check(!input.needsDoneWhen && input.task.at("requestedDoneWhen") == "Confirm the signature",
@@ -2275,7 +2276,8 @@ void modelBudgetFollowsBotConsultation() {
     Fixture f;
     f.allowBeta();
     constexpr auto request = "Check the release policy";
-    const auto receipt = f.store->receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
+    const auto receipt =
+        Conversations(*f.store).receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
     f.model.script = [&](const ModelInput& input) -> Decision {
         if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
         if (input.event["kind"] == "intake") return botRequest("beta", "consult", "What is the release policy?");
@@ -2305,9 +2307,10 @@ VALUES(0,'conversation_budget_wait','{}','alpha');
 UPDATE conversation_turns SET status='paused',pause_id=last_insert_rowid()
 WHERE message_id=(SELECT id FROM messages WHERE bot_id='alpha' ORDER BY id LIMIT 1);
 )SQL");
-    check(writer.pausedConversations("alpha").size() == 1, "the shared conversation fixture is not paused");
+    check(Conversations(writer).pausedConversations("alpha").size() == 1, "the shared conversation fixture is not paused");
     writer.operate(verifier, TaskTarget::from(writer.task(recipient).task, recipientWait), "approve");
-    check(writer.pausedConversations("alpha").size() == 1, "a member of the receiving Bot resumed a conversation on the originating Bot");
+    check(Conversations(writer).pausedConversations("alpha").size() == 1,
+          "a member of the receiving Bot resumed a conversation on the originating Bot");
     f.rejects(recipient, recipientWait, "approve");
     f.reach(sender, "completed");
     check(f.model.calls == 5 && f.task(recipient)["state"] == "completed" && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
@@ -2326,7 +2329,8 @@ void peerResultWaitsForRecipientTurn() {
         if (input.task.at("botId") == "beta") {
             ++recipientDecisions;
             if (!std::exchange(noted, true))
-                f.store->receive(localOwner, {"beta", "", "e", "p", Json::object()}, "beta-note", "How is the release check going?");
+                Conversations(*f.store).receive(localOwner, {"beta", "", "e", "p", Json::object()}, "beta-note",
+                                                "How is the release check going?");
             return botReply("result", "Verified");
         }
         if (kind == "bot_result") return complete();
@@ -2345,7 +2349,7 @@ void cancelledPeerRefundsUnusedModelApproval() {
     Fixture f;
     f.allowBeta();
     constexpr auto request = "Check the release policy";
-    f.store->receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
+    Conversations(*f.store).receive(localOwner, {"alpha", request, "e", "p", {{"modelCallLimit", 3}}}, "policy", request);
     f.model.script = [&](const ModelInput& input) -> Decision {
         if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
         if (input.event["kind"] == "intake") return botRequest("beta", "consult", "What is the release policy?");
@@ -2384,7 +2388,7 @@ void revisedTaskRefundsUnusedModelApproval() {
     const auto approval = f.wait(taskId, "model_budget");
     f.store->operate(localOwner, TaskTarget::from(f.store->task(taskId).task, approval), "approve");
     check(f.model.calls == 1, "provider already reached the new approval");
-    f.store->receive(localOwner, {"alpha", "", "e", "p", Json::object()}, "revise", "Revise the original request.");
+    Conversations(*f.store).receive(localOwner, {"alpha", "", "e", "p", Json::object()}, "revise", "Revise the original request.");
     f.runtime->runConversations();
     check(f.task(taskId).value("replanning", false), "conversation did not revise the task");
     f.reach(taskId, "running");
@@ -2799,7 +2803,7 @@ struct PeerMoveCycleFixture : Fixture {
             return converse(input, "change_task", recipient, {{"environment", environment}, {"doneWhen", revision}});
         };
         const std::string instruction = "Move the verification to " + std::string(environment) + " and " + revision;
-        store->receive(localOwner, routing, instruction, instruction);
+        Conversations(*store).receive(localOwner, routing, instruction, instruction);
         runtime->runConversations();
         model.script = decideWork;
         return result;
@@ -3178,9 +3182,9 @@ int main() {
                                                                                         const auto task = f.submit();
                                                                                         f.reach(task, "running");
                                                                                         f.store->policy().setMode(localOwner, "supervised");
-                                                                                        f.store->receive(localOwner,
-                                                                                                         {"alpha", "", "e", "separate"},
-                                                                                                         "unrelated", "Create another Bot");
+                                                                                        Conversations(*f.store).receive(
+                                                                                            localOwner, {"alpha", "", "e", "separate"},
+                                                                                            "unrelated", "Create another Bot");
                                                                                         f.runtime->runConversations();
                                                                                         check(f.store->inbox(localOwner).size() == 1,
                                                                                               "The unrelated turn did not await approval");
