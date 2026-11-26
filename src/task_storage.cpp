@@ -12,7 +12,6 @@
 #include "task_context_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "journal.hpp"
-#include "storage.hpp"
 #include "record_decode.hpp"
 #include "outbox_storage.hpp"
 #include "flock/types.hpp"
@@ -24,6 +23,7 @@
 #include "flock/session_ref.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
+#include "run_ref_storage.hpp"
 
 #include <algorithm>
 #include <map>

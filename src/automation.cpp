@@ -1,11 +1,11 @@
 #include "flock/automations.hpp"
+#include "flock/bot_id.hpp"
 #include "task_operations.hpp"
 #include "automation_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 
 #include "database.hpp"
 #include "secret_storage.hpp"
-#include "storage.hpp"
 #include "flock/store_options.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
@@ -16,6 +16,7 @@
 #include "flock/store.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
+#include "json_fields.hpp"
 
 #include <algorithm>
 #include <cstddef>

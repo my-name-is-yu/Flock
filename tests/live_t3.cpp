@@ -13,6 +13,7 @@
 #include "flock/t3_session.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

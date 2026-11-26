@@ -1,5 +1,4 @@
 #include "flock/local_machines.hpp"
-#include "storage.hpp"
 #include "web_identity_state.hpp"
 #include "task_records.hpp"
 #include "secret_storage.hpp"
@@ -16,6 +15,7 @@
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
+#include "flock/secrets.hpp"
 
 #include <algorithm>
 #include <array>

@@ -1,4 +1,6 @@
 #include "flock/tasks.hpp"
+#include "flock/secret_ref.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "fake_git.hpp"
@@ -17,6 +19,7 @@
 #include "flock/task_interaction.hpp"
 #include "flock/types.hpp"
 #include "flock/wait.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

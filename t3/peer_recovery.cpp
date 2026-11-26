@@ -5,7 +5,6 @@
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
-#include "flock/policy.hpp"
 #include "flock/runtime.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"

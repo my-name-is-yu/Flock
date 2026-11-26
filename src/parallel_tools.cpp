@@ -1,4 +1,3 @@
-#include "storage.hpp"
 #include "model_calls.hpp"
 #include "session_read_storage.hpp"
 #include "policy_approvals.hpp"
@@ -12,6 +11,15 @@
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
+#include "json_fields.hpp"
+#include "flock/secrets.hpp"
+#include "policy_origin.hpp"
+#include "workspace_internal.hpp"
+#include "secret_storage.hpp"
+#include "flock/git_host.hpp"
+#include "conversation_turns.hpp"
+#include "task_routing.hpp"
+#include "flock/policy.hpp"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,5 +1,6 @@
 #include "settings_routes.hpp"
-#include "flock/board_inbox.hpp"
+#include "flock/bot_id.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"

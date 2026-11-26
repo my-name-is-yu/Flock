@@ -1,7 +1,6 @@
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
 #include "live_conversation_judge.hpp"
 #include "live_setup.hpp"
 #include "model.hpp"

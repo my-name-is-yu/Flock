@@ -1,8 +1,8 @@
 #include "flock/local_machines.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/channel_bridge_settings.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
-#include "flock/policy.hpp"
 #include "flock/store.hpp"
 #include "flock/types.hpp"
 

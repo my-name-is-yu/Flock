@@ -1,7 +1,7 @@
 #include "../settings_access.hpp"
+#include "flock/decision_errors.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"

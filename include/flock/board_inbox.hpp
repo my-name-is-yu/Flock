@@ -30,18 +30,6 @@ struct InboxTarget {
     bool operator==(const InboxTarget&) const = default;
 };
 
-struct RequestChanged : Conflict {
-    RequestChanged() : Conflict("The request changed. Refresh the inbox and review the current request.") {}
-};
-
-struct DecisionUnavailable : Conflict {
-    DecisionUnavailable() : Conflict("The request was already decided or closed.") {}
-};
-
-struct DecisionDenied : Conflict {
-    DecisionDenied() : Conflict("You do not have permission to decide this request.") {}
-};
-
 class Store;
 class InboxStorage;
 class GitStorage;

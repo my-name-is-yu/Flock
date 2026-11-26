@@ -1,4 +1,6 @@
 #include "conversation_call.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/decision_errors.hpp"
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
@@ -21,7 +23,6 @@
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
 #include "attachment_storage.hpp"
-#include "storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_context_storage.hpp"
 #include "conversation_storage.hpp"
@@ -46,6 +47,14 @@
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "json_fields.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/policy.hpp"
+#include "workspace_internal.hpp"
+#include "flock/git_host.hpp"
+#include "flock/task_target.hpp"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/policy.hpp"
 #include "session_message_storage.hpp"
 #include "conversation_tools.hpp"
@@ -22,6 +23,14 @@
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/session_ref.hpp"
+#include "t3_credentials.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "policy_approvals.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "secret_storage.hpp"
+#include "task_records.hpp"
+#include "workspace_internal.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -92,25 +101,25 @@ std::string redactT3Tokens(std::string value) {
 std::string T3Connections::connect(std::string_view environment, std::string_view person, unsigned port,
                                    const std::function<void(std::string_view)>& install, bool refreshProviders) {
     if (!validId(environment) || !validId(person) || port == 0 || port > 65535) throw Conflict("Invalid T3 connection");
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
     const auto rotate = refreshProviders || [&] {
-        auto row = db.query("SELECT person_id,port FROM t3_connector");
+        auto row = storage.database.query("SELECT person_id,port FROM t3_connector");
         return !row.next() || row.string(0) != person || row.number(1) != port ||
-               !db.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next();
+               !storage.database.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next();
     }();
     std::string token;
     if (rotate) {
         token = connector_credentials::bearer(tokenPrefix);
-        db.exec(R"SQL(
+        storage.database.exec(R"SQL(
 INSERT INTO t3_connector VALUES(1,?,?,?,?)
 ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
  token_digest=excluded.token_digest,port=excluded.port
 )SQL",
-                {actionId(), person, digest(token), static_cast<Id>(port)});
+                              {actionId(), person, digest(token), static_cast<Id>(port)});
     }
-    db.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)", {environment});
+    storage.database.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)", {environment});
     if (install) install(token);
     tx.commit();
     return token;
@@ -118,86 +127,87 @@ ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id
 
 void T3Connections::rebindPort(unsigned port, const std::function<void(std::string_view)>& install) {
     if (port == 0 || port > 65535 || !install) throw Conflict("Invalid T3 connection port");
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
     const auto currentPort = this->port();
     if (currentPort && currentPort != port) {
         const auto token = connector_credentials::bearer(tokenPrefix);
         // The provider can verify its existing registration against the old token until its update succeeds.
         install(token);
-        db.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?", {actionId(), digest(token), static_cast<Id>(port)});
+        storage.database.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?", {actionId(), digest(token), static_cast<Id>(port)});
     }
     tx.commit();
 }
 
 bool T3Connections::ownsBearer(std::string_view token) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    return db.query("SELECT 1 FROM t3_connector WHERE token_digest=?", {digest(token)}).next();
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    return storage.database.query("SELECT 1 FROM t3_connector WHERE token_digest=?", {digest(token)}).next();
 }
 
 bool T3Connections::disconnect(std::string_view environment) {
-    auto& db = *store_.p_;
-    const SessionDispatchFileLock dispatch(db.path, SessionDispatchFileLock::Mode::exclusive);
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
-    auto rows = db.query(R"SQL(
+    auto& storage = *store_.p_;
+    const SessionDispatchFileLock dispatch(storage.path, SessionDispatchFileLock::Mode::exclusive);
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
+    auto rows = storage.database.query(R"SQL(
 SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE t.status<>'done'
  AND json_type(m.routing,'$.sessionWake')='object'
  AND (json_extract(m.routing,'$.sessionWake.environmentId')=?1
       OR json_extract(m.routing,'$.sessionOrigin.environmentId')=?1)
 )SQL",
-                         {environment});
+                                       {environment});
     std::vector<Id> wakes;
     while (rows.next()) wakes.push_back(rows.number(0));
     for (const auto wake : wakes)
-        db.conversationTurns.finishTurn(db.conversationTurns.loadTurnMessage(wake), "The T3 connection was disconnected.", nullptr,
-                                        ConversationReplyRoute::session_access);
-    db.exec(R"SQL(
+        storage.conversationTurns.finishTurn(storage.conversationTurns.loadTurnMessage(wake), "The T3 connection was disconnected.",
+                                             nullptr, ConversationReplyRoute::session_access);
+    storage.database.exec(R"SQL(
 UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
  SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
 ))
 )SQL",
-            {environment});
-    db.exec("DELETE FROM t3_connected_environments WHERE environment_id=?", {environment});
-    db.policyApprovals.settlePolicyApprovals();
-    const bool removeProvider = db.query("SELECT 1 FROM t3_connector WHERE "
-                                         "NOT EXISTS(SELECT 1 FROM t3_connected_environments)")
+                          {environment});
+    storage.database.exec("DELETE FROM t3_connected_environments WHERE environment_id=?", {environment});
+    storage.policyApprovals.settlePolicyApprovals();
+    const bool removeProvider = storage.database
+                                    .query("SELECT 1 FROM t3_connector WHERE "
+                                           "NOT EXISTS(SELECT 1 FROM t3_connected_environments)")
                                     .next();
     tx.commit();
     return removeProvider;
 }
 
 bool T3Connections::providerCleanupPending() const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    return db.query("SELECT 1 FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)").next();
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    return storage.database.query("SELECT 1 FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)").next();
 }
 
 void T3Connections::providerRemoved() {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    db.exec("DELETE FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)");
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    storage.database.exec("DELETE FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)");
 }
 
 std::optional<T3Connection> T3Connections::authenticate(std::string_view token) const {
     if (!connector_credentials::validBearer(token, tokenPrefix)) return {};
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
-                        " AND EXISTS(SELECT 1 FROM t3_connected_environments)",
-                        {digest(token)});
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    auto row = storage.database.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
+                                      " AND EXISTS(SELECT 1 FROM t3_connected_environments)",
+                                      {digest(token)});
     if (!row.next()) return {};
     return T3Connection{row.string(0), row.string(1)};
 }
 
 std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person, bool installationRoot) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    auto rows = db.query("SELECT port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
-                         " WHERE (? OR person_id=?) ORDER BY environment_id",
-                         {installationRoot ? 1 : 0, person});
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    auto rows = storage.database.query("SELECT port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
+                                       " WHERE (? OR person_id=?) ORDER BY environment_id",
+                                       {installationRoot ? 1 : 0, person});
     if (!rows.next()) return {};
     T3ConnectionSettings result{static_cast<unsigned>(rows.number(0)), {}};
     do {
@@ -207,9 +217,9 @@ std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view per
 }
 
 unsigned T3Connections::port() const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT port FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    auto row = storage.database.query("SELECT port FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
     return row.next() ? static_cast<unsigned>(row.number(0)) : 0;
 }
 
@@ -231,14 +241,15 @@ Person SessionParticipationStorage::sessionActor(std::string_view person) {
 }
 
 Person SessionParticipation::person(const T3Connection& connection) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    if (!db.query("SELECT 1 FROM t3_connector WHERE id=? AND person_id=? "
-                  "AND EXISTS(SELECT 1 FROM t3_connected_environments)",
-                  {connection.id, connection.personId})
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    if (!storage.database
+             .query("SELECT 1 FROM t3_connector WHERE id=? AND person_id=? "
+                    "AND EXISTS(SELECT 1 FROM t3_connected_environments)",
+                    {connection.id, connection.personId})
              .next())
         throw Conflict("The T3 connection is unavailable");
-    const auto actor = db.sessionParticipationStorage.sessionActor(connection.personId);
+    const auto actor = storage.sessionParticipationStorage.sessionActor(connection.personId);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
     return actor;
 }
@@ -250,7 +261,7 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
         requestId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != requestId.npos)
         throw Conflict("Invalid flock_ask arguments");
 
-    auto& db = *store_.p_;
+    auto& storage = *store_.p_;
     const Policy policy{store_};
     const auto authorizedPerson = [&] {
         const auto actor = person(connection);
@@ -259,28 +270,28 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
     };
     const auto fingerprint = digest(Json::array({bot, text, thread}).dump());
     const auto connected = [&](std::string_view environment) {
-        return db.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next() &&
+        return storage.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next() &&
                policy.allows(bot, Action::environment_inspect, environment);
     };
     const auto replay = [&]() -> Id {
-        auto row = db.query(R"SQL(
+        auto row = storage.database.query(R"SQL(
 SELECT a.message_id,a.request_digest,p.environment_id FROM session_asks a
 JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND a.request_id=?
 )SQL",
-                            {connection.personId, requestId});
+                                          {connection.personId, requestId});
         if (!row.next()) return 0;
         if (row.string(1) != fingerprint) throw Conflict("This requestId already has different arguments");
         if (!connected(row.string(2))) throw Conflict("This Session is unavailable through your T3 connection");
         return row.number(0);
     };
 
-    const SessionDispatchFileLock dispatch(db.path, SessionDispatchFileLock::Mode::shared);
+    const SessionDispatchFileLock dispatch(storage.path, SessionDispatchFileLock::Mode::shared);
     std::vector<std::string> environments;
     {
-        std::lock_guard lock(db.mutex);
+        std::lock_guard lock(storage.database.mutex);
         authorizedPerson();
         if (const auto message = replay()) return message;
-        if (db.botLifecycle.botPaused(bot)) throw BotPaused{};
+        if (storage.botLifecycle.botPaused(bot)) throw BotPaused{};
         const auto settings = T3Connections(store_).settings(connection.personId);
         if (settings)
             for (const auto& environment : settings->environments)
@@ -304,35 +315,35 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
         if (origin) throw Conflict("This threadId matched more than one connected T3 environment");
         origin = SessionOrigin{{environments[i], thread}, std::move(metadata->title)};
     }
-    std::lock_guard lock(db.mutex);
-    Transaction transaction(db.db);
+    std::lock_guard lock(storage.database.mutex);
+    Transaction transaction(storage.database.db);
     const auto actor = authorizedPerson();
     if (const auto message = replay()) return message;
     if (!origin || !connected(origin->target.environmentId)) throw Conflict("This Session is unavailable through your T3 connection");
     if (!policy.allows(bot, Resource::sessionRead(origin->target.environmentId, thread))) origin->title.clear();
-    const auto scrub = db.secretStorage.sharedRedactor();
+    const auto scrub = storage.secretStorage.sharedRedactor();
     for (const std::string_view id :
          {std::string_view(bot), std::string_view(origin->target.environmentId), std::string_view(thread), std::string_view(requestId)}) {
         scrub.requirePublic(id);
         if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session ask identifier");
     }
     origin->title = redactT3Tokens(scrub.text(origin->title));
-    db.exec(R"SQL(
+    storage.database.exec(R"SQL(
 INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
 )SQL",
-            {bot, origin->target.environmentId, thread, actor.id});
-    auto row = db.query("SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
-                        {bot, origin->target.environmentId, thread});
+                          {bot, origin->target.environmentId, thread, actor.id});
+    auto row = storage.database.query("SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
+                                      {bot, origin->target.environmentId, thread});
     if (!row.next() || row.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
     const auto participation = row.number(0);
-    db.exec("UPDATE session_participations SET state='active' WHERE id=? AND state<>'active'", {participation});
+    storage.database.exec("UPDATE session_participations SET state='active' WHERE id=? AND state<>'active'", {participation});
     const auto safeText = redactT3Tokens(scrub.text(text));
     const auto routing = intake(bot, safeText);
     if (routing.botId != bot) throw Conflict("The Bot is unavailable");
-    const auto message = db.conversationTurns.enqueueConversation(actor, routing, conversation::PrincipalSource::session,
-                                                                  "session-ask:" + requestId, safeText, 0, &*origin);
-    db.exec("INSERT INTO session_asks VALUES(?,?,?,?,?)", {actor.id, requestId, participation, fingerprint, message});
+    const auto message = storage.conversationTurns.enqueueConversation(actor, routing, conversation::PrincipalSource::session,
+                                                                       "session-ask:" + requestId, safeText, 0, &*origin);
+    storage.database.exec("INSERT INTO session_asks VALUES(?,?,?,?,?)", {actor.id, requestId, participation, fingerprint, message});
     transaction.commit();
     return message;
 }
@@ -537,17 +548,17 @@ std::string SessionStopResult::summary() const {
 SessionStopResult SessionParticipation::stop(const T3Connection& connection, std::string_view bot, std::string_view thread) {
     if (!validBotId(bot) || !validId(thread, 256)) throw Conflict("Invalid flock_stop arguments");
 
-    auto& db = *store_.p_;
+    auto& storage = *store_.p_;
     SessionStop stopped;
     {
-        const SessionDispatchFileLock dispatch(db.path, SessionDispatchFileLock::Mode::exclusive);
-        std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        stopped = db.sessionParticipationStorage.stopSessionParticipation(db.sessionReadStorage, person(connection), bot,
-                                                                          {"", std::string(thread)}, SessionExit::removed);
+        const SessionDispatchFileLock dispatch(storage.path, SessionDispatchFileLock::Mode::exclusive);
+        std::lock_guard lock(storage.database.mutex);
+        Transaction transaction(storage.database.db);
+        stopped = storage.sessionParticipationStorage.stopSessionParticipation(storage.sessionReadStorage, person(connection), bot,
+                                                                               {"", std::string(thread)}, SessionExit::removed);
         transaction.commit();
     }
-    return db.sessionParticipationStorage.settleSessionQueueCancellations(t3_, {}, stopped);
+    return storage.sessionParticipationStorage.settleSessionQueueCancellations(t3_, {}, stopped);
 }
 
 // Both entry points hold the exclusive dispatch lock and a write transaction here.

@@ -20,6 +20,12 @@
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
 #include "storage.hpp"
+#include "wait_storage.hpp"
+#include "flock/policy.hpp"
+#include "policy_approvals.hpp"
+#include "task_routing.hpp"
+#include "flock/workspace_tools.hpp"
+#include "outbox_storage.hpp"
 
 #include <memory>
 #include <utility>
@@ -62,33 +68,41 @@ struct Runtime::Impl {
                                   options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
-    Impl(Store::Impl& db, Policy permissions, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : channelStorage(db.channelStorage), conversationTurns(db.conversationTurns), gitStorage(db.gitStorage),
-          workflowStorage(db.workflowStorage), policy(permissions), model(m), t3(adapter), soul(std::move(loader)),
-          options(withDefaultBotTools(std::move(opts))), maintenance(db, db.automationStorage, db.workflowStorage, db.policyApprovals,
-                                                                     options.clock, options.automationError, options.storageContention),
-          prompts(db, db.secretStorage, db.taskEvents, db.workflowStorage),
-          updates(db, db.journalStorage, db.taskEvents, db.taskRecords, db.waitStorage), questions(db, db.waitStorage),
-          history(db, db.journalStorage, db.secretStorage, t3, policy, updates, options.sessionRead),
-          reports(db, db.journalStorage, db.secretStorage, db.taskEvents, db.workflowStorage, t3, policy, updates, history, options.clock),
-          peerExchanges(db, db.botLifecycle, db.conversationTurns, db.journalStorage, db.peerStorage, db.taskEvents, db.taskOperations,
-                        db.taskRecords, db.taskRouting, db.waitStorage, policy, updates, reports, history, options.peers),
-          workers(db.conversationTurns, db.sessionMessageStorage, db.sessionParticipationStorage, channelStorage, t3, maintenance),
-          runs(db, db.botSettingsStorage, db.journalStorage, db.peerStorage, db.secretStorage, db.taskEvents, db.taskRecords,
-               db.waitStorage, db.outboxStorage, db.workflowStorage, t3, updates, questions, reports, peerExchanges, options.clock,
-               workers.stopToken()),
-          dispatch(db, db.botLifecycle, db.botSettingsStorage, db.conversationTurns, db.journalStorage, db.path, db.policyApprovals,
-                   db.secretStorage, db.sessionParticipationStorage, db.sessionReadStorage, db.taskEvents, db.taskRecords, db.taskRouting,
-                   db.taskRunReports, db.waitStorage, db.outboxStorage, db.memoryStorage, t3, policy, updates, questions, reports, runs,
+    Impl(Store::Impl& storage, Policy permissions, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
+        : channelStorage(storage.channelStorage), conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage),
+          workflowStorage(storage.workflowStorage), policy(permissions), model(m), t3(adapter), soul(std::move(loader)),
+          options(withDefaultBotTools(std::move(opts))),
+          maintenance(storage.database, storage.automationStorage, storage.workflowStorage, storage.policyApprovals, options.clock,
+                      options.automationError, options.storageContention),
+          prompts(storage.database, storage.secretStorage, storage.taskEvents, storage.workflowStorage),
+          updates(storage.database, storage.journalStorage, storage.taskEvents, storage.taskRecords, storage.waitStorage),
+          questions(storage.database, storage.waitStorage),
+          history(storage.database, storage.journalStorage, storage.secretStorage, t3, policy, updates, options.sessionRead),
+          reports(storage.database, storage.journalStorage, storage.secretStorage, storage.taskEvents, storage.workflowStorage, t3, policy,
+                  updates, history, options.clock),
+          peerExchanges(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.peerStorage,
+                        storage.taskEvents, storage.taskOperations, storage.taskRecords, storage.taskRouting, storage.waitStorage, policy,
+                        updates, reports, history, options.peers),
+          workers(storage.conversationTurns, storage.sessionMessageStorage, storage.sessionParticipationStorage, channelStorage, t3,
+                  maintenance),
+          runs(storage.database, storage.botSettingsStorage, storage.journalStorage, storage.peerStorage, storage.secretStorage,
+               storage.taskEvents, storage.taskRecords, storage.waitStorage, storage.outboxStorage, storage.workflowStorage, t3, updates,
+               questions, reports, peerExchanges, options.clock, workers.stopToken()),
+          dispatch(storage.database, storage.botLifecycle, storage.botSettingsStorage, storage.conversationTurns, storage.journalStorage,
+                   storage.path, storage.policyApprovals, storage.secretStorage, storage.sessionParticipationStorage,
+                   storage.sessionReadStorage, storage.taskEvents, storage.taskRecords, storage.taskRouting, storage.taskRunReports,
+                   storage.waitStorage, storage.outboxStorage, storage.memoryStorage, t3, policy, updates, questions, reports, runs,
                    prompts, options.clock, options.intake, options.requireT3Connection, workers.stopToken()),
-          decisions(db, db.conversationTurns, db.gitStorage, db.journalStorage, db.peerStorage, db.secretStorage, db.taskEvents,
-                    db.taskRecords, db.waitStorage, updates, reports, history, peerExchanges, dispatch, options.sessionRead,
-                    options.gitHost.get()),
-          taskTurn(db, db.gitStorage, db.journalStorage, db.modelCalls, db.peerStorage, db.secretStorage, db.taskEvents, db.taskRecords,
-                   db.taskRouting, db.waitStorage, db.memoryStorage, model, soul, options.clock, options.gitHost.get(), options.sessionRead,
-                   workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts, decisions),
-          taskScheduler(db, db.taskEvents, db.taskRouting, t3, updates, dispatch, options.requireT3Connection, workers.stopToken()),
-          lock(db, db.path, db.policyApprovals, options.clock) {}
+          decisions(storage.database, storage.conversationTurns, storage.gitStorage, storage.journalStorage, storage.peerStorage,
+                    storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates, reports, history,
+                    peerExchanges, dispatch, options.sessionRead, options.gitHost.get()),
+          taskTurn(storage.database, storage.gitStorage, storage.journalStorage, storage.modelCalls, storage.peerStorage,
+                   storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.taskRouting, storage.waitStorage,
+                   storage.memoryStorage, model, soul, options.clock, options.gitHost.get(), options.sessionRead, workers.stopToken(),
+                   updates, reports, history, peerExchanges, runs, prompts, decisions),
+          taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, dispatch, options.requireT3Connection,
+                        workers.stopToken()),
+          lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(taskTurn); }
 

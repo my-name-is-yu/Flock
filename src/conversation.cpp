@@ -1,4 +1,5 @@
 #include "local_machine_storage.hpp"
+#include "flock/decision_errors.hpp"
 #include "web_identity_state.hpp"
 #include "flock/conversations.hpp"
 #include "database.hpp"
@@ -6,8 +7,8 @@
 #include "secret_storage.hpp"
 #include "journal_storage.hpp"
 #include "conversation_turns.hpp"
+#include "attachment_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
-#include "storage.hpp"
 #include "journal.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
@@ -20,6 +21,10 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/session_ref.hpp"
+#include "json_fields.hpp"
+#include "flock/secrets.hpp"
+#include "flock/board_inbox.hpp"
+#include "channel_storage.hpp"
 
 #include <functional>
 #include <optional>

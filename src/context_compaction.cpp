@@ -5,7 +5,6 @@
 #include "conversation_storage.hpp"
 #include "database.hpp"
 #include "secret_storage.hpp"
-#include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
 #include "flock/types.hpp"

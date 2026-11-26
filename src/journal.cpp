@@ -4,7 +4,6 @@
 #include "journal.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
@@ -12,6 +11,9 @@
 #include "flock/run_report.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "run_ref_storage.hpp"
+#include "task_run_reports.hpp"
+#include "wait_storage.hpp"
 
 #include <optional>
 #include <string>

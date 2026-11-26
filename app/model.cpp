@@ -6,7 +6,6 @@
 #include "flock/limits.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
-#include "flock/policy.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/workspace_tools.hpp"
 

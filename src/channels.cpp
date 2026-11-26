@@ -1,6 +1,5 @@
 #include "conversation_turns.hpp"
 #include "session_dispatch_lock.hpp"
-#include "storage.hpp"
 #include "web_identity_state.hpp"
 #include "secret_storage.hpp"
 #include "journal_storage.hpp"
@@ -20,6 +19,9 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/decision.hpp"
+#include "flock/secrets.hpp"
+#include "policy_approvals.hpp"
+#include "policy_origin.hpp"
 
 #include <algorithm>
 #include <charconv>

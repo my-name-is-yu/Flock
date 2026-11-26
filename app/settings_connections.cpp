@@ -1,11 +1,11 @@
 #include "settings_connections.hpp"
+#include "flock/bot_id.hpp"
 #include "bot_tools.hpp"
 #include "git_github.hpp"
 #include "settings_file.hpp"
 #include "flock/channel_bridge_settings.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
-#include "flock/policy.hpp"
 #include "flock/store.hpp"
 #include "flock/types.hpp"
 

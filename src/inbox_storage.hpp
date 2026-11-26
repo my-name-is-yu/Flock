@@ -53,8 +53,8 @@ private:
     WaitStorage& waitStorage;
     JournalStorage& journalStorage;
     Policy& permissions;
-    PolicyApprovals& policyApprovals;
     ModelCalls& modelCalls;
     TaskOperations& taskOperations;
+    PolicyApprovals& policyApprovals;
 };
 }

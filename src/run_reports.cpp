@@ -2,7 +2,6 @@
 #include "task_run_reports.hpp"
 #include "outbox_storage.hpp"
 #include "journal_storage.hpp"
-#include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
@@ -14,6 +13,9 @@
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
 #include "flock/outbox.hpp"
+#include "database.hpp"
+#include "policy_approvals.hpp"
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <cstddef>

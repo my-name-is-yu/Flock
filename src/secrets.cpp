@@ -1,8 +1,8 @@
 #include "secret_storage.hpp"
 #include "database.hpp"
 #include "flock/types.hpp"
-#include "flock/policy.hpp"
 #include "flock/secrets.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/json.hpp"
 
 #include <algorithm>

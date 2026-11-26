@@ -1,4 +1,6 @@
+#include "flock/board_inbox.hpp"
 #include "flock/external_mcp.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/policy.hpp"
 #include "flock/limits.hpp"
 #include "connector_credentials.hpp"
@@ -12,6 +14,18 @@
 #include "flock/json.hpp"
 #include "flock/task.hpp"
 #include "flock/wait.hpp"
+#include "json_fields.hpp"
+#include "t3_credentials.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "wait_storage.hpp"
+#include "task_routing.hpp"
+#include "bot_lifecycle_storage.hpp"
+#include "secret_storage.hpp"
+#include "session_participation_storage.hpp"
+#include "task_records.hpp"
+#include "flock/task_target.hpp"
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <optional>
@@ -43,36 +57,37 @@ Json currentRun(const TaskData& task) {
 
 ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::vector<std::string>& bots) {
     if (bots.empty()) throw Conflict("At least one Bot is required");
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
-    const auto actor = db.sessionParticipationStorage.sessionActor(person);
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
+    const auto actor = storage.sessionParticipationStorage.sessionActor(person);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
-    db.secretStorage.sharedRedactor().requirePublic({person, bots});
+    storage.secretStorage.sharedRedactor().requirePublic({person, bots});
     ExternalMcpCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
-    db.exec("INSERT INTO external_mcp_connections VALUES(?,?,?)",
-            {credential.connectionId, actor.id, connector_credentials::digest(credential.bearerToken)});
+    storage.database.exec("INSERT INTO external_mcp_connections VALUES(?,?,?)",
+                          {credential.connectionId, actor.id, connector_credentials::digest(credential.bearerToken)});
     for (const auto& bot : bots) {
         if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
-        db.exec("INSERT OR IGNORE INTO external_mcp_allowed_bots VALUES(?,?)", {credential.connectionId, bot});
+        storage.database.exec("INSERT OR IGNORE INTO external_mcp_allowed_bots VALUES(?,?)", {credential.connectionId, bot});
     }
     tx.commit();
     return credential;
 }
 
 void ExternalMcp::disconnect(std::string_view connectionId) {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    db.exec("UPDATE external_mcp_connections SET token_digest=NULL WHERE id=? AND token_digest IS NOT NULL", {connectionId});
-    if (!sqlite3_changes(db.db)) throw Conflict("No active external MCP connection with this ID");
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    storage.database.exec("UPDATE external_mcp_connections SET token_digest=NULL WHERE id=? AND token_digest IS NOT NULL", {connectionId});
+    if (!sqlite3_changes(storage.database.db)) throw Conflict("No active external MCP connection with this ID");
 }
 
 std::optional<ExternalMcpConnection> ExternalMcp::authenticate(std::string_view token) const {
     if (!connector_credentials::validBearer(token, tokenPrefix)) return std::nullopt;
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?", {connector_credentials::digest(token)});
-    if (!row.next() || db.sessionParticipationStorage.sessionActor(row.string(1)).id.empty()) return std::nullopt;
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    auto row = storage.database.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?",
+                                      {connector_credentials::digest(token)});
+    if (!row.next() || storage.sessionParticipationStorage.sessionActor(row.string(1)).id.empty()) return std::nullopt;
     return ExternalMcpConnection{row.string(0)};
 }
 
@@ -84,28 +99,28 @@ Id ExternalMcp::submit(const ExternalMcpConnection& connection, std::string_view
         text.find('\0') != text.npos || text.find_first_not_of(" \t\r\n") == text.npos)
         throw Conflict("Invalid task request");
 
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
-    auto grant = db.query(R"SQL(
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
+    auto grant = storage.database.query(R"SQL(
 SELECT c.person_id FROM external_mcp_connections c JOIN external_mcp_allowed_bots b ON b.connection_id=c.id
 WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
 )SQL",
-                          {connection.id, bot});
+                                        {connection.id, bot});
     if (!grant.next()) throw Conflict(std::string(botUnavailable));
-    const auto actor = db.sessionParticipationStorage.sessionActor(grant.string(0));
+    const auto actor = storage.sessionParticipationStorage.sessionActor(grant.string(0));
     if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
 
     const auto fingerprint = connector_credentials::digest(Json::array({bot, text}).dump());
-    auto receipt = db.query("SELECT request_digest,task_id FROM external_mcp_receipts WHERE connection_id=? AND request_id=?",
-                            {connection.id, requestId});
+    auto receipt = storage.database.query("SELECT request_digest,task_id FROM external_mcp_receipts WHERE connection_id=? AND request_id=?",
+                                          {connection.id, requestId});
     if (receipt.next()) {
         if (receipt.string(0) != fingerprint) throw Conflict("This requestId already has different arguments");
         return receipt.number(1);
     }
-    if (db.botLifecycle.botPaused(bot)) throw BotPaused{};
+    if (storage.botLifecycle.botPaused(bot)) throw BotPaused{};
 
-    const auto scrub = db.secretStorage.sharedRedactor();
+    const auto scrub = storage.secretStorage.sharedRedactor();
     scrub.requirePublic(requestId);
     const auto request = redactConnectionTokens(scrub.text(text));
     Intake item;
@@ -116,26 +131,26 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
     }
     if (item.botId != bot) throw Conflict(std::string(botUnavailable));
     item.request = request;
-    item.environmentId = db.taskRouting.defaultT3Environment(bot, item.environmentId, {});
+    item.environmentId = storage.taskRouting.defaultT3Environment(bot, item.environmentId, {});
     if (item.environmentId.empty()) throw Conflict("Connect T3 or configure a T3 environment for this Bot before submitting tasks");
-    const auto task = db.taskOperations.submitRequest(item, &actor);
-    db.exec("INSERT INTO external_mcp_receipts VALUES(?,?,?,?)", {connection.id, requestId, fingerprint, task});
+    const auto task = storage.taskOperations.submitRequest(item, &actor);
+    storage.database.exec("INSERT INTO external_mcp_receipts VALUES(?,?,?,?)", {connection.id, requestId, fingerprint, task});
     tx.commit();
     return task;
 }
 
 ExternalMcp::OwnedTask ExternalMcp::authorizeTask(const ExternalMcpConnection& connection, Id taskId) const {
-    auto& db = *store_.p_;
-    auto row = db.query(R"SQL(
+    auto& storage = *store_.p_;
+    auto row = storage.database.query(R"SQL(
 SELECT c.person_id,t.bot_id FROM external_mcp_receipts r
 JOIN external_mcp_connections c ON c.id=r.connection_id
 JOIN tasks t ON t.id=r.task_id
 JOIN external_mcp_allowed_bots b ON b.connection_id=c.id AND b.bot_id=t.bot_id
 WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
 )SQL",
-                        {connection.id, taskId});
+                                      {connection.id, taskId});
     if (!row.next()) throw Conflict(std::string(taskUnavailable));
-    auto actor = db.sessionParticipationStorage.sessionActor(row.string(0));
+    auto actor = storage.sessionParticipationStorage.sessionActor(row.string(0));
     auto bot = row.string(1);
     if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(taskUnavailable));
     return {std::move(actor), std::move(bot)};
@@ -163,30 +178,30 @@ Json ExternalMcp::completionRun(const OwnedTask& owner, const CompletionEntry& c
     if (environment.empty() || thread.empty() || resultRunId.empty() || !policy.allows(peerBot, Resource::sessionRead(environment, thread)))
         return nullptr;
 
-    auto row = store_.p_->query(R"SQL(
+    auto row = store_.p_->database.query(R"SQL(
 SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
 WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND j.run_environment_id=?
   AND j.run_thread_id=? AND j.result_run_id=?
 ORDER BY j.id DESC LIMIT 1
 )SQL",
-                                {dependency->taskId, peerBot, environment, thread, resultRunId});
+                                         {dependency->taskId, peerBot, environment, thread, resultRunId});
     if (!row.next()) return nullptr;
     return {{"environmentId", environment}, {"threadId", thread}, {"link", row.string(0)}};
 }
 
 Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db, Transaction::Mode::read);
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db, Transaction::Mode::read);
     const auto owner = authorizeTask(connection, taskId);
-    const auto task = db.taskRecords.load(taskId);
-    const auto scrub = db.secretStorage.redactor(owner.bot);
+    const auto task = storage.taskRecords.load(taskId);
+    const auto scrub = storage.secretStorage.redactor(owner.bot);
     const auto publicText = [&](std::string_view text) { return redactConnectionTokens(scrub.text(text)); };
     Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", taskStateName(task.state)},
               {"question", nullptr}, {"result", nullptr}, {"sessionRun", nullptr}};
-    if (const auto wait = db.waitStorage.currentWait(taskId)) {
+    if (const auto wait = storage.waitStorage.currentWait(taskId)) {
         data["waitReason"] = waitReasonName(wait->reason());
-        if (task.state == TaskState::waiting && wait->reason() == WaitReason::user_question && db.waitStorage.waitIsActionable(task)) {
+        if (task.state == TaskState::waiting && wait->reason() == WaitReason::user_question && storage.waitStorage.waitIsActionable(task)) {
             auto choices = Json::array();
             for (const auto& choice : wait->choices()) choices.push_back(publicText(choice));
             const auto target = TaskTarget::from(task, wait->id);
@@ -199,9 +214,9 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     }
     Json run;
     if (task.state == TaskState::completed) {
-        auto row = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='completed'"
-                            " ORDER BY id DESC LIMIT 1",
-                            {taskId});
+        auto row = storage.database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='completed'"
+                                          " ORDER BY id DESC LIMIT 1",
+                                          {taskId});
         if (row.next()) {
             const auto completion = decodeCompletion(row.number(0), row.json(1));
             data["result"] = {{"text", publicText(completion.text)}};
@@ -224,12 +239,12 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
 
 void ExternalMcp::answer(const ExternalMcpConnection& connection, Id taskId, Id waitId, Id revision, Id generation, std::string_view text) {
     if (text.find('\0') != text.npos) throw Conflict("Invalid task answer");
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
+    auto& storage = *store_.p_;
+    std::lock_guard lock(storage.database.mutex);
+    Transaction tx(storage.database.db);
     const auto owner = authorizeTask(connection, taskId);
-    db.taskOperations.operate(owner.actor, {owner.bot, taskId, waitId, revision, generation}, "answer",
-                              {{"text", redactConnectionTokens(std::string(text))}}, 0, InboxKind::user_question);
+    storage.taskOperations.operate(owner.actor, {owner.bot, taskId, waitId, revision, generation}, "answer",
+                                   {{"text", redactConnectionTokens(std::string(text))}}, 0, InboxKind::user_question);
     tx.commit();
 }
 }

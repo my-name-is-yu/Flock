@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "flock/decision_errors.hpp"
 #include "task_run_reports.hpp"
 #include "session_read_storage.hpp"
 #include "session_participation_storage.hpp"
@@ -18,7 +19,6 @@
 #include "model_calls.hpp"
 #include "journal_storage.hpp"
 #include "session_dispatch_lock.hpp"
-#include "storage.hpp"
 #include "journal.hpp"
 #include "journal_conversation.hpp"
 #include "flock/limits.hpp"
@@ -39,6 +39,17 @@
 #include "flock/wait.hpp"
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
+#include "json_fields.hpp"
+#include "t3_credentials.hpp"
+#include "database.hpp"
+#include "flock/secrets.hpp"
+#include "flock/board_inbox.hpp"
+#include "run_ref_storage.hpp"
+#include "flock/policy.hpp"
+#include "policy_origin.hpp"
+#include "task_interaction_storage.hpp"
+#include "workspace_internal.hpp"
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <cstddef>

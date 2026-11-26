@@ -1,4 +1,6 @@
 #include "flock/identity.hpp"
+#include "flock/secret_ref.hpp"
+#include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
@@ -19,6 +21,7 @@
 #include "flock/t3_command.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
+#include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
 

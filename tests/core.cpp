@@ -1,5 +1,4 @@
 #include "flock/tasks.hpp"
-#include "flock/policy.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"

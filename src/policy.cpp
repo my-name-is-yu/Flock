@@ -1,4 +1,6 @@
 #include "flock/policy.hpp"
+#include "flock/bot_id.hpp"
+#include "flock/decision_errors.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "database.hpp"
 #include "inbox_storage.hpp"
@@ -8,6 +10,7 @@
 #include "task_records.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/secrets.hpp"
+#include "flock/secret_ref.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
@@ -31,22 +34,6 @@ namespace {
 bool identifier(std::string_view id) {
     return !id.empty() && id.size() <= 1024 && id.find_first_of("\r\n\t") == id.npos && id.find('\0') == id.npos;
 }
-}
-
-bool validBotId(std::string_view id) {
-    constexpr std::string_view alnum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    return !id.empty() && id.size() <= 128 && alnum.find(id.front()) != alnum.npos &&
-           id.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.") == id.npos;
-}
-
-std::string botName(std::string_view input) {
-    const auto start = input.find_first_not_of(" \t\r\n");
-    if (start == input.npos) throw Conflict("Bot name is required");
-    const auto name = input.substr(start, input.find_last_not_of(" \t\r\n") - start + 1);
-    if (name.size() > 128 || std::count_if(name.begin(), name.end(), [](unsigned char c) { return (c & 0xC0) != 0x80; }) > 32 ||
-        std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; }))
-        throw Conflict("Invalid Bot name");
-    return std::string(name);
 }
 
 namespace {
