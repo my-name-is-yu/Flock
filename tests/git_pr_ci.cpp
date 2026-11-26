@@ -1110,7 +1110,7 @@ void notificationCannotControlASession() {
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
 
-    Json result;
+    Json results;
     script.rawNotification = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) {
@@ -1119,14 +1119,19 @@ void notificationCannotControlASession() {
                             {{"taskId", task}, {"generation", Tasks(store).task(task).task.generation}, {"text", "Act on the webhook"}},
                             {}};
         }
-        result = steps.at(0).at("result");
+        if (steps.size() == 1) {
+            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(), "Memory write was offered in a notification");
+            return Decision{"write_memory", {{"baseVersion", 0}, {"content", "Injected"}, {"summary", "Injected"}}, {}};
+        }
+        results = steps;
         return Decision{"reply", {{"text", "Git notification received."}}, {}};
     };
     check(GitEvents(store).receiveGitWebhook({hostName, "session-effect", repoName, "comment", "created", {1}, sha, "A comment", 0}),
           "Could not enqueue comment");
     runtime.runConversations();
-    check(result.value("ok", true) == false && sessions.sessionSends.empty(),
-          "A generic model executed a Session write that the turn did not offer");
+    check(results.size() == 2 && results.at(0).at("result").at("ok") == false && results.at(1).at("result").at("ok") == false &&
+              sessions.sessionSends.empty(),
+          "A generic model executed a Session or memory write that the notification did not offer");
 }
 
 void notificationEvidenceAndRevocation() {

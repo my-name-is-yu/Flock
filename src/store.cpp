@@ -567,8 +567,7 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
-Json Conversations::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
-                                 std::string_view viewer) const {
+Json Conversations::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events, const Person* viewer) const {
     if (before == std::numeric_limits<Id>::min()) return Json::array();
     const auto through = before ? before - 1 : std::numeric_limits<Id>::max();
     std::lock_guard lock(database_.mutex);
@@ -631,8 +630,10 @@ ORDER BY page.id DESC)SQL",
     while (rows.next()) {
         auto event = journalRow(rows);
         if (event.at("kind") == "memory_remembered" || event.at("kind") == "memory_learned")
-            memory_.projectMemoryNotice(bot, event.at("data"));
-        if (rows.number(5)) event["data"].update(channels_.channelContext(rows.number(0), bot, nullptr, viewer));
+            memory_.projectMemoryNotice(bot, event.at("data"), viewer);
+        if (rows.number(5))
+            event["data"].update(
+                channels_.channelContext(rows.number(0), bot, nullptr, viewer ? std::string_view(viewer->id) : std::string_view{}));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
         result.push_back(std::move(event));
     }

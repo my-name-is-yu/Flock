@@ -29,15 +29,11 @@ namespace flockv0 {
 namespace {
 bool redactsProse(std::string_view tool, std::string_view key) {
     if (tool == "reply") return key == "text";
-    if (tool == "apply_memory_edit") return key == "content";
-    if (tool == "remember_preference") return key == "content" || key == "summary";
-    if (tool == "propose_memory_edit") return key == "content" || key == "rationale";
-    return false;
+    return tool == "write_memory" && (key == "content" || key == "summary");
 }
 
 bool sharedMemoryTool(std::string_view tool) {
-    return tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" || tool == "apply_memory_edit" ||
-           tool == "revert_memory_edit";
+    return tool == "read_memory" || tool == "memory_history" || tool == "write_memory" || tool == "revert_memory_edit";
 }
 
 }
@@ -178,7 +174,8 @@ CheckedModelTurn ModelCalls::callModel(std::string_view bot, Model& model, const
         safe.history = scrub.record(input.history);
         safe.evidence = scrub.record(input.evidence);
         safe.config = scrub.record(input.config, SecretRedactor::Fields::external);
-        safe.notes = {scrub.text(input.notes.soul), scrub.text(input.notes.memory)};
+        safe.notes.soul = scrub.text(input.notes.soul);
+        safe.notes.memory = scrub.text(input.notes.memory);
         safe.feedback = scrub.text(input.feedback);
         if (scrub.containsProtectedText(safe.learningRunId)) safe.learningRunId.clear();
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"), revision);

@@ -2,7 +2,7 @@ import { element } from './settings-ui.js';
 
 const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' });
 
-export function createMemoryHistory(readPage, openConversationEvent, sessionLink) {
+export function createMemoryHistory(readPage, openConversationEvent, sessionLink, botName) {
   const card = element('section', '', 'settings-card memory-history');
   const heading = element('h2', 'Memory history', 'settings-card-label');
   const list = element('ol', '', 'memory-history-list');
@@ -20,10 +20,11 @@ export function createMemoryHistory(readPage, openConversationEvent, sessionLink
     return button;
   }
 
-  function revisionRow({ source, learning, revertedFrom, createdAt, diffSummary }) {
+  function revisionRow({ author, source, learning, revertedFrom, createdAt, diffSummary }) {
     const item = element('li');
     const label = source ? 'Learned' : revertedFrom ? 'Undid a change' : 'Edited memory';
-    item.append(element('strong', label), element('span', ` · ${date.format(createdAt * 1000)}`, 'memory-history-meta'));
+    const editor = author.startsWith('bot:') ? botName : author.startsWith('person:') ? author.slice('person:'.length) : author;
+    item.append(element('strong', label), element('span', ` · ${editor} · ${date.format(createdAt * 1000)}`, 'memory-history-meta'));
     if (learning?.added.length) item.append(element('p', learning.added.map((fact) => `“${fact}”`).join(' · ')));
     if (learning?.removed.length) item.append(element('p', 'Replaced · ' + learning.removed.map((fact) => `“${fact}”`).join(' · ')));
     item.append(element('p', diffSummary, 'memory-history-meta'));

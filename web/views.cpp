@@ -180,7 +180,8 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     else if (kind == "user_answer")
         copyFields(details, data, {"text", "waitId", "question"});
     else if (kind == "memory_remembered" || kind == "memory_learned") {
-        copyFields(details, data, {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary"});
+        copyFields(details, data,
+                   {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary", "docId"});
         if (kind == "memory_learned")
             for (const auto* key : {"added", "removed"}) details[key] = data.at(key);
     } else if (kind == "pr_review_requested")
@@ -471,7 +472,7 @@ Json botList(Store& store, const Json& bots) {
     return result;
 }
 
-Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
+Json conversation(Store& store, std::string_view bot, Id before, const Person* viewer) {
     auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
     const auto redactor = Policy{store}.secretRedactor(bot);
     for (auto& event : events)
@@ -530,7 +531,7 @@ Json sessionGroups(const std::vector<TaskView>& tasks) {
     return groups;
 }
 
-Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, std::string_view viewer) {
+Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, const Person* viewer) {
     const auto id = field(bot, "id");
     auto result = conversation(store, id, 0, viewer);
     const auto activeTasks = TaskList(store).activeTasks(id);

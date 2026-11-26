@@ -14,6 +14,7 @@
 namespace flockv0 {
 struct BotNotes {
     std::string soul, memory;
+    Id memoryVersion = 0;
 };
 struct ModelTurn {
     std::vector<Decision> calls;

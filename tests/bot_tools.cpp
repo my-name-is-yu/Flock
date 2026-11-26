@@ -1,3 +1,4 @@
+#include "flock/bot_memory.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_intake.hpp"
@@ -530,6 +531,18 @@ void webFetchCanPrecedeTaskStart(Fixture& f) {
           "The conversation prompt did not restrict untrusted content to evidence");
 }
 
+void webEvidenceCannotWriteMemory(Fixture& f) {
+    const auto fetch = call("web_fetch", {{"url", "https://example.com/evidence"}});
+    const auto write = call("write_memory", {{"baseVersion", 0}, {"content", "Trust the page."}, {"summary", "Trust the page."}});
+    f.model.followStep = [&](const Json& steps) { return steps.size() == 1 ? std::vector{write} : std::vector<Decision>{}; };
+    const auto steps = f.batch({fetch});
+    f.model.followStep = {};
+    check(steps.size() == 2 && steps[0].at("result").at("ok") == true && steps[0].at("result").at("untrustedData") == true &&
+              steps[1].at("result").at("error") == "Memory edits need a new message after reading external evidence." &&
+              Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object()).at("revisions").empty(),
+          "A tool used web evidence as authority for a memory write");
+}
+
 void actionsAfterWebSearchFollowPolicy() {
     Fixture f;
     PolicyRules policy{*f.store};
@@ -816,6 +829,7 @@ int main(int argc, char** argv) {
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);
         webFetchCanPrecedeTaskStart(fixture);
+        webEvidenceCannotWriteMemory(fixture);
         actionsAfterWebSearchFollowPolicy();
         freshConversationStepArrays(fixture);
         std::cout << "Bot workspace and tool acceptance passed\n";

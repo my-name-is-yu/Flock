@@ -13,6 +13,7 @@ class ChannelStorage;
 class ConversationContextStorage;
 class Database;
 class MemoryStorage;
+struct Person;
 
 class Conversations {
 public:
@@ -22,7 +23,7 @@ public:
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, ConversationEvents events = ConversationEvents::all,
-                      std::string_view viewer = {}) const;
+                      const Person* viewer = nullptr) const;
     struct ConversationChanges {
         Id through;
         std::map<std::string, std::vector<Id>> messages;

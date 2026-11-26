@@ -194,13 +194,16 @@ BotNotes MemoryStorage::loadNotes(std::string_view bot, const SoulLoader& soul, 
     std::lock_guard lock(database_.mutex);
     if (auto doc = findMemory(database_.db, key)) {
         notes.memory = std::move(doc->content);
+        notes.memoryVersion = doc->version;
         return notes;
     }
     Transaction tx(database_.db);
-    if (auto doc = findMemory(database_.db, key))
+    if (auto doc = findMemory(database_.db, key)) {
         notes.memory = std::move(doc->content);
-    else
+        notes.memoryVersion = doc->version;
+    } else {
         notes.memory = seedPrivateMemory(key, bot, secretStorage_.redactor(bot), now);
+    }
     tx.commit();
     return notes;
 }
@@ -245,27 +248,37 @@ Json Memory::memory(const Person& actor, std::string_view bot, std::string_view 
     std::lock_guard lock(database_.mutex);
     Transaction tx(database_.db);
     auto result = memory_.memory(bot, actor, operation, args, unixTime());
-    if (result.is_null()) throw Conflict("Unknown memory operation");
     tx.commit();
     return result;
 }
 
-Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args, Seconds now,
-                           bool fromBot) {
+Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args, Seconds now) {
+    return accessMemory(bot, actor, operation, args, now, 0);
+}
+
+Json MemoryStorage::conversationMemory(const conversation::Message& message, std::string_view operation, const Json& args, Seconds now) {
+    if ((operation == "write_memory" || operation == "revert_memory_edit") && !canEditFrom(message))
+        throw AccessDenied("Memory access denied");
+    const auto actor = conversationTurns.turnActor(message);
+    return accessMemory(message.bot, actor, operation, args, now, message.id);
+}
+
+Json MemoryStorage::accessMemory(std::string_view bot, const Person& actor, std::string_view operation, const Json& args, Seconds now,
+                                 Id sourceMessage) {
+    const bool fromBot = sourceMessage != 0;
     const bool reading = operation == "read_memory" || operation == "memory_history";
-    const bool remembering = fromBot && operation == "remember_preference";
-    if (!reading && operation != "propose_memory_edit" && operation != "apply_memory_edit" && operation != "revert_memory_edit" &&
-        !remembering && !(!fromBot && operation == "reject_memory_edit"))
-        return nullptr;
+    const bool writing = operation == "write_memory";
+    const bool reverting = operation == "revert_memory_edit";
+    if (!reading && !writing && !reverting) throw Conflict("Unknown memory operation");
     if (!validBotId(bot) || !args.is_object()) throw Conflict("Invalid memory arguments");
     const bool shared = args.contains("docId");
-    if (remembering && shared) throw Conflict("Automatic saves use private memory");
     const auto id = shared ? field(args, "docId") : "memory";
-    const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
-    auto access = permissions;
-    if (!access.allows(actor, reading ? Action::bot_view : Action::bot_settings, bot) ||
-        (shared && (!access.allows(actor, action, id) || (fromBot ? access.forbidden(bot, action, id) : !access.allows(bot, action, id)))))
-        throw AccessDenied("Memory access denied");
+    if (!permissions.allows(actor, reading ? Action::bot_view : Action::bot_settings, bot)) throw AccessDenied("Memory access denied");
+    if (shared) {
+        const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+        const bool botDenied = fromBot || reverting ? permissions.forbidden(bot, action, id) : !permissions.allows(bot, action, id);
+        if (botDenied || !permissions.allows(actor, action, id)) throw AccessDenied("Memory access denied");
+    }
 
     const auto key = shared ? "shared:" + id : privateKey(bot);
     const auto author = fromBot ? "bot:" + std::string(bot) : "person:" + actor.id;
@@ -302,30 +315,6 @@ ORDER BY r.id DESC LIMIT 21
             detail["newContent"] = revisions.string(11);
             return scrub.record(std::move(detail));
         }
-        const Id proposal = args.contains("proposalId") ? requiredInteger(args, "proposalId") : 0;
-        const auto proposalsBefore = args.contains("proposalsBefore") ? requiredInteger(args, "proposalsBefore") : 0;
-        auto proposals = database_.query(R"SQL(
-SELECT id,base_version,rationale,author,status,created_at,decided_by,decided_at,diff_summary,proposed_content
-FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
-)SQL",
-                                         {key, proposal, proposal, proposalsBefore, proposalsBefore});
-        Json edits = Json::array();
-        Id nextProposal = 0;
-        while (proposals.next()) {
-            if (edits.size() == 20) {
-                nextProposal = edits.back().at("id");
-                break;
-            }
-            Json row = {{"id", proposals.number(0)},        {"baseVersion", proposals.number(1)}, {"rationale", proposals.string(2)},
-                        {"author", proposals.string(3)},    {"status", proposals.string(4)},      {"createdAt", proposals.number(5)},
-                        {"decidedBy", proposals.string(6)}, {"decidedAt", proposals.number(7)},   {"diffSummary", proposals.string(8)}};
-            if (proposal) {
-                row["proposedContent"] = proposals.string(9);
-                return scrub.record(std::move(row));
-            }
-            edits.push_back(std::move(row));
-        }
-        if (proposal) throw Conflict("Memory proposal not found");
         Json history = Json::array();
         Id next = 0;
         while (revisions.next()) {
@@ -335,39 +324,18 @@ FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER 
             }
             history.push_back(revisionView(revisions));
         }
-        return scrub.record({{"docKey", key},
-                             {"version", version},
-                             {"revisions", history},
-                             {"proposals", edits},
-                             {"before", next},
-                             {"proposalsBefore", nextProposal}});
+        return scrub.record({{"docKey", key}, {"version", version}, {"revisions", history}, {"before", next}});
     }
 
-    const auto proposal = args.contains("proposalId") ? requiredInteger(args, "proposalId") : 0;
-    if (operation == "reject_memory_edit") {
-        if (!proposal) throw Conflict("A person and a proposal ID are required");
-        database_.exec(
-            "UPDATE memory_proposals SET status='rejected',decided_by=?,decided_at=? WHERE doc_key=? AND id=? AND status='pending'",
-            {author, now, key, proposal});
-        if (!sqlite3_changes(database_.db)) throw Conflict("Pending memory proposal not found");
-        return {{"proposalId", proposal}, {"status", "rejected"}};
-    }
     const auto expected = requiredInteger(args, "baseVersion", 0);
     checkVersion(expected, version);
     std::string updated;
     Id reverted = 0;
-    if (operation == "revert_memory_edit") {
+    if (reverting) {
         reverted = requiredInteger(args, "revisionId");
         auto row = database_.query("SELECT previous_content FROM memory_revisions WHERE doc_key=? AND id=?", {key, reverted});
         if (!row.next()) throw Conflict("Memory revision not found");
         updated = row.string(0);
-    } else if (operation == "apply_memory_edit" && proposal) {
-        if (args.contains("content")) throw Conflict("Choose either content or proposalId");
-        auto row = database_.query(
-            "SELECT base_version,proposed_content FROM memory_proposals WHERE doc_key=? AND id=? AND status='pending'", {key, proposal});
-        if (!row.next()) throw Conflict("Pending memory proposal not found");
-        checkVersion(row.number(0), version);
-        updated = row.string(1);
     } else {
         if (!args.contains("content") || !args.at("content").is_string() ||
             args.at("content").get_ref<const std::string&>().size() > limits::memory::maxDocumentBytes)
@@ -378,28 +346,42 @@ FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER 
     updated = scrub.text(updated);
     if (updated.size() > limits::memory::maxDocumentBytes)
         throw Conflict("Redacted memory content exceeds " + std::to_string(limits::memory::maxDocumentBytes) + " bytes");
-    if (remembering && updated == content) return {{"version", version}, {"unchanged", true}};
-    if (!doc) createMemory(key, {}, id, {}, now);
-    if (operation == "propose_memory_edit") {
-        const auto summary = diffSummary(content, updated);
-        const auto rationale = field(args, "rationale");
-        if (rationale.empty() || rationale.size() > 1000) throw Conflict("Enter a rationale up to 1,000 bytes");
-        database_.exec(R"SQL(
-INSERT INTO memory_proposals(doc_key,base_version,proposed_content,rationale,author,status,created_at,diff_summary)
-VALUES(?,?,?,?,?,'pending',?,?)
-)SQL",
-                       {key, version, updated, scrub.text(rationale), author, now, summary});
-        return {
-            {"docKey", key}, {"proposalId", database_.last()}, {"baseVersion", version}, {"diffSummary", summary}, {"status", "pending"}};
+    std::string summary;
+    if (writing) {
+        summary = field(args, "summary");
+        if (!conversation_storage::hasText(summary) || summary.size() > 240 || summary.find_first_of("\r\n") != summary.npos)
+            throw Conflict("Memory summary must be one line up to 240 bytes");
+        if (fromBot && updated == content) return {{"version", version}, {"unchanged", true}};
     }
-
+    if (!doc) createMemory(key, {}, id, {}, now);
     auto result = writeMemoryRevision(database_, key, current, updated, author, now, reverted);
-    if (operation == "apply_memory_edit" && proposal)
-        database_.exec("UPDATE memory_proposals SET status='applied',decided_by=?,decided_at=? WHERE id=?", {author, now, proposal});
+    if (writing && fromBot) {
+        Json notice{{"text", scrub.text(summary)},
+                    {"revisionId", result.at("revisionId")},
+                    {"version", result.at("version")},
+                    {"replyToMessageId", sourceMessage}};
+        if (shared) notice["docId"] = id;
+        database_.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)", {now, notice, bot});
+    }
     return result;
 }
 
-bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
+bool MemoryStorage::hasExternalEvidence(Id message, int step) const {
+    return database_
+        .query(R"SQL(
+SELECT 1
+FROM conversation_steps s, json_each(s.result) result
+WHERE s.message_id=? AND s.step<? AND
+  (json_extract(result.value,'$.untrustedData')=1 OR
+   (json_extract(result.value,'$.ok')=1 AND
+    json_extract(s.decision,'$[' || result.key || '].tool') IN ('flock_session_events','read_result')))
+LIMIT 1
+)SQL",
+               {message, step})
+        .next();
+}
+
+bool MemoryStorage::canEditFrom(const conversation::Message& message) {
     using enum conversation::PrincipalSource;
     return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
            !message.routing.contains("sessionInvitation") &&
@@ -409,8 +391,7 @@ bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
     if (task.trigger || !task.sourceMessageId) return false;
     const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
-    return message.bot == task.botId && canReviewPreference(message) &&
-           permissions.allows(task.botId, Action::private_memory_write, task.botId);
+    return message.bot == task.botId && canEditFrom(message) && permissions.allows(task.botId, Action::private_memory_write, task.botId);
 }
 
 void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report, std::string_view runId, const Json& args, Seconds now) {
@@ -436,58 +417,19 @@ void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report
     database_.writeJournal(task.id, JournalKind::memory_learned, notice, {}, task.botId);
 }
 
-bool MemoryStorage::preferenceReviewPending(Id id, int step) const {
-    return step == 2 && database_
-                            .query(R"SQL(
-SELECT 1 FROM conversation_steps WHERE message_id=? AND step=1 AND json_array_length(decision)=1
-AND json_extract(decision,'$[0].tool')='review_preference' AND json_extract(result,'$[0].ok')=1
-)SQL",
-                                   {id})
-                            .next();
-}
-
-std::optional<ModelInput> MemoryStorage::preferenceReviewInput(const conversation::Message& message, std::vector<std::string> tools,
-                                                               std::string feedback, Seconds now) {
-    if (!canReviewPreference(message)) return std::nullopt;
-    try {
-        const auto current = memory(message.bot, conversationTurns.turnActor(message), "read_memory", Json::object(), now);
-        return ModelInput{.task = Json::object(),
-                          .event = {{"kind", "private_memory_review"}, {"text", message.text}, {"baseVersion", current.at("version")}},
-                          .history = Json::array(),
-                          .notes = {{}, field(current, "content")},
-                          .tools = std::move(tools),
-                          .feedback = std::move(feedback),
-                          .config = message.routing.at("config")};
-    } catch (const Conflict&) {
-        return std::nullopt;
+void MemoryStorage::projectMemoryNotice(std::string_view bot, Json& data, const Person* viewer) const {
+    const auto document = field(data, "docId");
+    if (!document.empty() && viewer && !permissions.allows(*viewer, Action::shared_memory_read, document)) {
+        data = {{"text", "Shared memory updated."}};
+        return;
     }
-}
-
-Json MemoryStorage::rememberPreference(const conversation::Message& message, int step, const Json& args, Seconds now) {
-    const auto quote = conversation_storage::text(args, "sourceQuote", limits::messages::maxBodyBytes, true);
-    const auto summary = conversation_storage::text(args, "summary", 240, true);
-    if (!preferenceReviewPending(message.id, step) || !canReviewPreference(message) || message.text.find(quote) == std::string::npos)
-        throw Conflict("Use only words stated by the person in their current message");
-    auto result = memory(message.bot, conversationTurns.turnActor(message), "remember_preference", args, now, true);
-    if (!result.value("unchanged", false)) {
-        const Json notice{{"text", secretStorage_.redactor(message.bot).text(summary)},
-                          {"revisionId", result.at("revisionId")},
-                          {"version", result.at("version")},
-                          {"replyToMessageId", message.id}};
-        database_.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)",
-                       {now, notice, message.bot});
-    }
-    result["ok"] = true;
-    return result;
-}
-
-void MemoryStorage::projectMemoryNotice(std::string_view bot, Json& data) const {
+    const auto key = document.empty() ? privateKey(bot) : "shared:" + document;
     auto state = database_.query(R"SQL(
 SELECT d.version=?1, undo.id IS NOT NULL FROM memory_documents d
 LEFT JOIN memory_revisions undo ON undo.doc_key=d.doc_key AND undo.version=?1+1 AND undo.reverted_from=?2
 WHERE d.doc_key=?3
 )SQL",
-                                 {data.at("version"), data.at("revisionId"), privateKey(bot)});
+                                 {data.at("version"), data.at("revisionId"), key});
     if (!state.next()) return;
     data["canUndo"] = state.number(0) != 0;
     data["undone"] = state.number(1) != 0;

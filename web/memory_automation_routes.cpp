@@ -90,7 +90,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             requireBot(store, callbacks, actor, bot, Action::bot_view);
             Json args = Json::object();
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
-            for (auto key : {"before", "proposalsBefore", "revisionId", "proposalId"})
+            for (auto key : {"before", "revisionId"})
                 if (req.has_param(key)) args[key] = queryId(req, key);
             const bool history = req.path.ends_with("/history");
             auto result = Memory(store).memory(actor, bot, history ? "memory_history" : "read_memory", args);
@@ -98,13 +98,13 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             reply(res, 200, result);
         });
     });
-    server.Post(R"(/api/memory/(propose|apply|revert|reject))", [&](const Request& req, Response& res) {
+    server.Post(R"(/api/memory/(write|revert))", [&](const Request& req, Response& res) {
         handle(req, res, [&] {
             const auto args = body(req);
             const auto actor = person(callbacks, req);
             const auto bot = args.at("botId").get<std::string>();
             requireBot(store, callbacks, actor, bot, Action::bot_settings);
-            reply(res, 200, Memory(store).memory(actor, bot, req.matches[1].str() + "_memory_edit", args));
+            reply(res, 200, Memory(store).memory(actor, bot, req.matches[1] == "write" ? "write_memory" : "revert_memory_edit", args));
         });
     });
     server.Get("/api/schedules", [&](const Request& req, Response& res) {

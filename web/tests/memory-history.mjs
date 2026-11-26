@@ -12,9 +12,9 @@ try {
   writeFileSync(fixture, `<!doctype html><html><body><script type="module">
     import { createMemoryHistory } from ${JSON.stringify(module.href)};
     const opened = [];
-    const revisions = [{ source: { taskId: 1, runId: 'run' }, createdAt: 1, diffSummary: '-0 +1 lines',
+    const revisions = [{ author: 'bot:release', source: { taskId: 1, runId: 'run' }, createdAt: 1, diffSummary: '-0 +1 lines',
       learning: { taskTitle: 'Verify this project', requestEventId: 3, reportEventId: 7, added: [], removed: [] } }];
-    const history = createMemoryHistory(async () => ({ revisions, before: 0 }), id => opened.push(id), () => null);
+    const history = createMemoryHistory(async () => ({ revisions, before: 0 }), id => opened.push(id), () => null, 'Release Bot');
     document.body.append(history);
     await Promise.resolve();
     const [request, report] = history.querySelectorAll('.memory-history-source button');
@@ -25,6 +25,7 @@ try {
   const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
     '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
     '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
+  assert.match(output, /Release Bot/);
   assert.match(output, /<html[^>]*data-opened-events="3,7"/);
 } finally {
   rmSync(directory, { recursive: true, force: true });
