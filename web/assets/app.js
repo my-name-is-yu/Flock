@@ -225,6 +225,12 @@ function waitText(wait, { spokenByBot = false } = {}) {
   if (wait.reason === 'policy_approval') return fallback;
   return wait.text || fallback || 'Refresh the pending request.';
 }
+function quotedText(source) {
+  const data = source?.data;
+  if (!data) return 'Earlier message';
+  if (source.kind === 'waiting') return waitText(data, { spokenByBot: true });
+  return data.report || data.text || data.title || 'Earlier message';
+}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -1574,6 +1580,7 @@ function eventCard(event, context, place, report) {
   const actions = node('div', 'msg-actions');
   actions.append(time);
   const extras = [];
+  let quote = null;
   let replyTarget = null;
   let copy = data.text ?? '';
   const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
@@ -1674,18 +1681,20 @@ function eventCard(event, context, place, report) {
     if (event.kind === 'user_answer') {
       const question = data.question;
       if (question && !place.afterQuestion) {
-        const quote = node('p', 'msg-quote');
+        quote = node('p', 'msg-quote');
         quote.append(icon('reply'), node('span', null, question));
         quote.dataset.tooltip = question;
-        row.insertBefore(quote, meta.nextSibling);
       }
     }
-    if (event.kind === 'conversation_message' && data.replyToMessageId) {
-      const original = button('Open original message', 'text-button open-original-message', () => {
+    if (event.kind === 'conversation_message' && place.replyQuote) {
+      // Same quiet quote as an answer's question; it jumps to the message being replied to.
+      quote = button(null, 'msg-quote msg-quote-link', () => {
         void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
       });
-      original.dataset.timelineAction = 'open-original';
-      extras.push(original);
+      quote.dataset.timelineAction = 'open-original';
+      quote.setAttribute('aria-label', `Show the message this replies to: ${place.replyQuote}`);
+      quote.append(icon('reply'), node('span', null, place.replyQuote));
+      quote.dataset.tooltip = place.replyQuote;
     }
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
@@ -1744,7 +1753,7 @@ function eventCard(event, context, place, report) {
   }
   if (!actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
   line.append(bubble, actions);
-  row.append(line, ...extras);
+  row.append(...(quote ? [quote] : []), line, ...extras);
   const revealed = context.revealedTimeRow;
   if (noHover.matches && (revealed === row.id || (report && revealed === `event-${report.id}`))) line.after(time);
   return row;
@@ -2117,6 +2126,7 @@ function conversationRows(data, events, keep, source) {
     }
   }
   const shown = timelineMessages(events, dayLabel);
+  const eventsById = new Map(events.map((event) => [event.id, event]));
   const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
@@ -2131,16 +2141,20 @@ function conversationRows(data, events, keep, source) {
   };
   let day = '';
   let previous = null;
+  let previousReport = null;
   shown.forEach(({ event, report }, index) => {
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
       rows.push(keep(`day-${event.id}`, eventDay, () => node('p', 'day', eventDay)));
       day = eventDay;
-      previous = null;
+      previous = previousReport = null;
     }
-    if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
+    if (event.kind === 'bot_message') { peerMessages.push(event); previous = previousReport = null; return; }
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
+    const replyId = event.kind === 'conversation_message' ? event.data.replyToMessageId : 0;
+    // A reply right under the message it answers needs no quote.
+    place.replyQuote = replyId && ![previous?.id, previousReport?.id].includes(replyId) ? quotedText(eventsById.get(replyId)) : null;
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const approval = replacements.get(event.id);
     if (approval) {
@@ -2151,6 +2165,7 @@ function conversationRows(data, events, keep, source) {
         return card;
       }));
       previous = event;
+      previousReport = null;
       return;
     }
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
@@ -2161,7 +2176,7 @@ function conversationRows(data, events, keep, source) {
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
       [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, wait,
+        place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
         wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), paused,
@@ -2179,6 +2194,7 @@ function conversationRows(data, events, keep, source) {
         rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
     }
     previous = event;
+    previousReport = report;
   });
   appendPeerMessages();
   // A new chat stays blank: the header already shows the Bot's avatar and name.
