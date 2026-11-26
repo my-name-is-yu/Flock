@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/automations.hpp"
 #include "flock/store_options.hpp"
@@ -267,6 +268,16 @@ Json parseBotConfig(std::string_view text) {
 
 Json readBotConfig(const std::filesystem::path& file) {
     return parseBotConfig(readText(file, maxConfigBytes));
+}
+
+std::optional<std::pair<std::string, std::string>> projectDestination(const Json& config) {
+    const auto environment = config.find("environmentId");
+    const auto project = config.find("projectId");
+    if (environment == config.end() || !environment->is_string() || project == config.end() || !project->is_string()) return {};
+    const auto& environmentId = environment->get_ref<const std::string&>();
+    const auto& projectId = project->get_ref<const std::string&>();
+    if (!validPlainId(environmentId) || !validPlainId(projectId)) return {};
+    return std::pair{environmentId, projectId};
 }
 
 Bot configuredBot(std::string_view id, const Json& config, std::vector<std::string>* scheduleErrors = nullptr) {
@@ -581,7 +592,8 @@ void Bots::apply(const BotChange& change) try {
     throw Conflict("Unable to save Bot profile");
 }
 
-Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, const PublishOwnedBot& publishOwned) {
+Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, const PublishOwnedBot& publishOwned,
+                  const RememberProject& rememberProject) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
     const auto name = validatedBotName(profile);
     std::string role = "custom";
@@ -609,11 +621,17 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image, 
         reserved = true;
         if (!std::filesystem::create_directory(staging)) throw Conflict("Unable to stage Bot profile");
         Json config = {{"name", name}, {"role", role}, {"avatar", avatar}};
+        if (profile.contains("projectId")) {
+            config["environmentId"] = profile.at("environmentId");
+            config["projectId"] = profile.at("projectId");
+        }
         saveProfile(staging, config, image ? &*image : nullptr);
         const auto starter = roleStarterSoul(role);
         if (!starter.empty()) writeAtomic(staging / "SOUL.md", starter);
         auto card = cardFromDirectory(id, staging);
         const auto publish = [&] {
+            if (const auto destination = projectDestination(config); rememberProject && destination)
+                rememberProject(id, destination->first, destination->second);
             std::filesystem::rename(staging, directory_ / id);
             published = true;
         };
@@ -679,7 +697,7 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
 }
 
 Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& settings, Seconds now, const ScheduleReporter& report,
-                             const Json& modelCatalog) {
+                             const Json& modelCatalog, const Person* editor) {
     if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
         throw BotProfileError("invalid_profile_update", "Save how the Bot runs separately from its profile");
     std::vector<std::string> configErrors;
@@ -688,6 +706,7 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
         const auto file = path(id) / "config.json";
         const auto original = readText(file, maxConfigBytes);
         auto config = parseBotConfig(original);
+        const auto previousDestination = projectDestination(config);
         for (const auto& [key, value] : settings.items()) {
             auto setting = validatedBotRunSetting(key, value);
             if (key == "model") {
@@ -722,6 +741,9 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
         bool published = false;
         try {
             commit(schedules, [&] {
+                if (const auto destination = projectDestination(config); editor && destination && destination != previousDestination) {
+                    BotAccess{store}.rememberProjectAssignment(*editor, id, destination->first, destination->second);
+                }
                 writeAtomic(file, updated);
                 published = true;
             });

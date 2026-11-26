@@ -111,6 +111,7 @@ VALUES
     ('index', 'sqlite_autoindex_policy_rules_1', 'policy_rules', NULL),
     ('index', 'sqlite_autoindex_pr_review_items_1', 'pr_review_items', NULL),
     ('index', 'sqlite_autoindex_protected_inputs_1', 'protected_inputs', NULL),
+    ('index', 'sqlite_autoindex_recent_project_assignments_1', 'recent_project_assignments', NULL),
     ('index', 'sqlite_autoindex_runs_1', 'runs', NULL),
     ('index', 'sqlite_autoindex_runs_2', 'runs', NULL),
     ('index', 'sqlite_autoindex_secret_destinations_1', 'secret_destinations', NULL),
@@ -358,6 +359,7 @@ VALUES
     UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)))'),
     ('table', 'protected_inputs', 'protected_inputs', 'CREATE TABLE protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
  status TEXT DEFAULT ''pending'',source_message_id INTEGER REFERENCES messages(id))'),
+    ('table', 'recent_project_assignments', 'recent_project_assignments', 'CREATE TABLE recent_project_assignments(person TEXT PRIMARY KEY,environment_id TEXT NOT NULL,project_id TEXT NOT NULL)'),
     ('table', 'runs', 'runs', 'CREATE TABLE runs(
   action_id TEXT PRIMARY KEY REFERENCES outbox(id), task_id INTEGER NOT NULL REFERENCES tasks(id),
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,

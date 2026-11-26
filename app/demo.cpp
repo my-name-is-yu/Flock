@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace flockv0::app {
 namespace {
@@ -109,6 +110,11 @@ class DemoT3 final : public T3 {
         observed.report = run.runId.ends_with(verificationRunSuffix) ? verificationReport : "The demo finished its assigned work.";
         observed.resultRunId = run.runId;
         return observed;
+    }
+
+    std::vector<T3Project> projects(std::string_view environment) override {
+        if (environment != "demo") return {};
+        return {{"demo-project", "Demo project", {}}, {"demo-docs", "Demo documentation", {}}};
     }
 
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }

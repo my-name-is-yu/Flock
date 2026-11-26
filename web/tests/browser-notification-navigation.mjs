@@ -35,6 +35,10 @@ function fixtures() {
       return Response.json(bot);
     }
     if (path === '/api/bots') return Response.json(bots);
+    if (path === '/api/settings/projects') {
+      if (window.holdProjectChoices) await new Promise(resolve => { window.finishProjectChoices = resolve; });
+      return Response.json({ environments: [], recent: null });
+    }
     if (path === '/api/inbox') return Response.json({ items: [] });
     if (url.pathname === '/api/conversation') {
       const bot = bots.find(entry => entry.id === url.searchParams.get('bot'));
@@ -78,8 +82,13 @@ async function exercise() {
   editor.querySelector('#studio-editor [data-close]').click();
   await waitFor(() => !editor.open && selected() === 'triage', 'Closing the editor lost the alert destination');
 
+  window.holdProjectChoices = true;
   draft('Save this draft');
-  byId('studio-save').click();
+  const save = byId('studio-save');
+  check(save.disabled, 'Create was available before project choices loaded');
+  window.finishProjectChoices();
+  await waitFor(() => !save.disabled, 'Create stayed disabled after project choices loaded');
+  save.click();
   await waitFor(() => !!window.finishBotSave, 'Saving did not start');
   addAlert('release');
   await waitFor(() => notices.length === 2, 'The alert did not arrive during save');
