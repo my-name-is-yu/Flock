@@ -259,6 +259,42 @@ bool insideLink(cmark_node* node) {
     return false;
 }
 
+// Chat messages carry bare URLs; link the safe ones the way chat apps do. Trailing sentence
+// punctuation and an unbalanced closing parenthesis stay outside the link.
+std::string autolinked(std::string_view text, Target target) {
+    std::string result;
+    std::size_t done = 0;
+    for (auto start = text.find("http", 0); start != text.npos; start = text.find("http", start + 1)) {
+        if (start < done) continue;
+        if (start > 0 && (std::isalnum(static_cast<unsigned char>(text[start - 1])) || text[start - 1] == '/')) continue;
+        const auto rest = text.substr(start);
+        if (!rest.starts_with("http://") && !rest.starts_with("https://")) continue;
+        auto end = start;
+        while (end < text.size() && !std::isspace(static_cast<unsigned char>(text[end])) && text[end] != '<' && text[end] != '"') ++end;
+        while (end > start) {
+            const char last = text[end - 1];
+            if (std::string_view(".,;:!?'").find(last) != std::string_view::npos) {
+                --end;
+                continue;
+            }
+            if (last == ')') {
+                const auto url = text.substr(start, end - start);
+                if (std::ranges::count(url, '(') < std::ranges::count(url, ')')) {
+                    --end;
+                    continue;
+                }
+            }
+            break;
+        }
+        const auto url = text.substr(start, end - start);
+        if (!safeUrl(url) || url.find("://") + 3 >= url.size()) continue;
+        result += escape(text.substr(done, start - done), target);
+        result += "<a href=\"" + escape(url, target, true) + "\">" + escape(url, target) + "</a>";
+        done = end;
+    }
+    return result + escape(text.substr(done), target);
+}
+
 std::string image(cmark_node* node, Target target, unsigned depth) {
     const auto alt = inlineChildren(node, target, depth);
     const auto destination = value(cmark_node_get_url(node));
@@ -322,7 +358,9 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
     case CMARK_NODE_HTML_BLOCK:
     case CMARK_NODE_HTML_INLINE: return escape(value(cmark_node_get_literal(node)), target);
     case CMARK_NODE_THEMATIC_BREAK: return target == Target::html ? "<hr>" : target == Target::html_text ? "" : "---";
-    case CMARK_NODE_TEXT: return escape(value(cmark_node_get_literal(node)), target);
+    case CMARK_NODE_TEXT:
+        if (target == Target::html && !insideLink(node)) return autolinked(value(cmark_node_get_literal(node)), target);
+        return escape(value(cmark_node_get_literal(node)), target);
     case CMARK_NODE_SOFTBREAK:
     case CMARK_NODE_LINEBREAK: return target == Target::html ? "<br>\n" : "\n";
     case CMARK_NODE_CODE: return code(value(cmark_node_get_literal(node)), target, false);

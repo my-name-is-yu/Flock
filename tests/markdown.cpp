@@ -268,6 +268,21 @@ void nestedAndStable() {
 }
 }
 
+void bareUrls() {
+    check(markdown::toHtml("See https://example.com/pull/12, then (https://example.com/a_(b)) and https://example.com/x.") ==
+              "<p>See <a href=\"https://example.com/pull/12\">https://example.com/pull/12</a>, then "
+              "(<a href=\"https://example.com/a_(b)\">https://example.com/a_(b)</a>) and "
+              "<a href=\"https://example.com/x\">https://example.com/x</a>.</p>",
+          "bare URLs were not linked or kept trailing punctuation");
+    check(markdown::toHtml("[docs](https://example.com/docs) and `https://example.com/code` and javascript:alert(1) and https://") ==
+              "<p><a href=\"https://example.com/docs\">docs</a> and <code>https://example.com/code</code> and "
+              "javascript:alert(1) and https://</p>",
+          "autolinking touched existing links, code, unsafe schemes or empty URLs");
+    check(markdown::toHtml("xhttps://example.com <https://example.com/&q> &amp;") ==
+              "<p>xhttps://example.com <a href=\"https://example.com/&amp;q\">https://example.com/&amp;q</a> &amp;</p>",
+          "autolinking matched inside a word or double-linked an explicit autolink");
+}
+
 int main() {
     try {
         issueExample();
@@ -280,6 +295,7 @@ int main() {
         linkedImages();
         protectedHtml();
         nestedAndStable();
+        bareUrls();
         std::cout << "Markdown rendering behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

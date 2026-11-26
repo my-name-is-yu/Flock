@@ -224,6 +224,14 @@ function waitText(wait, { spokenByBot = false } = {}) {
   if (wait.reason === 'policy_approval') return fallback;
   return wait.text || fallback || 'Refresh the pending request.';
 }
+// Links in a message open beside Flock instead of replacing the conversation.
+function setMessageHtml(element, html) {
+  element.innerHTML = html;
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -1608,7 +1616,7 @@ function eventCard(event, context, place, report) {
     if (paused) text.textContent = copy = paused.text;
     else if (typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.textContent = data.text ?? '';
     text.classList.add('foldable-text');
     bubble.append(text);
@@ -1664,7 +1672,7 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
       text.classList.add('markdown-body');
-      text.innerHTML = data.textHtml;
+      setMessageHtml(text, data.textHtml);
     } else text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     text.classList.add('foldable-text');
