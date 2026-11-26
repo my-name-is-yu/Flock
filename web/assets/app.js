@@ -27,7 +27,7 @@ const elements = Object.fromEntries([
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
   'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'bot-paused-banner', 'bot-paused-description', 'resume-bot',
+  'composer-banner', 'composer-banner-title', 'composer-banner-description', 'composer-banner-action',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'bot-activity', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
@@ -710,20 +710,6 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
-let emptyBotRow;
-function newBotRow() {
-  if (emptyBotRow) return emptyBotRow;
-  emptyBotRow = node('div', 'bot-row new-bot-row');
-  const select = button(null, 'bot-select', () => openNewBot(emptyBotRow.querySelector('button')));
-  const mark = node('span', 'new-bot-mark');
-  mark.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
-  const text = node('span', 'bot-text');
-  text.append(node('span', 'bot-name', 'New Bot'), node('span', 'bot-preview', 'No Bots yet'));
-  select.append(mark, text);
-  emptyBotRow.append(select);
-  return emptyBotRow;
-}
-
 function draftRow(draft) {
   const row = node('div', 'bot-row draft');
   row.setAttribute('aria-hidden', 'true');
@@ -801,7 +787,6 @@ function renderBots() {
   const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) rows.push(newBotRow());
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
@@ -2194,7 +2179,7 @@ function conversationRows(data, events, keep, source) {
         flock.setAttribute('aria-hidden', 'true');
         for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
         empty.append(flock, node('h2', null, 'Create your first Bot'),
-          node('p', null, 'A Bot takes your requests, runs the work in T3 Sessions and reports back here.'),
+          node('p', null, 'A Bot takes your requests, gets the work done and reports back here.'),
           button('New Bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       } else {
         empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
@@ -2344,23 +2329,32 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
 function renderComposer() {
   const context = view;
   const readOnly = context?.data?.canDecide === false;
-  const paused = !!context?.data?.bot?.paused && !context.dm;
-  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || paused);
-  const canDecide = available && !!context.composer;
+  const bot = context?.data?.bot;
+  const paused = !!bot?.paused && !context.dm;
+  const needsModel = !!bot && !context.dm && !paused && !readOnly && !bot.model;
+  const banner = paused ? 'paused' : needsModel ? 'setup' : null;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly || !!banner);
+  const canDecide = available && !!context.composer && !banner;
   const wasComposing = elements.composer.contains(document.activeElement);
-  const resume = elements['resume-bot'];
-  const canResume = paused && context.data.bot.canDelete;
-  elements['bot-paused-banner'].hidden = !paused;
-  resume.hidden = !canResume;
-  const pauseDescription = elements['bot-paused-description'];
-  const description = !paused ? '' : context.resumeError ||
-    (canResume ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.');
-  if (pauseDescription.textContent !== description) pauseDescription.textContent = description;
-  pauseDescription.classList.toggle('error', paused && !!context.resumeError);
+  const action = elements['composer-banner-action'];
+  const canAct = !!banner && bot.canDelete === true;
+  elements['composer-banner'].hidden = !banner;
+  elements['composer-banner'].dataset.state = banner ?? '';
+  action.hidden = !canAct;
+  action.textContent = banner === 'setup' ? 'Choose a model' : 'Resume';
+  const title = banner === 'paused' ? 'This Bot is paused' : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
+  if (elements['composer-banner-title'].textContent !== title) elements['composer-banner-title'].textContent = title;
+  const bannerDescription = elements['composer-banner-description'];
+  const description = banner === 'paused' ? context.resumeError ||
+      (canAct ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.')
+    : banner === 'setup' ? (canAct ? 'Choose a model to start talking.' : 'The Bot’s owner or a Flock administrator can set it up.')
+    : '';
+  if (bannerDescription.textContent !== description) bannerDescription.textContent = description;
+  bannerDescription.classList.toggle('error', paused && !!context.resumeError);
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
-  elements['view-only-notice'].hidden = !available || paused || canDecide;
-  if (paused && wasComposing) (canResume ? resume : headerFocusTarget()).focus({ preventScroll: true });
+  elements['view-only-notice'].hidden = !available || !!banner || canDecide;
+  if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
   const review = canDecide ? decisions.reviewReply() : null;
   if (!canDecide) {
@@ -2681,11 +2675,17 @@ async function setBotPaused(bot, paused) {
 }
 const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
 
-elements['resume-bot'].addEventListener('click', async (event) => {
+elements['composer-banner-action'].addEventListener('click', async (event) => {
   const control = event.currentTarget;
   const context = view;
   const bot = context?.data?.bot;
-  if (!bot?.paused || !bot.canDelete) return;
+  if (!bot?.canDelete) return;
+  if (!bot.paused && !bot.model) {
+    openDetail({ kind: 'settings', section: 'general' });
+    detailWorkspace?.edit();
+    return;
+  }
+  if (!bot.paused) return;
   control.disabled = true;
   context.resumeError = '';
   renderComposer();

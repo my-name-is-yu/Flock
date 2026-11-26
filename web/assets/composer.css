@@ -9,15 +9,16 @@
   max-width: min(100%, calc(37rem + 2 * clamp(1rem, 4vw, 2rem)));
 }
 .view-only-notice { padding-block: .45rem; color: var(--text-3); font-size: var(--text-sm); text-align: center; }
-.bot-paused-banner {
+.composer-banner {
   display: flex; align-items: center; justify-content: space-between; gap: .75rem;
   padding: .8rem .9rem .8rem 1rem; border: 1px solid var(--hairline);
   border-radius: var(--radius-xl); background: var(--raised);
 }
-.bot-paused-title { font-size: var(--text-md); font-weight: 600; }
-.bot-paused-description { margin-top: .15rem; color: var(--text-2); font-size: var(--text-sm); }
-.bot-paused-description.error { color: var(--danger); }
-.bot-paused-banner .dialog-button { flex: none; }
+.composer-banner > div { min-width: 0; overflow-wrap: anywhere; }
+.composer-banner-title { font-size: var(--text-md); font-weight: 600; }
+.composer-banner-description { margin-top: .15rem; color: var(--text-2); font-size: var(--text-sm); }
+.composer-banner-description.error { color: var(--danger); }
+.composer-banner .dialog-button { flex: none; }
 .composer {
   --composer-control-size: 2.75rem;
   display: grid;

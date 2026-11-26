@@ -224,5 +224,5 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       if (draft && document.activeElement === document.body) project.focus();
     }
   });
-  return { element, update };
+  return { element, update, edit: () => { if (editable && !draft) edit.click(); } };
 }
