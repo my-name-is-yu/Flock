@@ -1,3 +1,4 @@
+#include "conversation_turns.hpp"
 #include "memory_storage.hpp"
 
 #include "conversation_storage.hpp"
@@ -82,8 +83,10 @@ Json revisionView(const Statement& row) {
 }
 }
 
-MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Store::Impl& remaining, Store::MemorySeed seed)
-    : database_(database), secretStorage_(secretStorage), remaining_(remaining), seed_(std::move(seed)) {}
+MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Policy& permissions,
+                             ConversationStorage& conversationTurns, Store::MemorySeed seed)
+    : database_(database), secretStorage_(secretStorage), permissions(permissions), conversationTurns(conversationTurns),
+      seed_(std::move(seed)) {}
 
 BotNotes MemoryStorage::loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now) {
     BotNotes notes{soul ? bounded(soul(bot), maxBotRoleBytes) : std::string{}, {}};
@@ -178,7 +181,7 @@ Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::strin
     if (remembering && shared) throw Conflict("Automatic saves use private memory");
     const auto id = shared ? field(args, "docId") : "memory";
     const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
-    auto access = Policy(remaining_);
+    auto access = permissions;
     if (!access.allows(actor, reading ? Action::bot_view : Action::bot_settings, bot) ||
         (shared && (!access.allows(actor, action, id) || (fromBot ? access.forbidden(bot, action, id) : !access.allows(bot, action, id)))))
         throw AccessDenied("Memory access denied");
@@ -321,7 +324,7 @@ bool MemoryStorage::canReviewPreference(const conversation::Message& message) {
     using enum conversation::PrincipalSource;
     return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
            !message.routing.contains("sessionInvitation") &&
-           Policy(remaining_).allows(remaining_.turnActor(message), Action::bot_settings, message.bot);
+           permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
 }
 
 bool MemoryStorage::preferenceReviewPending(Id id, int step) const {
@@ -338,7 +341,7 @@ std::optional<ModelInput> MemoryStorage::preferenceReviewInput(const conversatio
                                                                std::string feedback, Seconds now) {
     if (!canReviewPreference(message)) return std::nullopt;
     try {
-        const auto current = memory(message.bot, remaining_.turnActor(message), "read_memory", Json::object(), now);
+        const auto current = memory(message.bot, conversationTurns.turnActor(message), "read_memory", Json::object(), now);
         return ModelInput{.task = Json::object(),
                           .event = {{"kind", "private_memory_review"}, {"text", message.text}, {"baseVersion", current.at("version")}},
                           .history = Json::array(),
@@ -356,7 +359,7 @@ Json MemoryStorage::rememberPreference(const conversation::Message& message, int
     const auto summary = conversation_storage::text(args, "summary", 240, true);
     if (!preferenceReviewPending(message.id, step) || !canReviewPreference(message) || message.text.find(quote) == std::string::npos)
         throw Conflict("Use only words stated by the person in their current message");
-    auto result = memory(message.bot, remaining_.turnActor(message), "remember_preference", args, now, true);
+    auto result = memory(message.bot, conversationTurns.turnActor(message), "remember_preference", args, now, true);
     if (!result.value("unchanged", false)) {
         const Json notice{{"text", secretStorage_.redactor(message.bot).text(summary)},
                           {"revisionId", result.at("revisionId")},

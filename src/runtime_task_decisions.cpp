@@ -96,7 +96,7 @@ void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json&
     if (requiresAcknowledgment != decision.args.contains("acknowledgedInstructions") ||
         decision.args.value("acknowledgedInstructions", Json::array()) != ids)
         throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
-    if (db.conversationPending(current.botId)) return;
+    if (db.conversationTurns.conversationPending(current.botId)) return;
     updates.consumeEvent(current);
     updates.recordDecision(current, event, decision, actionId());
     current.pendingInstructions.clear();

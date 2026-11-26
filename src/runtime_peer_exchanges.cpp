@@ -185,7 +185,7 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
     if (db.botLifecycle.botPaused(other.botId)) throw BotPaused{};
     if (terminal(other) || other.state != TaskState::peer_waiting) throw Conflict("The other Bot is no longer waiting");
     const bool closing = type == "result" || type == "failed";
-    if (closing && db.conversationPending(task.botId)) return false;
+    if (closing && db.conversationTurns.conversationPending(task.botId)) return false;
     updates.recordDecision(task, event, decision, action);
     if (closing) {
         const auto outcome = type == "result" ? TaskPeerOutcome::completed : TaskPeerOutcome::failed;

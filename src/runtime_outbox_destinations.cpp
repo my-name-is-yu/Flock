@@ -35,7 +35,7 @@ SELECT time FROM journal WHERE task_id=? AND kind='send_started'
 AND action_id=? ORDER BY id LIMIT 1)SQL",
                                {task.id, action});
         const auto startedAt = launch.next() ? launch.number(0) : now;
-        run.deadline = startedAt + db.environmentTimeout(task.botId, environment, task.config);
+        run.deadline = startedAt + db.botSettingsStorage.environmentTimeout(task.botId, environment, task.config);
     }
     const auto deadline = *run.deadline;
     if (deadline <= 0 || now < deadline || task.state == TaskState::waiting) return missing;

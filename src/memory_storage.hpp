@@ -11,6 +11,9 @@
 #include <vector>
 
 namespace flockv0 {
+class Policy;
+class ConversationStorage;
+
 class Database;
 class SecretRedactor;
 class SecretStorage;
@@ -25,7 +28,7 @@ struct Message;
 
 class MemoryStorage {
 public:
-    MemoryStorage(Database&, const SecretStorage&, Store::Impl&, Store::MemorySeed);
+    MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, Store::MemorySeed);
 
     BotNotes loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now);
     std::optional<SessionMemory> sessionMemory(const Command&, Seconds now);
@@ -42,7 +45,8 @@ private:
 
     Database& database_;
     const SecretStorage& secretStorage_;
-    Store::Impl& remaining_;
+    Policy& permissions;
+    ConversationStorage& conversationTurns;
     const Store::MemorySeed seed_;
 };
 }

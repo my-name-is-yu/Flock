@@ -1,3 +1,5 @@
+#include "workspace_internal.hpp"
+#include "json_fields.hpp"
 #include "conversation_storage.hpp"
 #include "flock/json.hpp"
 

@@ -1,3 +1,8 @@
+#include "json_fields.hpp"
+#include "flock/policy.hpp"
+#include "task_routing.hpp"
+#include "session_participation_storage.hpp"
+#include "bot_settings_storage.hpp"
 #include "storage.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/types.hpp"
@@ -33,18 +38,18 @@ std::set<std::string> environments(const Json& routing) {
 }
 }
 
-Seconds Store::Impl::environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const {
-    auto row = query("SELECT timeout FROM environment_settings WHERE bot=? AND environment=?", {bot, environment});
+Seconds BotSettingsStorage::environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const {
+    auto row = database.query("SELECT timeout FROM environment_settings WHERE bot=? AND environment=?", {bot, environment});
     return row.next() ? row.number(0) : config.value("runTimeoutSeconds", Seconds{1800});
 }
 
-Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
-    Policy policy(*this);
+Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
+    Policy policy = permissions;
     const auto& config = routing.at("config");
     const auto name = args.contains("environmentId") ? argument(args, "environmentId") : std::string{};
     std::string id;
     {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(database.mutex);
         id = taskRouting.taskEnvironment(bot, routing, name);
     }
     auto failure = [&](std::string reason) -> Json { return {{"ready", false}, {"reason", reason}, {"settingsLink", "/settings"}}; };
@@ -73,14 +78,14 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     return {{"ready", true}};
 }
 
-Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing,
-                                  const Decision& decision) {
-    Policy policy(*this);
+Json BotSettingsStorage::botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing,
+                                         const Decision& decision) {
+    Policy policy = permissions;
     const auto& tool = decision.tool;
     const auto& args = decision.args;
     const auto& config = routing.at("config");
     if (tool == "list_secrets") {
-        auto rows = query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
+        auto rows = database.query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
         auto names = Json::array();
         while (rows.next())
             if (!policy.forbidden(bot, Action::secret_use, rows.string(0))) names.push_back(rows.string(0));
@@ -89,7 +94,7 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
     if (tool == "request_secret_input") {
         const SecretRef ref{argument(args, "name")};
         if (!ref.valid()) throw Conflict("Invalid secret reference");
-        if (query("SELECT 1 FROM protected_inputs WHERE name=? AND status='fulfilled'", {ref.name}).next()) {
+        if (database.query("SELECT 1 FROM protected_inputs WHERE name=? AND status='fulfilled'", {ref.name}).next()) {
             if (!policy.allows(bot, Action::secret_use, ref.name)) throw AccessDenied("Protected input unavailable");
             return {{"status", "available"}};
         }
@@ -118,8 +123,8 @@ Json Store::Impl::botSettingsTool(std::string_view bot, const Person& actor, Id 
             throw Conflict("Integer timeout required");
         const auto timeout = args.at("runTimeoutSeconds").get<Id>();
         if (timeout < 1 || timeout > 2147483647) throw Conflict("Invalid timeout");
-        exec("INSERT INTO environment_settings VALUES(?,?,?) ON CONFLICT(bot,environment) DO UPDATE SET timeout=excluded.timeout",
-             {bot, id, timeout});
+        database.exec("INSERT INTO environment_settings VALUES(?,?,?) ON CONFLICT(bot,environment) DO UPDATE SET timeout=excluded.timeout",
+                      {bot, id, timeout});
         return {{"updated", true}};
     }
     return nullptr;

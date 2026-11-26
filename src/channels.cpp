@@ -1,3 +1,4 @@
+#include "conversation_turns.hpp"
 #include "session_dispatch_lock.hpp"
 #include "storage.hpp"
 #include "web_identity_state.hpp"
@@ -200,7 +201,7 @@ bool ChannelStorage::permitsChannel(std::string_view bot, const ChannelOrigin& o
             !permissions.forbidden(bot, operation == "read" ? Action::channel_read : Action::channel_post, channelPolicyTarget(origin)));
 }
 
-Json ChannelStorage::receiveChannel(Store& store, ChannelKind kind, std::string_view credential, const Json& event,
+Json ChannelStorage::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event,
                                     const std::function<Intake(std::string_view, std::string_view)>& routing) {
     std::lock_guard lock(database.mutex);
     const auto found = connectors.find(kind);
@@ -246,8 +247,9 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     }
     auto text = field(event, "text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return store.receive({sender->personId, false}, sender->botId, origin.key(), text, replyTo, conversation::PrincipalSource::channel,
-                         &message, [&] { return routing(sender->botId, text); });
+    return conversationTurns.receive(
+        {sender->personId, false}, sender->botId, origin.key(), text, replyTo, conversation::PrincipalSource::channel, &message,
+        [&] { return routing(sender->botId, text); }, Json::array());
 }
 
 void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
@@ -672,7 +674,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                 const auto target = channelPolicyTarget(origin);
                 const auto used = database.query("SELECT 1 FROM policy_approvals WHERE operation=? AND status='used'", {approval}).next();
                 if (!used) {
-                    const auto requester = policyApprovals.policyOrigin(remaining.loadTurnMessage(source));
+                    const auto requester = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(source));
                     const auto gate =
                         policyApprovals.approveAction({bot, requester.scope, requester.requester, requester.anchor, 0, 0, 0, 0, true},
                                                       {Action::channel_post, target, true}, approval, payload, policyApprovals.now());
@@ -736,7 +738,7 @@ void Store::artifactBaseUrl(std::string url) {
 }
 
 Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event, const IntakeResolver& routing) {
-    return p_->channelStorage.receiveChannel(*this, kind, credential, event, routing);
+    return p_->channelStorage.receiveChannel(kind, credential, event, routing);
 }
 
 std::optional<ChannelResource> Store::attachment(const Person& person, Id id) const {

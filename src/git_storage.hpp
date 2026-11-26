@@ -4,7 +4,6 @@
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -15,6 +14,9 @@
 #include <string_view>
 
 namespace flockv0 {
+class Policy;
+class ConversationStorage;
+
 class BotLifecycleStorage;
 class Database;
 class GitHost;
@@ -41,12 +43,12 @@ class SessionParticipationStorage;
 class GitStorage {
 public:
     GitStorage(Database& database, SecretStorage& secretStorage, InboxStorage& inboxStorage, TaskRecords& taskRecords,
-               JournalStorage& journalStorage, const WebIdentityState& webIdentity, Store::Impl& remaining,
-               const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
+               JournalStorage& journalStorage, const WebIdentityState& webIdentity, Policy& permissions,
+               ConversationStorage& conversationTurns, const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
                SessionParticipationStorage& sessionParticipationStorage)
         : database(database), secretStorage(secretStorage), inboxStorage(inboxStorage), taskRecords(taskRecords),
-          journalStorage(journalStorage), webIdentity(webIdentity), remaining(remaining), botLifecycle(botLifecycle),
-          policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage) {}
+          journalStorage(journalStorage), webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns),
+          botLifecycle(botLifecycle), policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage) {}
 
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -95,7 +97,8 @@ private:
     TaskRecords& taskRecords;
     JournalStorage& journalStorage;
     const WebIdentityState& webIdentity;
-    Store::Impl& remaining;
+    Policy& permissions;
+    ConversationStorage& conversationTurns;
     SessionParticipationStorage& sessionParticipationStorage;
     PolicyApprovals& policyApprovals;
     const BotLifecycleStorage& botLifecycle;

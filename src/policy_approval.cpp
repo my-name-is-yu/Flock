@@ -1,3 +1,4 @@
+#include "conversation_turns.hpp"
 #include "conversation_storage.hpp"
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
@@ -76,11 +77,11 @@ PolicyOrigin PolicyApprovals::policyOrigin(const conversation::Message& message)
     PolicyOrigin origin{message.bot, message.channelScope, {}, message.id, message.id, 0, 0, 0, background};
     if (background) return origin;
     if (message.principalSource != conversation::PrincipalSource::channel) {
-        origin.requester = remaining.turnActor(message).id;
+        origin.requester = conversationTurns.turnActor(message).id;
     } else if (channelStorage.channelMessageAuthorized(message.id, message.bot)) {
         const auto& id = message.admittedActor.id;
         const bool canSignIn =
-            webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !Policy(remaining).requiresIdentity();
+            webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !permissions.requiresIdentity();
         if (canSignIn) origin.requester = id;
     }
     return origin;
@@ -94,7 +95,7 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
     PolicyOrigin origin{task.botId, {}, {}, source, 0, id, task.currentRevision.value_or(0), task.generation, !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
     if (source) {
-        const auto message = remaining.loadTurnMessage(source);
+        const auto message = conversationTurns.loadTurnMessage(source);
         const auto fromMessage = policyOrigin(message);
         origin.scope = fromMessage.scope;
         origin.requester = fromMessage.requester;
@@ -196,7 +197,7 @@ WHERE a.status IN ('pending','approved')
         database.exec("UPDATE policy_approvals SET status=? WHERE id=? AND status IN ('pending','approved')", {change.status, change.id});
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
-        Policy(remaining).audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
+        permissions.audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
         if (change.task) journalStorage.journal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
     }
 }
@@ -207,7 +208,7 @@ void PolicyApprovals::consumePolicyApproval(std::string_view operation) {
 
 ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Resource& resource, std::string_view operation,
                                             const Json& payload, Seconds now, bool claim, ApprovalWait waitMode) {
-    Policy policy(remaining);
+    Policy policy = permissions;
     const auto action = actionName(resource.action);
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
@@ -308,7 +309,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
 )SQL",
                               {item.itemId, item.botId});
     if (!row.next()) throw DecisionUnavailable{};
-    Policy policy(remaining);
+    Policy policy = permissions;
     const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     const bool nextTime = choice == "allow_next_time";
@@ -345,7 +346,7 @@ FROM policy_approvals a LEFT JOIN git_pr_operations o ON a.scope GLOB 'git-pr/*'
 WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
 )SQL",
                                {bot});
-    const Policy policy(remaining);
+    const Policy policy = permissions;
     const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     auto cards = Json::array();

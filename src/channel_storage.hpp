@@ -3,7 +3,6 @@
 #include "flock/channels.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <filesystem>
@@ -17,6 +16,8 @@
 #include <vector>
 
 namespace flockv0 {
+class ConversationStorage;
+
 class Database;
 class JournalStorage;
 class Policy;
@@ -31,14 +32,14 @@ class PolicyApprovals;
 class ChannelStorage {
 public:
     ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const SecretStorage& secretStorage,
-                   const WebIdentityState& webIdentity, JournalStorage& journalStorage, Store::Impl& remaining,
+                   const WebIdentityState& webIdentity, JournalStorage& journalStorage, ConversationStorage& conversationTurns,
                    PolicyApprovals& policyApprovals)
         : database(database), path(path), permissions(permissions), secretStorage(secretStorage), webIdentity(webIdentity),
-          journalStorage(journalStorage), remaining(remaining), policyApprovals(policyApprovals) {}
+          journalStorage(journalStorage), conversationTurns(conversationTurns), policyApprovals(policyApprovals) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
-    Json receiveChannel(Store&, ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
+    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     bool hasConnectors() const;
@@ -67,7 +68,7 @@ private:
     const SecretStorage& secretStorage;
     const WebIdentityState& webIdentity;
     JournalStorage& journalStorage;
-    Store::Impl& remaining;
+    ConversationStorage& conversationTurns;
     PolicyApprovals& policyApprovals;
     std::map<ChannelKind, ChannelConnector> connectors;
     std::string artifactOrigin;

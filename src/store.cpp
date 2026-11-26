@@ -100,7 +100,7 @@ RunRef runRef(const Json& data) {
 }
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
-    : path(std::move(file)), memoryStorage(*this, secretStorage, *this, std::move(seed)),
+    : path(std::move(file)), memoryStorage(*this, secretStorage, permissions, conversationTurns, std::move(seed)),
       automationStorage(*this, secretStorage, botLifecycle, *this, std::move(model), taskOperations) {
     open(path);
 }

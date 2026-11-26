@@ -1,3 +1,4 @@
+#include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "storage.hpp"
 #include "conversation_storage.hpp"
@@ -246,7 +247,7 @@ void GitStorage::projectTaskGitReads(GitHost& host, const TaskData& task, Json& 
     if (!event.contains("gitResults")) return;
 
     const auto scrub = secretStorage.sharedRedactor();
-    const Policy policy(remaining);
+    const Policy policy = permissions;
     std::set<Id> authorized;
     for (const auto& [id, read] : requested) {
         const auto& [source, result] = read;
@@ -356,7 +357,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
             if (previous.next()) return {{"readId", previous.number(0)}};
         }
     }
-    const Policy policy(remaining);
+    const Policy policy = permissions;
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
         return repositoryAccess(policy, host, context, repository, required);
     };
@@ -389,7 +390,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         PolicyOrigin origin;
-        if (turn) origin = policyApprovals.policyOrigin(remaining.loadTurnMessage(turn));
+        if (turn) origin = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(turn));
         if (taskId) {
             const auto task = taskRecords.load(taskId);
             if (generation && task.generation != *generation) throw RequestChanged{};

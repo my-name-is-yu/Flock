@@ -1,3 +1,4 @@
+#include "storage.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/git_host.hpp"
@@ -111,7 +112,7 @@ AND t.state NOT IN ('cancelled','cancelling')
 )SQL",
                       {repo.host, repo.repo, event.at("prNumber"), event.at("taskId"), bot})
                .next() &&
-           Policy(remaining).allows(bot, Action::repository_read, repo.resource());
+           permissions.allows(bot, Action::repository_read, repo.resource());
 }
 
 Id GitStorage::latestGitWebhookId() const {

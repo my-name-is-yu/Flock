@@ -1,3 +1,17 @@
+#include "storage.hpp"
+#include "conversation_call.hpp"
+#include "wait_storage.hpp"
+#include "task_routing.hpp"
+#include "task_records.hpp"
+#include "session_read_storage.hpp"
+#include "session_participation_storage.hpp"
+#include "session_message_storage.hpp"
+#include "secret_storage.hpp"
+#include "policy_approvals.hpp"
+#include "git_storage.hpp"
+#include "conversation_tools.hpp"
+#include "conversation_turns.hpp"
+#include "channel_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
 #include "tool_batch.hpp"
@@ -30,46 +44,48 @@ Json toolErrorResult(const ToolError& error) {
 }
 }
 
-void Store::Impl::saveConversationCallResult(const Message& message, int step, Json result) {
-    saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+void ConversationStorage::saveConversationCallResult(const Message& message, int step, Json result) {
+    conversationTools.saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
 }
 
-Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,
-                                                              std::string_view effectType, const BotTools& settings,
-                                                              const ConversationCallContext& ctx) {
+CallOutcome ConversationStorage::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,
+                                                         std::string_view effectType, const BotTools& settings,
+                                                         const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto& decision = calls.front();
     const auto& tool = decision.tool;
     if (calls.size() == 1 && tool == "send_to_task" && decision.args.is_object() && decision.args.contains("taskId")) {
         bool destinationTask = false;
         try {
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
+            std::lock_guard lock(database.mutex);
+            Transaction transaction(database.db);
             destinationTask = !ownTask(conversation_storage::identifier(decision.args, "taskId", true), message).runResults().empty();
             transaction.commit();
         } catch (const ToolError&) {
         }
-        if (destinationTask) return sendSessionMessage(message, step, decision, tool_batch::turnCallKey(message.id, step), ctx);
+        if (destinationTask)
+            return sessionMessageStorage.sendSessionMessage(message, step, decision, tool_batch::turnCallKey(message.id, step), ctx);
     }
     if (calls.size() == 1 && tool == "cancel_task" && hasDestinationSelector(decision.args))
-        return cancelDestinationRun(message, step, decision, tool_batch::turnCallKey(message.id, step), decision.rejection.empty(),
-                                    ctx.hasWebEvidence, ctx.shutdown);
+        return sessionMessageStorage.cancelDestinationRun(message, step, decision, tool_batch::turnCallKey(message.id, step),
+                                                          decision.rejection.empty(), ctx.hasWebEvidence, ctx.shutdown);
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
         tool_batch::conversationRead(tool) != tool_batch::ConversationRead::none) {
         const ToolContext tools{message.bot, message.id, settings, ctx.hasWebEvidence};
-        return runToolBatch(message, tools, step, calls, ctx) ? advance : stop;
+        return conversationTools.runToolBatch(message, tools, step, calls, ctx) ? advance : stop;
     }
     const auto key = tool_batch::turnCallKey(message.id, step);
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
-        if (tool == "message_session" || tool == "fix_pull_request") return sendSessionMessage(message, step, decision, key, ctx);
+        if (tool == "message_session" || tool == "fix_pull_request")
+            return sessionMessageStorage.sendSessionMessage(message, step, decision, key, ctx);
         if (tool == "interrupt_session")
-            return runSessionEffect(message, step, decision, key, offered, ctx.hasWebEvidence, ctx.t3, ctx.shutdown);
+            return sessionMessageStorage.runSessionEffect(message, step, decision, key, offered, ctx.hasWebEvidence, ctx.t3, ctx.shutdown);
     }
 
     if (!offered || (ctx.hasWebEvidence && !allowedAfterWebEvidence(decision))) {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (!authorizeTurn(message)) {
             transaction.commit();
             return stop;
@@ -79,7 +95,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
             result["delivery"] = "unknown";
             result["error"] = "The host outcome is unknown. Check the target before retrying.";
         }
-        saveTurnResults(message.id, step, Json::array({result}));
+        conversationTools.saveTurnResults(message.id, step, Json::array({result}));
         transaction.commit();
         return advance;
     }
@@ -98,8 +114,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
     if (!isGitTool(tool)) return executeLocalConversationCall(message, step, decision, key, ctx);
 
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (ctx.shutdown.stop_requested()) return stop;
         const bool allowed = authorizeTurn(message);
         transaction.commit();
@@ -109,8 +125,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
     auto result = gitStorage.gitConversationTool(ctx.gitHost, message, decision, key);
     if (result.value("policyWaiting", false)) return waiting;
 
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
     if (!authorizeTurn(message)) {
         transaction.commit();
         return stop;
@@ -120,13 +136,13 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
     return advance;
 }
 
-Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message& message, int step, const Decision& decision,
-                                                                   std::string_view key, const ConversationCallContext& ctx) {
+CallOutcome ConversationStorage::executeConversationBotChange(const Message& message, int step, const Decision& decision,
+                                                              std::string_view key, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto id = message.id;
     Json result;
     {
-        std::lock_guard lock(mutex);
+        std::lock_guard lock(database.mutex);
         try {
             if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
             const auto& args = decision.args;
@@ -136,11 +152,11 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message
             const auto actor = turnActor(message);
             const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
             if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
-                !Policy(*this).allows(actor, operation == "create_bot" ? Action::bot_create : Action::bot_settings, target))
+                !permissions.allows(actor, operation == "create_bot" ? Action::bot_create : Action::bot_settings, target))
                 throw ToolError("Bot change denied by policy");
             const auto payload = Json::array({decision.tool, args});
             {
-                Transaction authorization(db);
+                Transaction authorization(database.db);
                 if (!authorizeTurn(message) || ctx.shutdown.stop_requested()) {
                     authorization.commit();
                     return stop;
@@ -152,13 +168,13 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message
                 if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
             }
             constexpr int maxCreationAttempts = 4;
-            auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?", {id});
+            auto retries = database.query("SELECT failures FROM conversation_retries WHERE message_id=?", {id});
             const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
-            const auto changeId = Policy(*this).applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
-                                                               exhausted ? &ctx.reconcileBotCreation : nullptr);
-            Transaction completed(db);
+            const auto changeId = permissions.applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
+                                                             exhausted ? &ctx.reconcileBotCreation : nullptr);
+            Transaction completed(database.db);
             policyApprovals.consumePolicyApproval(key);
-            saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
+            conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
             completed.commit();
             return advance;
         } catch (const Policy::BotCreationUncertain&) {
@@ -170,24 +186,24 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message
             result = toolFailure(error.what());
         }
     }
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
     if (!authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
-    exec("DELETE FROM conversation_retries WHERE message_id=?", {id});
+    database.exec("DELETE FROM conversation_retries WHERE message_id=?", {id});
     saveConversationCallResult(message, step, std::move(result));
     transaction.commit();
     return advance;
 }
 
-Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& message, int step, const Decision& decision,
-                                                               std::string_view key, const std::function<Seconds()>& clock) {
+CallOutcome ConversationStorage::executeConversationReply(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                          const std::function<Seconds()>& clock) {
     using enum CallOutcome;
     const auto id = message.id;
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
     if (!authorizeTurn(message)) {
         transaction.commit();
         return stop;
@@ -229,7 +245,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
             }
             if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
         }
-        saveTurnResults(id, step, Json::array({Json{{"ok", true}}}));
+        conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}}}));
         finishTurn(message, std::move(reply), suggestions, ConversationReplyRoute::reply, question);
         transaction.commit();
         return finished;
@@ -240,13 +256,13 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
     return advance;
 }
 
-std::optional<Resource> Store::Impl::conversationCallResource(const Message& message, const Decision& decision) {
+std::optional<Resource> ConversationStorage::conversationCallResource(const Message& message, const Decision& decision) {
     const auto& tool = decision.tool;
     if (tool == "create_schedule" || tool == "create_reminder" || tool == "create_trigger" || tool == "remove_schedule")
         return Resource{Action::automation_change, message.bot};
     if (tool == "update_bot_settings") {
         const auto environment = field(decision.args, "environmentId");
-        if (Policy(*this).forbidden(message.bot, Action::environment_configure, environment)) return std::nullopt;
+        if (permissions.forbidden(message.bot, Action::environment_configure, environment)) return std::nullopt;
         return Resource{Action::environment_configure, environment};
     }
     const bool shared = decision.args.contains("docId");
@@ -260,8 +276,8 @@ std::optional<Resource> Store::Impl::conversationCallResource(const Message& mes
     return std::nullopt;
 }
 
-Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                                                   std::string_view key, const ConversationCallContext& ctx) {
+CallOutcome ConversationStorage::executeLocalConversationCall(const Message& message, int step, const Decision& decision,
+                                                              std::string_view key, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     Json result;
     std::optional<WorkSession> selectedSession;
@@ -277,8 +293,8 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(const Message
     }
     if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
         linked = taskRouting.discoverLinkedTaskDestinations(ctx.t3, message.bot);
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
     if (!authorizeTurn(message)) {
         transaction.commit();
         return stop;
@@ -296,28 +312,29 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(const Message
     return completed ? advance : waiting;
 }
 
-std::optional<Json> Store::Impl::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                                            std::string_view key, Seconds now, ApprovalWait waitMode,
-                                                            const WorkSession* selectedSession, const LinkedTaskDestinations& linked) {
+std::optional<Json> ConversationStorage::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
+                                                                    std::string_view key, Seconds now, ApprovalWait waitMode,
+                                                                    const WorkSession* selectedSession,
+                                                                    const LinkedTaskDestinations& linked) {
     if (const auto resource = conversationCallResource(message, decision)) {
         if (resource->action == Action::private_memory_write &&
-            !Policy(*this).allows(turnActor(message), Action::bot_settings, resource->target))
+            !permissions.allows(turnActor(message), Action::bot_settings, resource->target))
             return toolFailure("Memory access denied");
         const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), *resource, key,
                                                         Json::array({decision.tool, decision.args}), now, true, waitMode);
         if (gate == ApprovalGate::waiting) return std::nullopt;
         if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
     }
-    exec("SAVEPOINT turn_tool");
+    database.exec("SAVEPOINT turn_tool");
     try {
         auto result = applyTurnTool(message, step, decision, now, selectedSession, linked);
-        exec("RELEASE turn_tool");
+        database.exec("RELEASE turn_tool");
         return result;
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {
-        exec("ROLLBACK TO turn_tool");
-        exec("RELEASE turn_tool");
+        database.exec("ROLLBACK TO turn_tool");
+        database.exec("RELEASE turn_tool");
         const auto* failed = dynamic_cast<const ToolError*>(&error);
         return failed ? toolErrorResult(*failed) : toolFailure(error.what());
     }

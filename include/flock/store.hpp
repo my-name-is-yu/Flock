@@ -173,25 +173,15 @@ public:
                                   std::string_view operation, const std::filesystem::path& path);
     const std::filesystem::path& path() const;
 private:
-    Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
-                 conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
-                 const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class AutomationStorage;
-    friend class MemoryStorage;
     friend class ModelCalls;
     friend class TaskOperations;
     friend class TaskRouting;
     friend class InboxStorage;
-    friend class GitStorage;
-    friend class WorkflowStorage;
-    friend class ChannelStorage;
-    friend class SessionParticipationStorage;
-    friend class SessionReadStorage;
     friend class Runtime;
     friend class Policy;
-    friend class PolicyApprovals;
     friend class T3Connections;
     friend class ExternalMcp;
     friend class SessionParticipation;

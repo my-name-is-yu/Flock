@@ -131,7 +131,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
                 return true;
             }
             leftQueue = std::exchange(task.queuedInT3, false);
-            if (leftQueue) task.deadline = clock() + db.environmentTimeout(task.botId, task.environmentId, task.config);
+            if (leftQueue) task.deadline = clock() + db.botSettingsStorage.environmentTimeout(task.botId, task.environmentId, task.config);
         }
         if (observed.kind == Observation::Kind::Question) {
             if (observed.question.requestId.empty()) return false;

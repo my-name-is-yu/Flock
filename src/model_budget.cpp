@@ -1,3 +1,4 @@
+#include "storage.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
 #include "secret_storage.hpp"

@@ -1,3 +1,5 @@
+#include "storage.hpp"
+#include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_peer.hpp"
@@ -67,11 +69,11 @@ LIMIT 2
     std::string requester;
     std::string requesterBot = message.bot;
     if (task.sourceMessageId) {
-        const auto source = remaining.loadTurnMessage(*task.sourceMessageId);
+        const auto source = conversationTurns.loadTurnMessage(*task.sourceMessageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
-            const auto actor = remaining.turnActor(source);
-            if (Policy(remaining).allows(actor, Action::bot_talk, source.bot) &&
+            const auto actor = conversationTurns.turnActor(source);
+            if (permissions.allows(actor, Action::bot_talk, source.bot) &&
                 (source.principalSource != session || sessionParticipationStorage.activeSessionOrigin(source)))
                 requester = policyApprovals.policyOrigin(source).requester;
         }
@@ -82,7 +84,7 @@ LIMIT 2
             const auto role = webIdentity.resolve(person);
             actor = role ? Person{person, *role} : Person{};
         }
-        if (Policy(remaining).allows(actor, Action::bot_talk, message.bot)) requester = person;
+        if (permissions.allows(actor, Action::bot_talk, message.bot)) requester = person;
     }
     if (requester.empty()) return std::nullopt;
 

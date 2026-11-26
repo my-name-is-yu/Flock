@@ -54,8 +54,8 @@ struct Runtime::Impl {
     Components::DatabaseLock lock;
 
     void runTurn(Id id) {
-        db.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
-                   options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
+        db.conversationTurns.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
+                                     options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
@@ -121,7 +121,7 @@ void Runtime::runConversations() {
     p_->channelStorage.deliverChannels(p_->workers.stopToken());
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick && !p_->workers.stopToken().stop_requested(); ++i) {
-        const auto pending = p_->db.pendingConversations(1, p_->options.clock());
+        const auto pending = p_->db.conversationTurns.pendingConversations(1, p_->options.clock());
         if (pending.empty()) break;
         p_->runTurn(pending.front().second);
     }
@@ -134,7 +134,8 @@ void Runtime::tick() {
     p_->maintenance.fireDueAutomations();
     p_->db.gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
-    for (const auto& [bot, id] : p_->db.pendingConversations(Components::Workers::batchLimit, p_->options.clock())) p_->runTurn(id);
+    for (const auto& [bot, id] : p_->db.conversationTurns.pendingConversations(Components::Workers::batchLimit, p_->options.clock()))
+        p_->runTurn(id);
     p_->maintenance.advanceWorkflows();
     for (const auto& work :
          p_->taskScheduler.nextBatch(Components::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))

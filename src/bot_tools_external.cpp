@@ -1,3 +1,11 @@
+#include "json_fields.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "secret_storage.hpp"
+#include "conversation_tools.hpp"
+#include "conversation_turns.hpp"
+#include "attachment_storage.hpp"
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "workspace_internal.hpp"
@@ -172,16 +180,16 @@ Json toolFailure(std::string_view error) {
     return {{"ok", false}, {"error", error}};
 }
 
-std::optional<Resource> Store::Impl::authorizedBotToolScope(std::string_view bot, const Decision& call) {
-    const Policy policy(*this);
+std::optional<Resource> ConversationTools::authorizedBotToolScope(std::string_view bot, const Decision& call) {
+    const Policy policy = permissions;
     auto resource = scope(bot, call);
     if (policy.forbidden(bot, resource.action, resource.target)) return std::nullopt;
     return resource;
 }
 
-void Store::Impl::authorizeBotToolHistory(std::string_view bot, Id message, ModelInput& input) {
-    std::lock_guard lock(mutex);
-    const Policy policy(*this);
+void ConversationTools::authorizeBotToolHistory(std::string_view bot, Id message, ModelInput& input) {
+    std::lock_guard lock(database.mutex);
+    const Policy policy = permissions;
     auto& steps = input.event.at("turn");
     for (auto& step : steps) {
         const auto& tool = step.at("tool").get_ref<const std::string&>();
@@ -222,7 +230,7 @@ std::string webHost(std::string_view url) {
     return host;
 }
 
-void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) {
+void ConversationTools::validateBotTool(const ToolContext& ctx, const Decision& call) {
     const auto& item = spec(call.tool);
     const auto& args = call.args;
     if (!args.is_object() || args.dump().size() > 32000) throw Conflict("Invalid Bot tool arguments");
@@ -256,12 +264,13 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
         throw Conflict("Attachment is unavailable in this conversation");
 }
 
-Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
+Json ConversationTools::executeBotTool(const ToolContext& ctx, const Decision& call) {
     const auto& args = call.args;
     {
-        std::lock_guard lock(mutex);
-        const auto message = loadTurnMessage(ctx.messageId);
-        if (!message.channelScope.empty() || !Policy(*this).allows(turnActor(message), Action::bot_decide, ctx.bot)) throw DecisionDenied{};
+        std::lock_guard lock(database.mutex);
+        const auto message = conversationTurns.loadTurnMessage(ctx.messageId);
+        if (!message.channelScope.empty() || !permissions.allows(conversationTurns.turnActor(message), Action::bot_decide, ctx.bot))
+            throw DecisionDenied{};
     }
     const auto resource = authorizedBotToolScope(ctx.bot, call);
     if (!resource) throw Conflict("Bot tool access denied");
@@ -288,7 +297,7 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     else if (call.tool == "skill_list") {
         content = Json::array();
         for (const auto& [name, root] : ctx.settings.skills) {
-            if (Policy(*this).allows(ctx.bot, Action::skill_read, name)) content.push_back({{"name", name}});
+            if (permissions.allows(ctx.bot, Action::skill_read, name)) content.push_back({{"name", name}});
         }
     } else if (call.tool == "skill_read") {
         const auto [root, relative] = skillFile(ctx, *resource, args, path);

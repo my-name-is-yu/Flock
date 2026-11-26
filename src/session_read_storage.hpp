@@ -2,7 +2,6 @@
 
 #include "tool_call_result.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <optional>
@@ -11,6 +10,9 @@
 #include <string_view>
 
 namespace flockv0 {
+class Policy;
+class ConversationStorage;
+
 class Database;
 class SecretStorage;
 class SessionParticipationStorage;
@@ -28,9 +30,11 @@ class PolicyApprovals;
 class SessionReadStorage {
 public:
     SessionReadStorage(Database& database, SecretStorage& secretStorage, const SessionParticipationStorage& sessionParticipationStorage,
-                       Store::Impl& remaining, ChannelStorage& channelStorage, PolicyApprovals& policyApprovals)
-        : database(database), secretStorage(secretStorage), sessionParticipationStorage(sessionParticipationStorage), remaining(remaining),
-          channelStorage(channelStorage), policyApprovals(policyApprovals) {}
+                       Policy& permissions, ConversationStorage& conversationTurns, ChannelStorage& channelStorage,
+                       PolicyApprovals& policyApprovals)
+        : database(database), secretStorage(secretStorage), sessionParticipationStorage(sessionParticipationStorage),
+          permissions(permissions), conversationTurns(conversationTurns), channelStorage(channelStorage), policyApprovals(policyApprovals) {
+    }
 
     ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
@@ -45,7 +49,8 @@ private:
     Database& database;
     SecretStorage& secretStorage;
     const SessionParticipationStorage& sessionParticipationStorage;
-    Store::Impl& remaining;
+    Policy& permissions;
+    ConversationStorage& conversationTurns;
     ChannelStorage& channelStorage;
     PolicyApprovals& policyApprovals;
 };
