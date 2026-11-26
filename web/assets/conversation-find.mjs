@@ -1,7 +1,6 @@
 import { timelineMessages } from './event-history.mjs';
 
 const pagesPerSearch = 4;
-const matchesPerView = 5;
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
 const clockFormat = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const monthDayFormat = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
@@ -85,14 +84,12 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     more.disabled = !!busy;
     more.textContent = error ? 'Retry search' : 'Search earlier messages';
     list.hidden = !matches.length;
-    const start = Math.floor(index / matchesPerView) * matchesPerView;
-    const displayed = matches.slice(start, start + matchesPerView);
-    if (visibleMatches.length !== displayed.length || visibleMatches.some((item, i) => item !== displayed[i])) {
-      const rows = displayed.map((result, offset) => matchRow(result, start + offset));
+    if (visibleMatches.length !== matches.length || visibleMatches.some((item, i) => item !== matches[i])) {
+      const rows = matches.map((result, offset) => matchRow(result, offset));
       list.replaceChildren(...rows);
-      visibleMatches = displayed;
+      visibleMatches = [...matches];
     }
-    markCurrent(list.children[index - start]?.firstElementChild);
+    markCurrent(list.children[index]?.firstElementChild);
   }
 
   function matchRow(result, index) {
@@ -192,19 +189,20 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     render();
   }
 
-  function step(direction) {
+  function step(direction, jump = false) {
     if (!search?.matches.length) return;
     const count = search.matches.length;
     search.index = (search.index + direction + count) % count;
     render();
+    if (jump) void openMatch(context, search.matches[search.index].id, search.controller.signal);
   }
 
   toggle.addEventListener('click', () => panel.hidden ? open() : close(false));
   closeButton.addEventListener('click', () => close(true));
   input.addEventListener('input', (event) => { if (!event.isComposing) query(); });
   input.addEventListener('compositionend', query);
-  previous.addEventListener('click', () => step(-1));
-  next.addEventListener('click', () => step(1));
+  previous.addEventListener('click', () => step(-1, true));
+  next.addEventListener('click', () => step(1, true));
   more.addEventListener('click', () => {
     if (!search || search.busy || search.denied) return;
     search.busy = true;

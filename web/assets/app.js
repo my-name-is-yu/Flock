@@ -1423,6 +1423,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     error.textContent = 'That message is no longer in this conversation.';
     return;
   }
+  unfoldMessageRow(target);
   elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
   void target.offsetWidth;
   target.classList.add('conversation-source-target');
@@ -2023,7 +2024,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
-    foldLongMessages(added);
+    syncMessageFolding(added);
     moveScroll();
     if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
       const pending = context.pendingViewMotion;
@@ -2054,26 +2055,54 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
 // Like ChatGPT, fold any very long message to its first lines behind Show more.
 const foldLines = 12;
 const unfoldedMessages = new Set();
-function foldLongMessages(rows) {
-  const texts = rows.flatMap(row => [...row.querySelectorAll('.foldable-text')]);
-  // Inserting a toggle invalidates layout. Measure all new text before changing any row.
-  const long = texts.filter((text) => {
+function setBubbleFold(bubble, toggle, folded) {
+  bubble.dataset.fold = folded ? 'folded' : 'unfolded';
+  toggle.textContent = folded ? 'Show more' : 'Show less';
+  toggle.setAttribute('aria-expanded', String(!folded));
+}
+function unfoldMessageRow(row) {
+  const bubble = row?.querySelector('.bubble[data-fold="folded"]');
+  if (!bubble) return;
+  const text = bubble.querySelector('.foldable-text');
+  const toggle = text?.nextElementSibling?.classList.contains('fold-toggle') ? text.nextElementSibling : null;
+  if (text) {
+    cancelMotion(text);
+    text.style.overflow = '';
+  }
+  if (toggle) setBubbleFold(bubble, toggle, false);
+  else bubble.dataset.fold = 'unfolded';
+  if (row.id) unfoldedMessages.add(row.id);
+}
+function syncMessageFolding(rows) {
+  const entries = rows.flatMap((row) => [...row.querySelectorAll('.foldable-text')].map((text) => ({
+    text,
+    bubble: text.closest('.bubble'),
+    id: text.closest('.event-message')?.id,
+    existing: text.nextElementSibling?.classList.contains('fold-toggle') ? text.nextElementSibling : null,
+  })));
+  // Inserting or removing a toggle invalidates layout. Measure all candidates before changing any row.
+  const shouldFold = entries.map(({ text }) => {
     const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-    return text.scrollHeight > lineHeight * (foldLines + 2);
+    return Number.isFinite(lineHeight) && text.scrollHeight > lineHeight * (foldLines + 2);
   });
-  for (const text of long) {
-    const bubble = text.closest('.bubble');
-    const id = text.closest('.event-message')?.id;
-    const setFold = (folded) => {
-      bubble.dataset.fold = folded ? 'folded' : 'unfolded';
-      toggle.textContent = folded ? 'Show more' : 'Show less';
-      toggle.setAttribute('aria-expanded', String(!folded));
-    };
+  entries.forEach(({ text, bubble, id, existing }, index) => {
+    if (!bubble) return;
+    if (!shouldFold[index]) {
+      if (existing) existing.remove();
+      delete bubble.dataset.fold;
+      cancelMotion(text);
+      text.style.overflow = '';
+      return;
+    }
+    if (existing) {
+      setBubbleFold(bubble, existing, !unfoldedMessages.has(id));
+      return;
+    }
     const toggle = button(null, 'fold-toggle', () => {
       const nextFolded = bubble.dataset.fold !== 'folded';
       const startHeight = text.getBoundingClientRect().height;
       cancelMotion(text);
-      setFold(nextFolded);
+      setBubbleFold(bubble, toggle, nextFolded);
       if (nextFolded) unfoldedMessages.delete(id);
       else unfoldedMessages.add(id);
       const endHeight = nextFolded ? text.getBoundingClientRect().height : text.scrollHeight;
@@ -2100,8 +2129,8 @@ function foldLongMessages(rows) {
       if (nextFolded) bubble.scrollIntoView({ block: 'nearest' });
     });
     text.after(toggle);
-    setFold(!unfoldedMessages.has(id));
-  }
+    setBubbleFold(bubble, toggle, !unfoldedMessages.has(id));
+  });
 }
 
 function conversationRows(data, events, keep, source) {
@@ -3580,6 +3609,7 @@ new ResizeObserver(() => {
   const wasAtBottom = widthChanged || timelineAtEnd(scroller, timelineHeight);
   timelineHeight = height;
   timelineWidth = width;
+  if (width > 0 && widthChanged) syncMessageFolding([...elements.timeline.children]);
   if (width > 0 && resized && wasAtBottom && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
 }).observe(scroller);
