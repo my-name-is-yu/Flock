@@ -75,9 +75,13 @@
   position: relative; display: grid; justify-items: center; gap: .7rem;
   padding: 1.25rem 1.25rem .75rem;
 }
-.settings-avatar-button {
+.settings-avatar-button,
+.settings-avatar-static {
   position: relative; display: grid; place-items: center; padding: 0; border: 0;
-  border-radius: 24px; background: transparent; cursor: pointer;
+  border-radius: 24px; background: transparent;
+}
+.settings-avatar-button {
+  cursor: pointer;
   transition: transform var(--dur-fast) var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {

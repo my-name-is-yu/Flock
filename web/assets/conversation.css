@@ -140,12 +140,12 @@
 .peer-parent-link:hover { color: var(--text); }
 .peer-sep { color: var(--text-3); font-size: .85rem; line-height: 1; opacity: .75; }
 .peer-thread-label { color: var(--text); font-size: var(--text-sm); font-weight: 600; line-height: 1.25; }
-.profile-caption:has(.needs-you:not([hidden])) { cursor: pointer; }
-.profile-caption:has(.needs-you:not([hidden])):hover {
+.profile-caption { cursor: pointer; }
+.profile-caption:hover {
   background: light-dark(rgb(255 255 255 / .95), rgb(40 40 43 / .88));
   border-color: light-dark(rgb(0 0 0 / .11), rgb(255 255 255 / .1));
 }
-.profile-caption:has(.needs-you:not([hidden])):active { transform: scale(.97); }
+.profile-caption:active { transform: scale(.97); }
 .profile-caption:has(.needs-you:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .main:has(.decision-layer:not([hidden])) .profile-caption,
 .main.decision-morphing .profile-caption { opacity: 0; transition: none; }
@@ -553,6 +553,9 @@
   .header-inner:has(#peer-identity:not([hidden])) .peer-back {
     inset-inline-start: calc(clamp(.75rem, 2vw, 1.25rem) + 2.65rem);
   }
+  .header-inner:has(#peer-identity:not([hidden])) .peer-identity {
+    max-width: calc(100% - 10.5rem);
+  }
 }
 @container conversation-layout (max-height: 400px) {
   .main:has(:is(#profile-identity, #peer-identity):not([hidden])) {
@@ -580,7 +583,7 @@
   .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; animation: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }
   .conversation-action:active, .peer-back:active, .profile-face-button:hover, .profile-face-button:active,
-  .profile-caption:has(.needs-you:not([hidden])):active, .jump-to-latest:active, .question-option:active,
+  .profile-caption:active, .jump-to-latest:active, .question-option:active,
   .peer-exchange-link:active, .fold-toggle:active { transform: none; }
   .msg-action[data-copied="true"] svg, .question-option:has(:checked), .msg-resolution, .empty-state > * { animation: none; }
   .profile-identity[data-state="offline"] .status-indicator { animation: none; }

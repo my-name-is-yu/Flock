@@ -457,6 +457,27 @@ function pinnedBotsInShortcutOrder(source = bots) {
 function focusKey(key) {
   sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
 }
+function positionMenuPopover(botId) {
+  if (!botId) return;
+  const popover = sidebar.querySelector('.menu-popover');
+  const trigger = sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${botId}`)}"]`);
+  if (!popover || !trigger) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const width = popover.offsetWidth;
+  const height = popover.offsetHeight;
+  const margin = 8;
+  const viewLeft = Math.max(margin, Math.min(window.innerWidth - width - margin, triggerRect.right - width));
+  const fitsBelow = triggerRect.bottom + 4 + height <= window.innerHeight - margin;
+  const viewTop = fitsBelow
+    ? triggerRect.bottom + 4
+    : Math.max(margin, triggerRect.top - height - 4);
+  const sidebarRect = getComputedStyle(sidebar).transform !== 'none' ? sidebar.getBoundingClientRect() : null;
+  const offsetX = sidebarRect ? sidebarRect.left : 0;
+  const offsetY = sidebarRect ? sidebarRect.top : 0;
+  popover.style.left = `${Math.round(viewLeft - offsetX)}px`;
+  popover.style.top = `${Math.round(viewTop - offsetY)}px`;
+  popover.style.setProperty('--menu-origin', fitsBelow ? 'top right' : 'bottom right');
+}
 function setMenu(botId, focus) {
   menu = botId;
   renderBots();
@@ -805,6 +826,7 @@ function renderBots() {
       }
     }
   }
+  if (menu) positionMenuPopover(menu);
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -847,6 +869,7 @@ function renderHeader() {
   // The first-run empty state carries its own heading; a bare "Conversation" title would only repeat it.
   elements['profile-placeholder'].hidden = !!bot || !!dm || (listLoaded && !bots.length);
   elements['bot-activity'].hidden = !bot || !!dm;
+  byId('conversation-bot-settings').hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
   elements['peer-identity'].hidden = !dm;
@@ -2773,13 +2796,20 @@ elements['composer-banner-action'].addEventListener('click', async (event) => {
 
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
+  const canEdit = bot.canDelete === true;
   const hero = node('div', 'settings-hero');
-  const avatarButton = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
-  avatarButton.setAttribute('aria-label', 'Change avatar');
   const face = node('span', 'settings-avatar');
-  avatarButton.dataset.tooltip = 'Change avatar';
-  avatarButton.dataset.tooltipSide = 'top';
-  avatarButton.append(face);
+  let avatarHost;
+  if (canEdit) {
+    avatarHost = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
+    avatarHost.setAttribute('aria-label', 'Change avatar');
+    avatarHost.dataset.tooltip = 'Change avatar';
+    avatarHost.dataset.tooltipSide = 'top';
+    avatarHost.append(face);
+  } else {
+    avatarHost = node('span', 'settings-avatar-static');
+    avatarHost.append(face);
+  }
   detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
 
   const nameWrap = node('div', 'settings-name-wrap');
@@ -2788,6 +2818,10 @@ function generalContent(bot) {
   statusNote.hidden = !detail?.status;
 
   function renderNameDisplay() {
+    if (!canEdit) {
+      nameWrap.replaceChildren(node('span', 'settings-name', bot.name));
+      return;
+    }
     const nameBtn = button(null, 'settings-name-button', beginInlineRename);
     nameBtn.setAttribute('aria-description', 'Rename Bot');
     nameBtn.append(node('span', 'settings-name', bot.name));
@@ -2848,7 +2882,7 @@ function generalContent(bot) {
     input.select();
   }
   renderNameDisplay();
-  hero.append(avatarButton, nameWrap, statusNote);
+  hero.append(avatarHost, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   rows.append(pullRequestSetting(bot));
   const settings = document.createElement('a');
@@ -3387,28 +3421,43 @@ const sidebarShow = byId('show-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
 const sidebarMinWidth = 216;
 const sidebarMaxWidth = 416;
+const sidebarDefaultWidth = 296;
 const sidebarCollapseThreshold = 160;
+sidebarResizer?.setAttribute('aria-valuemin', String(sidebarMinWidth));
+sidebarResizer?.setAttribute('aria-valuemax', String(sidebarMaxWidth));
 function setSidebarWidth(px, persist = false) {
   const clamped = Math.round(Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, px)));
   workspace.style.setProperty('--sidebar-width', `${clamped}px`);
+  sidebarResizer?.setAttribute('aria-valuenow', String(clamped));
   if (persist) save('flock-sidebar-width', clamped);
 }
-function setSidebarCollapsed(collapsed) {
+function setSidebarCollapsed(collapsed, persist = true) {
   const moveFocus = document.activeElement === (collapsed ? sidebarToggle : sidebarShow);
   workspace.classList.toggle('sidebar-collapsed', collapsed);
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
   sidebarShow.hidden = !collapsed;
+  if (sidebarResizer) {
+    sidebarResizer.tabIndex = collapsed ? -1 : 0;
+    sidebarResizer.setAttribute('aria-hidden', String(collapsed));
+  }
+  if (persist) save('flock-sidebar-collapsed', collapsed);
   if (moveFocus) (collapsed ? sidebarShow : sidebarToggle).focus({ preventScroll: true });
 }
 const storedSidebarWidth = saved('flock-sidebar-width', null);
 if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {
   setSidebarWidth(storedSidebarWidth, false);
+} else {
+  sidebarResizer?.setAttribute('aria-valuenow', String(sidebarDefaultWidth));
+}
+if (saved('flock-sidebar-collapsed', false)) {
+  setSidebarCollapsed(true, false);
 }
 sidebarToggle.addEventListener('click', () => setSidebarCollapsed(true));
 sidebarShow.addEventListener('click', () => setSidebarCollapsed(false));
 if (sidebarResizer) {
   let dragPointer = null;
-  let lastWidth = storedSidebarWidth ?? 296;
+  let lastWidth = Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth
+    ? storedSidebarWidth : sidebarDefaultWidth;
   sidebarResizer.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || narrow.matches) return;
     event.preventDefault();
@@ -3437,10 +3486,30 @@ if (sidebarResizer) {
   };
   sidebarResizer.addEventListener('pointerup', endResize);
   sidebarResizer.addEventListener('pointercancel', endResize);
-  sidebarResizer.addEventListener('dblclick', () => {
+  const resetSidebarWidth = () => {
     workspace.style.removeProperty('--sidebar-width');
     save('flock-sidebar-width', null);
+    lastWidth = sidebarDefaultWidth;
+    sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultWidth));
     setSidebarCollapsed(false);
+  };
+  sidebarResizer.addEventListener('dblclick', resetSidebarWidth);
+  sidebarResizer.addEventListener('keydown', (event) => {
+    if (narrow.matches) return;
+    let nextWidth = null;
+    if (event.key === 'ArrowLeft') nextWidth = lastWidth - 16;
+    else if (event.key === 'ArrowRight') nextWidth = lastWidth + 16;
+    else if (event.key === 'Home') nextWidth = sidebarMinWidth;
+    else if (event.key === 'End') nextWidth = sidebarMaxWidth;
+    else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      resetSidebarWidth();
+      return;
+    } else return;
+    event.preventDefault();
+    lastWidth = Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, nextWidth));
+    if (workspace.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+    setSidebarWidth(lastWidth, true);
   });
 }
 function openCurrentBotSettings() {
@@ -3448,6 +3517,10 @@ function openCurrentBotSettings() {
   openDetail({ kind: 'settings' });
 }
 elements['profile-avatar-button'].addEventListener('click', openCurrentBotSettings);
+byId('conversation-bot-settings')?.addEventListener('click', openCurrentBotSettings);
+byId('profile-heading')?.addEventListener('click', (event) => {
+  if (byId('needs-you')?.hidden && !event.target.closest('button')) openCurrentBotSettings();
+});
 elements['peer-picker'].addEventListener('click', () => {
   closeConversationActions(true);
   openDetail({ kind: 'peers' });
@@ -3680,6 +3753,8 @@ document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
   if (!conversationActions.contains(event.target)) closeConversationActions();
 });
+sidebar.querySelector('.sidebar-scroll')?.addEventListener('scroll', () => { if (menu) closeMenu(false); }, { passive: true });
+window.addEventListener('resize', () => { if (menu) closeMenu(false); });
 document.addEventListener('keydown', (event) => {
   if (botDeletion.isOpen() || botPause.isOpen()) return;
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
