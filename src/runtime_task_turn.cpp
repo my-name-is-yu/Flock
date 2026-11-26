@@ -52,11 +52,10 @@
 namespace flockv0 {
 runtime::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage,
                             SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
-                            WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model,
-                            const std::function<std::string(std::string_view)>& soul, const std::function<Seconds()>& clock,
-                            GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates,
-                            RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
-                            SessionPrompts& prompts, TaskDecisions& decisions)
+                            WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul,
+                            const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead, std::stop_token stop,
+                            TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory, PeerExchanges& peerExchanges,
+                            RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
     : database(database), gitStorage(gitStorage), modelCalls(modelCalls), peerStorage(peerStorage), secretStorage(secretStorage),
       taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), memoryStorage(memoryStorage),
       model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),

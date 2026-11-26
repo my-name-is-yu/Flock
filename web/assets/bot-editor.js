@@ -111,7 +111,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       <div class="studio-start-list">
         <button type="button" class="studio-start-option" data-preset="custom">
           <span class="studio-start-icon">${uiIcon('plus')}</span>
-          <span class="studio-start-copy"><strong>Start from scratch</strong><small>Choose a name and look now, write its instructions later</small></span>
+          <span class="studio-start-copy"><strong>Start from scratch</strong><small>Pick a name and look now, describe its role later</small></span>
           ${uiIcon('chevron-right')}
         </button>
       </div>

@@ -14,7 +14,8 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/store.hpp"
@@ -221,11 +222,12 @@ void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store concurrent(path);
     Database db(path);
-    Policy policy{store};
-    policy.setMember(owner, "report", alice.id, true);
-    policy.setMember(owner, "review", alice.id, true);
-    policy.setMember(owner, "review", bob.id, true);
-    policy.setMember(owner, "report", reader.id, true);
+    BotAccess botAccess{store};
+    SecretRequests secretRequests{store};
+    botAccess.setMember(owner, "report", alice.id, true);
+    botAccess.setMember(owner, "review", alice.id, true);
+    botAccess.setMember(owner, "review", bob.id, true);
+    botAccess.setMember(owner, "report", reader.id, true);
 
     const auto question = TaskIntake(store).submit(intake("report", "Report the work\nInclude the source", "question"));
     const auto unknown = TaskIntake(store).submit(intake("review", "Recover the delivery", "unknown"));
@@ -261,7 +263,7 @@ void exercise(const std::filesystem::path& path) {
     const auto report = taskJson(Tasks(store).task(question));
     const auto review =
         openReview(store, runtime, script, intake("report", "unused", "turn"), question, "published-report", "Check the report and source");
-    const auto secret = policy.requestSecret("review", {"report-credential"});
+    const auto secret = secretRequests.requestSecret("review", {"report-credential"});
     const auto conversation = ConversationIntake(store).receive(localOwner, intake("review", "unused", "turn", {{"modelCallLimit", 1}}),
                                                                 "pause", "Pause this conversation");
     script.failConversation = true;
@@ -441,18 +443,18 @@ SELECT )SQL" +
     const auto decision = row(Inbox(store).decisionHistory(alice), "itemKind", "conversation_model_budget");
     check(decision.at("requestTitle") == "Pause this conversation" && decision.at("decidedByYou") == true,
           "a taskless conversation decision lost its source title or actor");
-    policy.requestSecret("review", {"after-restart"});
+    secretRequests.requestSecret("review", {"after-restart"});
 }
 
 void protectedInputSource(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
+    SecretRequests secretRequests{store};
     const SecretRef ref{"report-credential"};
     const auto routing = intake("report", "Prepare the report", "question");
-    const auto request = policy.requestSecret("report", ref);
+    const auto request = secretRequests.requestSecret("report", ref);
     const auto source = ConversationIntake(store).receive(owner, routing, "secret", "First request").at("messageId").get<Id>();
     const auto repeat = ConversationIntake(store).receive(owner, routing, "repeat", "Repeated request").at("messageId").get<Id>();
-    check(policy.requestSecret("report", ref, source) == request && policy.requestSecret("report", ref, repeat) == request,
+    check(secretRequests.requestSecret("report", ref, source) == request && secretRequests.requestSecret("report", ref, repeat) == request,
           "repeated protected input changed its request ID");
     const auto inbox = Inbox(store).inbox(owner, "report");
     check(inbox.size() == 1 && inbox.at(0).at("itemId") == request && inbox.at(0).at("request") == "First request" &&
@@ -462,8 +464,8 @@ void protectedInputSource(const std::filesystem::path& path) {
 
 void chatDecision(const std::filesystem::path& path) {
     Store store(path);
-    Policy policy{store};
-    policy.setMember(owner, "report", alice.id, true);
+    BotAccess botAccess{store};
+    botAccess.setMember(owner, "report", alice.id, true);
     const auto routing = intake("report", "Prepare the report", "question");
     const auto taskId = TaskIntake(store).submit(routing);
     Script script;
@@ -480,11 +482,11 @@ void chatDecision(const std::filesystem::path& path) {
     const auto& wait = task.at("wait");
     const auto item = pending(store, InboxKind::user_question, "report");
     ConversationIntake(store).receive(alice, routing, "revoked", "Use Final", wait.at("messageId"));
-    policy.setMember(owner, "report", alice.id, false);
+    botAccess.setMember(owner, "report", alice.id, false);
     runtime.runConversations();
     check(taskJson(Tasks(store).task(taskId)) == task && Inbox(store).decisionHistory(owner).empty(),
           "a queued chat answer survived access revocation");
-    policy.setMember(owner, "report", alice.id, true);
+    botAccess.setMember(owner, "report", alice.id, true);
     ConversationIntake(store).receive(alice, routing, "answer", "Use Final", wait.at("messageId"));
     runtime.runConversations();
     const auto history = Inbox(store).decisionHistory(owner);

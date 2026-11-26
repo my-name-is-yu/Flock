@@ -1,3 +1,4 @@
+#include "policy_internal.hpp"
 #include "conversation_turns.hpp"
 #include "flock/decision_errors.hpp"
 #include "outbox_storage.hpp"
@@ -200,7 +201,7 @@ WHERE a.status IN ('pending','approved')
         database.exec("UPDATE policy_approvals SET status=? WHERE id=? AND status IN ('pending','approved')", {change.status, change.id});
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
-        permissions.audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
+        policy_storage::audit(database, Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
         if (change.task) database.writeJournal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
     }
 }
@@ -215,7 +216,7 @@ ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Re
     const auto action = actionName(resource.action);
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
-        policy.audit(Person{}, origin.bot, "action_denied", details);
+        policy_storage::audit(database, Person{}, origin.bot, "action_denied", details);
         if (origin.task) database.writeJournal(origin.task, "policy_denied", details);
         return ApprovalGate::denied;
     };
@@ -300,7 +301,8 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
         }
         database.writeJournal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
     }
-    policy.audit(Person{}, origin.bot, "approval_requested", {{"itemId", card}, {"action", action}, {"target", resource.target}});
+    policy_storage::audit(database, Person{}, origin.bot, "approval_requested",
+                          {{"itemId", card}, {"action", action}, {"target", resource.target}});
     if (origin.anchor) channelStorage.channelApprovalNotice(origin.anchor);
     return ApprovalGate::waiting;
 }
@@ -325,7 +327,9 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     if (nextTime ? status != "expired" : status != "pending") throw DecisionUnavailable{};
     if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4), row.number(5), row.number(6), row.number(7), row.string(11))))
         throw RequestChanged{};
-    if (saveRule) policy.writeRule(currentActor, RuleKind::allow, *parseAction(row.string(1)), row.string(2), true, true);
+    if (saveRule)
+        policy_storage::writeRule(database, secretStorage, currentActor, RuleKind::allow, *parseAction(row.string(1)), row.string(2), true,
+                                  true);
     database.exec("UPDATE policy_approvals SET status=? WHERE id=?", {nextTime           ? "rule_saved"
                                                                       : choice == "deny" ? "denied"
                                                                                          : "approved",
@@ -338,7 +342,7 @@ AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE i
     releasePolicyTurn(row.number(4));
     releasePolicyTask(item.itemId, choice);
     inboxStorage.recordInboxDecision(currentActor, item, choice);
-    policy.audit(currentActor, item.botId, "approval_decided", {{"itemId", item.itemId}, {"decision", choice}});
+    policy_storage::audit(database, currentActor, item.botId, "approval_decided", {{"itemId", item.itemId}, {"decision", choice}});
 }
 
 Json PolicyApprovals::policyApprovalCards(const Person& actor, std::string_view bot) {

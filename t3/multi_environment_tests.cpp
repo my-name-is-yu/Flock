@@ -9,7 +9,8 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/policy_action.hpp"
+#include "flock/policy_rules.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
@@ -544,12 +545,12 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
               local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
           "an omitted selector must be rejected as ambiguous without contacting either destination");
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
-    Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
+    PolicyRules{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
     ConversationIntake(fixture.store).receive(localOwner, routing, "policy-denied-follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.sendResult.value("ok", true) && mini.effects("t3_thread_send").empty(),
           "saved-target follow-up must still obey the T3 send policy");
-    Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
+    PolicyRules{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
     ConversationIntake(fixture.store).receive(localOwner, routing, "follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false),
@@ -578,13 +579,13 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
                            {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                             {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
-    Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
+    PolicyRules{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
     fixture.model.cancelGeneration = fixture.task().task.generation;
     ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-mini-denied-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.cancelResult.value("ok", true) && fixture.mini.effects("t3_thread_interrupt").empty(),
           "selected cancellation must obey the saved Run's T3 policy");
-    Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
+    PolicyRules{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
     fixture.model.cancelGeneration = fixture.task().task.generation;
     ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
@@ -805,7 +806,7 @@ void commitEvidence(Scenario& fixture) {
 }
 
 void supervised(Scenario& fixture) {
-    Policy{fixture.store}.setMode(localOwner, "supervised");
+    PolicyRules{fixture.store}.setMode(localOwner, "supervised");
     fixture.start();
     auto card = [&](const Endpoint& endpoint) {
         for (const auto& item : Inbox(fixture.store).inbox(localOwner, bot))

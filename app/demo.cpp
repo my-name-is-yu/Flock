@@ -69,7 +69,7 @@ class DemoModel final : public Model {
             const auto request = in.task.value("request", "");
             if (answer.empty() && request.starts_with("ask:")) {
                 auto question = request.substr(4);
-                if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo Session focus on?";
+                if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo focus on?";
                 return {{{"ask_user", {{"question", question}}, "The demo request calls for a user answer before work begins."}}};
             }
             Json args = {{"instruction", request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
@@ -100,7 +100,7 @@ class DemoT3 final : public T3 {
         Observation observed;
         observed.kind = Observation::Kind::Finished;
         observed.status = "completed";
-        observed.report = "The fixed demo Session completed its assigned work.";
+        observed.report = "The demo finished its assigned work.";
         observed.resultRunId = run.runId;
         return observed;
     }

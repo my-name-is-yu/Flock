@@ -1,3 +1,5 @@
+#include "flock/bot_access.hpp"
+#include "flock/policy_rules.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
@@ -27,6 +29,7 @@
 #include "flock/policy.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/store.hpp"
 #include "flock/store_options.hpp"
 #include "flock/t3.hpp"
@@ -319,7 +322,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     options.intake = intake;
-    const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
+    const SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store, *model, *t3, soul, options);
@@ -349,8 +352,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         [&] { return activeBotCards(store, bots.cards()); },
         intake,
         [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
-            auto created =
-                Policy{store}.createOwnedBot(creator, [&](const auto& publishOwned) { return bots.create(profile, image, publishOwned); });
+            auto created = BotAccess{store}.createOwnedBot(
+                creator, [&](const auto& publishOwned) { return bots.create(profile, image, publishOwned); });
             syncSkills();
             return created;
         },
@@ -508,7 +511,7 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
 void rulesCommand(const std::filesystem::path& home, Arguments& args) {
     const auto command = args.pop("rules command");
     auto store = openStore(home);
-    Policy policy{store};
+    PolicyRules rules{store};
     if (command == "list") {
         args.end();
     } else {
@@ -519,9 +522,9 @@ void rulesCommand(const std::filesystem::path& home, Arguments& args) {
         if (!action) throw Conflict("Unknown policy action");
         const auto target = args.pop("target");
         args.end();
-        policy.changeRule(localOwner, *kind, *action, target, command == "add");
+        rules.changeRule(localOwner, *kind, *action, target, command == "add");
     }
-    print(policy.rules());
+    print(rules.rules());
 }
 
 int runCli(Arguments& args) {
@@ -556,7 +559,7 @@ int runCli(Arguments& args) {
         if (!args.empty()) {
             const auto mode = args.pop("mode");
             args.end();
-            Policy{store}.setMode(localOwner, mode);
+            PolicyRules{store}.setMode(localOwner, mode);
         }
         std::cout << Policy{store}.mode() << '\n';
     } else if (command == "message") {

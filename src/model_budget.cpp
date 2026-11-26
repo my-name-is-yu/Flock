@@ -170,6 +170,21 @@ Id ModelCalls::approveModelBudget(const Person& actor, const ModelBudget& budget
     return attempt;
 }
 
+std::vector<Id> ModelCalls::taskWaitsCoveredByConversationApproval(std::string_view bot, const ModelBudget& budget) const {
+    if (budget.initialLimit <= 1) return {};
+    std::vector<Id> waits;
+    auto rows = database.query(R"SQL(
+SELECT w.id,w.task_id FROM waits w JOIN tasks t ON t.id=w.task_id
+WHERE t.bot_id=? AND t.state='waiting' AND w.resolution IS NULL AND w.reason='model_budget'
+)SQL",
+                               {bot});
+    while (rows.next()) {
+        const auto task = rows.number(1);
+        if (taskModelBudget(task).id == budget.id && waitStorage.waitIsActionable(taskRecords.load(task))) waits.push_back(rows.number(0));
+    }
+    return waits;
+}
+
 void ModelCalls::resumeSharedModelBudgetWaits(const Person& actor, std::string_view budget, Id approvedMessage, Id approvedTask) {
     if (!database.query("SELECT 1 FROM model_budgets WHERE id=? AND attempts<call_limit", {budget}).next()) return;
     const auto& policy = permissions;
@@ -319,7 +334,9 @@ WHERE t.pause_id IS NOT NULL AND t.status='paused' AND j.conversation_bot_id=? O
     while (rows.next()) {
         auto turn = rows.json(0);
         turn["text"] = modelBudgetPauseText(rows.string(2));
-        turn["allowance"] = modelCalls_.messageModelBudget(rows.number(1)).initialLimit;
+        const auto budget = modelCalls_.messageModelBudget(rows.number(1));
+        turn["allowance"] = budget.initialLimit;
+        turn["sharedWaitIds"] = modelCalls_.taskWaitsCoveredByConversationApproval(bot, budget);
         result.push_back(std::move(turn));
     }
     return result;

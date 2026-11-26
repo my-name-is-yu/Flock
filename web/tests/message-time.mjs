@@ -23,7 +23,7 @@ function fixtures() {
     }
     close() {}
   };
-  const bot = { id: 'release', name: 'Release', peers: [{ id: 'triage' }] };
+  const bot = { id: 'release', name: 'Release', model: 'demo', peers: [{ id: 'triage' }] };
   const peer = { id: 'triage', name: 'Triage' };
   window.renameBot = (name) => {
     bot.name = name;

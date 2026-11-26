@@ -4,7 +4,10 @@
 #include "flock/t3_connection.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/session_question.hpp"
 #include "flock/types.hpp"
 
@@ -92,7 +95,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res, 200,
               {{"mode", policy.mode()},
-               {"rules", policy.redactSecrets({}, policy.rules())},
+               {"rules", policy.redactSecrets({}, PolicyRules{store}.rules())},
                {"canManagePolicy", canManage},
                {"model", std::move(model)},
                {"t3Setup", t3Setup},
@@ -183,7 +186,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Get("/api/bot-settings", [&](const httplib::Request& req, httplib::Response& res) {
         if (req.get_param_value_count("bot") != 1 || req.get_param_value("bot").empty()) return reply(res, 400, {{"error", "invalid_bot"}});
         try {
-            auto view = Policy{store}.botSettings(person(callbacks, req), req.get_param_value("bot"));
+            auto view = BotAccess{store}.botSettings(person(callbacks, req), req.get_param_value("bot"));
             view["canManageMembers"] = view.at("canManage").get<bool>() && hasWebIdentities(callbacks);
             reply(res, 200, view);
         } catch (const Conflict&) {
@@ -276,10 +279,10 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             const auto actor = person(callbacks, req);
-            Policy policy{store};
-            if (!policy.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            PolicyRules rules{store};
             if (req.matches[1] == "mode")
-                policy.setMode(actor, args.at("mode").get<std::string>());
+                rules.setMode(actor, args.at("mode").get<std::string>());
             else {
                 const auto action = parseAction(args.at("action").get<std::string>());
                 const auto kind = parseRuleKind(args.at("kind").get<std::string>());
@@ -289,7 +292,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                 if (add && (trimSessionQuestionText(target).empty() ||
                             std::ranges::find(personOnlyActions, *action) != std::end(personOnlyActions)))
                     return reply(res, 400, {{"error", "invalid_input"}});
-                policy.changeRule(actor, *kind, *action, target, add);
+                rules.changeRule(actor, *kind, *action, target, add);
             }
             reply(res, 200, {{"ok", true}});
         } catch (const Json::exception&) {
@@ -307,18 +310,17 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             const auto actor = person(callbacks, req);
             const auto bot = args.at("botId").get<std::string>();
             if (!args.is_object() || args.size() != 3) return reply(res, 400, {{"error", "invalid_input"}});
-            Policy policy{store};
             if (req.matches[1] == "members") {
                 if (!hasWebIdentities(callbacks)) return reply(res, 409, {{"error", "configure_web_identities_first"}});
                 const auto member = args.at("person").get<std::string>();
                 const auto add = args.at("add").get<bool>();
                 if (add && callbacks.configuredPerson && !callbacks.configuredPerson(member))
                     return reply(res, 400, {{"error", "unknown_person"}});
-                policy.setMember(actor, bot, member, add);
+                BotAccess{store}.setMember(actor, bot, member, add);
             } else {
                 const auto& id = args.at("requestId");
                 if (!id.is_number_integer() || id.get<Id>() <= 0) return reply(res, 400, {{"error", "invalid_input"}});
-                policy.submitSecret(actor, bot, id.get<Id>(), args.at("value").get_ref<const std::string&>());
+                SecretRequests{store}.submitSecret(actor, bot, id.get<Id>(), args.at("value").get_ref<const std::string&>());
             }
             reply(res, 200, {{"ok", true}});
         } catch (const Json::exception&) {

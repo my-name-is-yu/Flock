@@ -20,10 +20,11 @@
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -180,7 +181,7 @@ struct SimulatedT3 : T3 {
 struct RuntimeFixture {
     ScriptedModel model;
     SimulatedT3 t3;
-    Runtime::SoulLoader notes = [](std::string_view) { return std::string{}; };
+    SoulLoader notes = [](std::string_view) { return std::string{}; };
     Seconds now = 100;
     Runtime runtime;
 
@@ -404,8 +405,8 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const std::string marker = "protected-top-level-key-fixture";
-    Policy policy{store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), marker);
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture"}), marker);
     Json observed;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         observed = turn(input);
@@ -425,8 +426,8 @@ void rejectedSessionReadStillAllowsAnOrdinaryReply() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    Policy policy{store};
-    policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"fixture"}), "text");
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture"}), "text");
     bool rejected = false;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         const auto steps = turn(input);
@@ -455,8 +456,8 @@ void savedCallsAreCheckedBeforeExecution() {
     const auto protectedMessage = receive(store, "saved-protected", "Write my workspace file.");
     save(protectedMessage,
          {"workspace_write_file", {{"path", protectedPath}, {"text", "Fixture data"}}, "Saved before the path was protected"});
-    Policy access{store};
-    access.submitSecret(localOwner, "alpha", access.requestSecret("alpha", {"replay-fixture"}), protectedPath);
+    SecretRequests secretRequests{store};
+    secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"replay-fixture"}), protectedPath);
     const auto taskId = task(store, "Prepare repository evidence");
     const auto inFlight = receive(store, "saved-git-effect", "Comment on the issue.");
     const Json comment{{"taskId", taskId},  {"host", "github.com"}, {"repo", "example/fixture"},
@@ -1009,6 +1010,10 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     const InboxTarget turnTarget{"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause};
     check(task.wait->reason() == WaitReason::model_budget && Conversations(store).pausedConversations("beta").size() == 1,
           "The fixture did not exhaust the shared and independent allowances");
+    const auto pending = Inbox(store).inbox(localOwner, "alpha");
+    check(Conversations(store).pausedConversations("alpha").at(0).at("sharedWaitIds") == Json::array({task.wait->id}) &&
+              pending.size() == 1 && pending.at(0).at("itemKind") == "conversation_model_budget",
+          "One exhausted allowance asked twice for the same approval");
     const auto beforeApproval = Conversations(store).conversationChangesSince(std::nullopt, "alpha").through;
     if (approveTask)
         TaskControl(store).operate(localOwner, taskTarget, "approve");
@@ -1044,6 +1049,59 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
               Inbox(reopened).inbox(localOwner, "alpha").empty() &&
               fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 6,
           "Shared work did not finish after restart with exactly one new block");
+}
+
+void oneStepBudgetKeepsTaskApprovalAvailable() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 1;
+    execution.model.conversation = [](const ModelInput&) -> Decision {
+        return {"start_task", {{"request", "Write a release note"}}, "Start it"};
+    };
+    const auto message = receive(store, "shared-one-step", "Write a release note", 0, limited);
+    execution.runtime.runConversations();
+    const auto taskId = TaskList(store).tasks("alpha").at(0).task.id;
+    execution.reach(store, taskId, "waiting");
+
+    const auto waiting = Tasks(store).task(taskId);
+    check(waiting.wait && waiting.wait->reason() == WaitReason::model_budget, "The task did not exhaust its shared budget");
+    const auto turn = Conversations(store).pausedConversations("alpha").at(0);
+    const auto pending = Inbox(store).inbox(localOwner, "alpha");
+    check(turn.at("sharedWaitIds").empty() && pending.size() == 2 &&
+              std::ranges::any_of(pending, [&](const Json& item) { return item.at("waitId") == waiting.wait->id; }),
+          "A conversation approval that uses the sole new step hid the task approval");
+
+    TaskControl(store).operate(localOwner, TaskTarget::from(waiting.task, waiting.wait->id), "approve");
+    check(!Tasks(store).task(taskId).wait && Conversations(store).pausedConversations("alpha").at(0).at("replyToMessageId") == message,
+          "The task could not reserve the new step independently");
+}
+
+void conversationApprovalListsOnlyItsBotWaits() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 2;
+    execution.model.conversation = [](const ModelInput& input) -> Decision {
+        if (turn(input).empty()) return {"start_task", {{"request", "Write a release note"}}, "Start it"};
+        return {"find_tasks", Json::object(), "Look up the work"};
+    };
+    receive(store, "shared-cross-bot", "Write a release note", 0, limited);
+    execution.runtime.runConversations();
+    const auto origin = TaskList(store).tasks("alpha").at(0).task.id;
+    const auto delegated = task(store, "Review the release note", "beta", "review-project");
+    fixture.sql("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,sender_environment) "
+                "VALUES('release-review','work','working','review-request'," +
+                std::to_string(origin) + "," + std::to_string(delegated) + ",'env')");
+    execution.reach(store, delegated, "waiting");
+    const auto delegatedWait = Tasks(store).task(delegated).wait;
+    check(delegatedWait && delegatedWait->reason() == WaitReason::model_budget && delegatedWait->allowance == 2,
+          "The other Bot did not exhaust the same allowance");
+    const auto turn = Conversations(store).pausedConversations("alpha").at(0);
+    const auto shared = turn.at("sharedWaitIds").get<std::vector<Id>>();
+    check(std::ranges::find(shared, delegatedWait->id) == shared.end(), "The conversation included a wait ID from another Bot");
 }
 
 void notesFailureReleasesUnusedApproval() {
@@ -1167,6 +1225,8 @@ int main() {
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         oneApprovalResumesSharedBudgetWaits(false);
         oneApprovalResumesSharedBudgetWaits(true);
+        oneStepBudgetKeepsTaskApprovalAvailable();
+        conversationApprovalListsOnlyItsBotWaits();
         notesFailureReleasesUnusedApproval();
         replyTargetsReachTheTurn();
         conversationPagesCombineTaskAndMessageHistory();

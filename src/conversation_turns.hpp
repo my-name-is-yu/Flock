@@ -12,10 +12,12 @@
 #include "flock/bot_change.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
+#include "flock/soul_loader.hpp"
 #include "flock/types.hpp"
 
 namespace flockv0 {
 class Policy;
+class BotAccess;
 
 class Database;
 class AttachmentStorage;
@@ -72,22 +74,22 @@ enum class PrincipalSource;
 class ConversationStorage {
 public:
     ConversationStorage(Database& database, AttachmentStorage& attachments, AutomationStorage& automationStorage,
-                        BotLifecycleStorage& botLifecycle, BotSettingsStorage& botSettingsStorage, ChannelStorage& channelStorage,
-                        ConversationContextStorage& conversationContextStorage, ConversationTools& conversationTools,
-                        GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
+                        BotLifecycleStorage& botLifecycle, BotAccess& botAccess, BotSettingsStorage& botSettingsStorage,
+                        ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
+                        ConversationTools& conversationTools, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
                         LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
                         PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                         SessionMessageStorage& sessionMessageStorage, SessionParticipationStorage& sessionParticipationStorage,
                         SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
                         TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity, WorkflowStorage& workflowStorage)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
-          botSettingsStorage(botSettingsStorage), channelStorage(channelStorage), conversationContextStorage(conversationContextStorage),
-          conversationTools(conversationTools), gitStorage(gitStorage), permissions(permissions), journalStorage(journalStorage),
-          localMachineStorage(localMachineStorage), memoryStorage(memoryStorage), modelCalls(modelCalls), peerStorage(peerStorage),
-          policyApprovals(policyApprovals), secretStorage(secretStorage), sessionMessageStorage(sessionMessageStorage),
-          sessionParticipationStorage(sessionParticipationStorage), sessionReadStorage(sessionReadStorage), taskOperations(taskOperations),
-          taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), webIdentity(webIdentity),
-          workflowStorage(workflowStorage) {}
+          botAccess(botAccess), botSettingsStorage(botSettingsStorage), channelStorage(channelStorage),
+          conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
+          permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
+          modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
+          sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
+          waitStorage(waitStorage), webIdentity(webIdentity), workflowStorage(workflowStorage) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -96,9 +98,8 @@ public:
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
-    void runTurn(Id messageId, Model&, T3&, const std::function<std::string(std::string_view)>&, const std::function<Seconds()>&,
-                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&,
-                 std::stop_token);
+    void runTurn(Id messageId, Model&, T3&, const SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*,
+                 const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
     std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
                                                    Seconds now, ApprovalWait, const WorkSession* selectedSession,
                                                    const LinkedTaskDestinations& linked);
@@ -135,6 +136,7 @@ private:
     AttachmentStorage& attachments;
     AutomationStorage& automationStorage;
     BotLifecycleStorage& botLifecycle;
+    BotAccess& botAccess;
     BotSettingsStorage& botSettingsStorage;
     ChannelStorage& channelStorage;
     ConversationContextStorage& conversationContextStorage;
