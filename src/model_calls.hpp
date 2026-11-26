@@ -11,6 +11,7 @@
 
 namespace flockv0 {
 
+class ChannelStorage;
 class Database;
 class BotLifecycleStorage;
 class JournalStorage;
@@ -44,9 +45,9 @@ struct CheckedModelTurn {
 class ModelCalls {
 public:
     ModelCalls(Database& database, BotLifecycleStorage& botLifecycle, Store::Impl& remaining, JournalStorage& journalStorage,
-               SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage)
+               SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage, ChannelStorage& channelStorage)
         : database(database), botLifecycle(botLifecycle), remaining(remaining), journalStorage(journalStorage),
-          secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage) {}
+          secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage), channelStorage(channelStorage) {}
 
     void approveMessageModelCall(const Person&, std::string_view bot, Id message, Id pause);
     ModelBudget messageModelBudget(Id messageId) const;
@@ -70,5 +71,6 @@ private:
     SecretStorage& secretStorage;
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
+    ChannelStorage& channelStorage;
 };
 }

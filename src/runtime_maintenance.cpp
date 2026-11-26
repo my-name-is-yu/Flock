@@ -2,6 +2,8 @@
 
 #include "automation_storage.hpp"
 #include "workflow_storage.hpp"
+#include "policy_approvals.hpp"
+#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 
@@ -11,16 +13,16 @@
 
 namespace flockv0 {
 Runtime::Components::Maintenance::Maintenance(Store::Impl& db, AutomationStorage& automationStorage, WorkflowStorage& workflowStorage,
-                                              const std::function<Seconds()>& clock, const ErrorReporter& automationError,
-                                              const ErrorReporter& storageContention)
-    : db(db), automationStorage(automationStorage), workflowStorage(workflowStorage), clock(clock), automationError(automationError),
-      storageContention(storageContention) {}
+                                              PolicyApprovals& approvals, const std::function<Seconds()>& clock,
+                                              const ErrorReporter& automationError, const ErrorReporter& storageContention)
+    : db(db), automationStorage(automationStorage), workflowStorage(workflowStorage), approvals(approvals), clock(clock),
+      automationError(automationError), storageContention(storageContention) {}
 
 Seconds Runtime::Components::Maintenance::settleApprovals() {
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     const auto now = clock();
-    db.settlePolicyApprovals(now);
+    approvals.settlePolicyApprovals(now);
     tx.commit();
     return now;
 }

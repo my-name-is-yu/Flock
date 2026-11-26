@@ -481,15 +481,15 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
                             {"environmentId", cmd.environmentId}};
         if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
         const auto assess = [&](const TaskData& current, bool claim) {
-            const auto origin = db.taskPolicyOrigin(current);
+            const auto origin = db.policyApprovals.taskPolicyOrigin(current);
             if (usesExistingSession) {
                 const Resource launch{Action::environment_launch, cmd.environmentId, true};
                 const auto launchPolicy = policy.check(cmd.ownerBotId, launch);
                 if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
                 if (launchPolicy == PolicyResult::ask && policy.check(cmd.ownerBotId, *resource) == PolicyResult::allow)
-                    return db.approveAction(origin, launch, operation, payload, clock(), claim);
+                    return db.policyApprovals.approveAction(origin, launch, operation, payload, clock(), claim);
             }
-            return resource ? db.approveAction(origin, *resource, operation, payload, clock(), claim) : ApprovalGate::allow;
+            return resource ? db.policyApprovals.approveAction(origin, *resource, operation, payload, clock(), claim) : ApprovalGate::allow;
         };
         if (resource) {
             ApprovalGate gate;

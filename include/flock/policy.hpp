@@ -124,5 +124,6 @@ private:
     friend class TaskOperations;
     friend class TaskRouting;
     friend struct Store::Impl;
+    friend class PolicyApprovals;
 };
 }

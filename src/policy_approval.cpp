@@ -1,4 +1,16 @@
 #include "conversation_storage.hpp"
+#include "web_identity_state.hpp"
+#include "wait_storage.hpp"
+#include "task_records.hpp"
+#include "storage.hpp"
+#include "secret_storage.hpp"
+#include "json_fields.hpp"
+#include "journal_storage.hpp"
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "flock/board_inbox.hpp"
+#include "database.hpp"
+#include "policy_approvals.hpp"
 #include "task_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
@@ -59,22 +71,22 @@ std::string_view approvalError(ApprovalGate result) {
     return "The action was denied by policy.";
 }
 
-PolicyOrigin Store::Impl::policyOrigin(const conversation::Message& message) {
+PolicyOrigin PolicyApprovals::policyOrigin(const conversation::Message& message) {
     const bool background = message.routing.contains("gitEvent");
     PolicyOrigin origin{message.bot, message.channelScope, {}, message.id, message.id, 0, 0, 0, background};
     if (background) return origin;
     if (message.principalSource != conversation::PrincipalSource::channel) {
-        origin.requester = turnActor(message).id;
-    } else if (channelMessageAuthorized(message.id, message.bot)) {
+        origin.requester = remaining.turnActor(message).id;
+    } else if (channelStorage.channelMessageAuthorized(message.id, message.bot)) {
         const auto& id = message.admittedActor.id;
         const bool canSignIn =
-            webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !Policy(*this).requiresIdentity();
+            webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !Policy(remaining).requiresIdentity();
         if (canSignIn) origin.requester = id;
     }
     return origin;
 }
 
-PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
+PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
     const auto id = task.id;
     auto source = task.criteriaProposal ? task.criteriaProposal->sourceMessageId.value_or(0) : Id{0};
     if (!source) source = task.sourceMessageId.value_or(0);
@@ -82,7 +94,7 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
     PolicyOrigin origin{task.botId, {}, {}, source, 0, id, task.currentRevision.value_or(0), task.generation, !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
     if (source) {
-        const auto message = loadTurnMessage(source);
+        const auto message = remaining.loadTurnMessage(source);
         const auto fromMessage = policyOrigin(message);
         origin.scope = fromMessage.scope;
         origin.requester = fromMessage.requester;
@@ -92,10 +104,10 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
         origin.requester = *requester;
         origin.background = false;
     } else if (task.trigger) {
-        auto owner = query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
+        auto owner = database.query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
         origin.requester = owner.next() ? owner.string(0) : localOwner.id;
     } else {
-        auto exchange = query("SELECT sender_task FROM peer_exchanges WHERE recipient_task=? AND sender_task<?", {id, id});
+        auto exchange = database.query("SELECT sender_task FROM peer_exchanges WHERE recipient_task=? AND sender_task<?", {id, id});
         if (exchange.next()) {
             const auto parent = taskPolicyOrigin(taskRecords.load(exchange.number(0)));
             origin.requester = parent.requester;
@@ -107,48 +119,52 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const TaskData& task) {
     return origin;
 }
 
-bool Store::Impl::currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const {
-    if (turn && !query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status IN ('policy_waiting','running')", {turn}).next())
+bool PolicyApprovals::currentPolicyApproval(Id turn, Id task, Id revision, Id generation, std::string_view operation) const {
+    if (turn &&
+        !database.query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status IN ('policy_waiting','running')", {turn}).next())
         return false;
     if (!task) return true;
     if (operation.starts_with(runOutboxOperation) || operation.starts_with(runStopOperation)) {
         const bool stopOperation = operation.starts_with(runStopOperation);
         const auto prefix = stopOperation ? runStopOperation : runOutboxOperation;
         if (stopOperation)
-            return query(R"SQL(
+            return database
+                .query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
 WHERE t.id=? AND (o.id=? OR o.stop_operation=?)
   AND o.phase IN ('started','accepted') AND o.stop_operation IS NOT NULL
   AND t.state IN ('running','waiting')
   AND coalesce(t.current_revision,0)=?
 )SQL",
-                         {task, operation.substr(prefix.size()), operation.substr(prefix.size()), revision})
+                       {task, operation.substr(prefix.size()), operation.substr(prefix.size()), revision})
                 .next();
-        return query(R"SQL(
+        return database
+            .query(R"SQL(
 SELECT 1 FROM outbox o JOIN tasks t ON t.id=o.task_id
 WHERE o.id=? AND t.id=? AND o.phase='ready'
   AND t.state IN ('running','waiting')
   AND coalesce(t.current_revision,0)=?
 )SQL",
-                     {operation.substr(prefix.size()), task, revision})
+                   {operation.substr(prefix.size()), task, revision})
             .next();
     }
-    return query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
-                 " AND coalesce(current_revision,0)=?"
-                 " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",
-                 {task, generation, revision, turn ? 1 : 0})
+    return database
+        .query("SELECT 1 FROM tasks WHERE id=? AND generation=?"
+               " AND coalesce(current_revision,0)=?"
+               " AND state NOT IN ('cancelling','cancelled') AND (? OR state<>'completed')",
+               {task, generation, revision, turn ? 1 : 0})
         .next();
 }
 
-void Store::Impl::releasePolicyTurn(Id turn) {
+void PolicyApprovals::releasePolicyTurn(Id turn) {
     if (turn)
-        exec("UPDATE conversation_turns SET status='running' WHERE message_id=? AND status='policy_waiting'"
-             " AND NOT EXISTS (SELECT 1 FROM policy_approvals WHERE turn=? AND status='pending')",
-             {turn, turn});
+        database.exec("UPDATE conversation_turns SET status='running' WHERE message_id=? AND status='policy_waiting'"
+                      " AND NOT EXISTS (SELECT 1 FROM policy_approvals WHERE turn=? AND status='pending')",
+                      {turn, turn});
 }
 
-void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
-    auto row = query("SELECT task,wait_id,resume_state FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
+void PolicyApprovals::releasePolicyTask(Id approval, std::string_view resolution) {
+    auto row = database.query("SELECT task,wait_id,resume_state FROM policy_approvals WHERE id=? AND wait_id<>0", {approval});
     if (!row.next()) return;
     auto task = taskRecords.load(row.number(0));
     const auto wait = waitStorage.currentWait(row.number(0));
@@ -156,11 +172,11 @@ void Store::Impl::releasePolicyTask(Id approval, std::string_view resolution) {
     waitStorage.clearWait(task, resolution);
     task.state = decodeTaskState(task.id, row.string(2));
     taskRecords.save(task);
-    exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
+    database.exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
 }
 
-void Store::Impl::settlePolicyApprovals(std::optional<Seconds> now) {
-    auto rows = query(R"SQL(
+void PolicyApprovals::settlePolicyApprovals(std::optional<Seconds> now) {
+    auto rows = database.query(R"SQL(
 SELECT a.id,a.turn,a.task,a.revision,a.generation,a.expires_at,a.mode_revision=s.revision,a.status,a.operation
 FROM policy_approvals a CROSS JOIN policy_settings s
 WHERE a.status IN ('pending','approved')
@@ -177,21 +193,21 @@ WHERE a.status IN ('pending','approved')
         if (stale || expired) settled.push_back({rows.number(0), rows.number(1), rows.number(2), stale ? "stale" : "expired"});
     }
     for (const auto& change : settled) {
-        exec("UPDATE policy_approvals SET status=? WHERE id=? AND status IN ('pending','approved')", {change.status, change.id});
+        database.exec("UPDATE policy_approvals SET status=? WHERE id=? AND status IN ('pending','approved')", {change.status, change.id});
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
-        Policy(*this).audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
+        Policy(remaining).audit(Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
         if (change.task) journalStorage.journal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
     }
 }
 
-void Store::Impl::consumePolicyApproval(std::string_view operation) {
-    exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'", {operation});
+void PolicyApprovals::consumePolicyApproval(std::string_view operation) {
+    database.exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'", {operation});
 }
 
-ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resource& resource, std::string_view operation,
-                                        const Json& payload, Seconds now, bool claim, ApprovalWait waitMode) {
-    Policy policy(*this);
+ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Resource& resource, std::string_view operation,
+                                            const Json& payload, Seconds now, bool claim, ApprovalWait waitMode) {
+    Policy policy(remaining);
     const auto action = actionName(resource.action);
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
@@ -201,12 +217,12 @@ ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resour
     };
     if (botLifecycle.botPaused(origin.bot)) return ApprovalGate::stale;
     if (policy.forbidden(origin.bot, resource.action, resource.target)) return deny("never");
-    auto row = query(R"SQL(
+    auto row = database.query(R"SQL(
 SELECT a.id,a.action,a.target,a.fingerprint,a.status,a.mode_revision=s.revision,a.expires_at,
        a.turn,a.task,a.revision,a.generation
 FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.operation=?
 )SQL",
-                     {operation});
+                              {operation});
     if (row.next()) {
         const auto status = row.string(4);
         if (row.string(1) != action || row.string(2) != resource.target || row.string(3) != fingerprint(payload) || !row.number(5) ||
@@ -220,15 +236,16 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.operation=?
         if (status == "denied") return ApprovalGate::denied;
         if (status == "pending") return ApprovalGate::waiting;
         if (status != "approved") return ApprovalGate::stale;
-        if (claim) exec("UPDATE policy_approvals SET status='used' WHERE id=? AND status='approved'", {row.number(0)});
+        if (claim) database.exec("UPDATE policy_approvals SET status='used' WHERE id=? AND status='approved'", {row.number(0)});
         return ApprovalGate::allow;
     }
-    if (query(R"SQL(
+    if (database
+            .query(R"SQL(
 SELECT 1 FROM policy_approvals
 WHERE bot=? AND scope=? AND action=? AND target=? AND status='denied'
 AND (anchor>=? OR requester='' OR ?='')
 )SQL",
-              {origin.bot, origin.scope, action, resource.target, origin.anchor, origin.requester})
+                   {origin.bot, origin.scope, action, resource.target, origin.anchor, origin.requester})
             .next())
         return deny("previously_denied");
     const auto result = policy.check(origin.bot, resource);
@@ -255,17 +272,17 @@ AND (anchor>=? OR requester='' OR ?='')
                                                   false, 480)
                                          .dump(-1, ' ', false, Json::error_handler_t::replace),
                                      1200);
-    exec(R"SQL(
+    database.exec(R"SQL(
 INSERT INTO policy_approvals(operation,bot,action,target,fingerprint,preview,scope,requester,anchor,turn,
  task,revision,generation,created_at,expires_at,mode_revision,card_generation)
 SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
 )SQL",
-         {operation, origin.bot, action, resource.target, fingerprint(payload), shown, origin.scope, origin.requester, origin.anchor,
-          origin.turn, origin.task, origin.revision, origin.generation, now, origin.background ? Json(now + 30 * 60) : Json(nullptr),
-          origin.generation});
-    const auto card = last();
+                  {operation, origin.bot, action, resource.target, fingerprint(payload), shown, origin.scope, origin.requester,
+                   origin.anchor, origin.turn, origin.task, origin.revision, origin.generation, now,
+                   origin.background ? Json(now + 30 * 60) : Json(nullptr), origin.generation});
+    const auto card = database.last();
     if (origin.turn && waitMode == ApprovalWait::pause)
-        exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'", {origin.turn});
+        database.exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'", {origin.turn});
     if (origin.task) {
         if (!origin.turn && (operation.starts_with("outbox/") || operation.starts_with("git/"))) {
             auto task = taskRecords.load(origin.task);
@@ -273,25 +290,25 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
                 const auto resume = taskStateName(task.state);
                 const auto waitId = waitStorage.wait(task, PolicyApprovalWait{card}, std::string(action) + " · " + resource.target);
                 taskRecords.save(task);
-                exec("UPDATE policy_approvals SET wait_id=?,resume_state=?,generation=?,card_generation=? WHERE id=?",
-                     {waitId, resume, task.generation, task.generation, card});
+                database.exec("UPDATE policy_approvals SET wait_id=?,resume_state=?,generation=?,card_generation=? WHERE id=?",
+                              {waitId, resume, task.generation, task.generation, card});
             }
         }
         journalStorage.journal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
     }
     policy.audit(Person{}, origin.bot, "approval_requested", {{"itemId", card}, {"action", action}, {"target", resource.target}});
-    if (origin.anchor) channelApprovalNotice(origin.anchor);
+    if (origin.anchor) channelStorage.channelApprovalNotice(origin.anchor);
     return ApprovalGate::waiting;
 }
 
-void Store::Impl::decidePolicyApproval(const Person& actor, const InboxTarget& item, std::string_view choice) {
-    auto row = query(R"SQL(
+void PolicyApprovals::decidePolicyApproval(const Person& actor, const InboxTarget& item, std::string_view choice) {
+    auto row = database.query(R"SQL(
 SELECT a.requester,a.action,a.target,a.status,a.turn,a.task,a.revision,a.generation,a.mode_revision=s.revision,a.wait_id,a.card_generation,a.operation
 FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
 )SQL",
-                     {item.itemId, item.botId});
+                              {item.itemId, item.botId});
     if (!row.next()) throw DecisionUnavailable{};
-    Policy policy(*this);
+    Policy policy(remaining);
     const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     const bool nextTime = choice == "allow_next_time";
@@ -305,30 +322,30 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4), row.number(5), row.number(6), row.number(7), row.string(11))))
         throw RequestChanged{};
     if (saveRule) policy.writeRule(currentActor, RuleKind::allow, *parseAction(row.string(1)), row.string(2), true, true);
-    exec("UPDATE policy_approvals SET status=? WHERE id=?", {nextTime           ? "rule_saved"
-                                                             : choice == "deny" ? "denied"
-                                                                                : "approved",
-                                                             item.itemId});
-    exec(R"SQL(
+    database.exec("UPDATE policy_approvals SET status=? WHERE id=?", {nextTime           ? "rule_saved"
+                                                                      : choice == "deny" ? "denied"
+                                                                                         : "approved",
+                                                                      item.itemId});
+    database.exec(R"SQL(
 UPDATE channel_deliveries SET next_attempt=0 WHERE state='pending'
 AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE id=?)
 )SQL",
-         {item.itemId});
+                  {item.itemId});
     releasePolicyTurn(row.number(4));
     releasePolicyTask(item.itemId, choice);
     inboxStorage.recordInboxDecision(currentActor, item, choice);
     policy.audit(currentActor, item.botId, "approval_decided", {{"itemId", item.itemId}, {"decision", choice}});
 }
 
-Json Store::Impl::policyApprovalCards(const Person& actor, std::string_view bot) {
-    auto rows = query(R"SQL(
+Json PolicyApprovals::policyApprovalCards(const Person& actor, std::string_view bot) {
+    auto rows = database.query(R"SQL(
 SELECT a.id,a.action,a.target,a.preview,a.requester,a.anchor,a.task,a.revision,a.generation,a.created_at,a.expires_at,
        a.status,a.scope,a.turn,a.wait_id,a.card_generation,a.operation,o.url
 FROM policy_approvals a LEFT JOIN git_pr_operations o ON a.scope GLOB 'git-pr/*' AND o.operation_id=substr(a.scope,8)
 WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
 )SQL",
-                      {bot});
-    const Policy policy(*this);
+                               {bot});
+    const Policy policy(remaining);
     const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     auto cards = Json::array();
@@ -358,10 +375,10 @@ WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
         if (const auto pr = rows.string(17); !pr.empty()) item["displayTarget"] = pr;
         if (!canSaveRule && !requester && !policy.allows(currentActor, Action::bot_view, bot)) continue;
         if (rows.number(5)) {
-            auto source = query("SELECT bot_id FROM messages m JOIN journal j ON j.id=m.id"
-                                " WHERE m.id=? AND j.kind='conversation_message'"
-                                " AND NOT EXISTS (SELECT 1 FROM channel_messages WHERE message_id=m.id)",
-                                {rows.number(5)});
+            auto source = database.query("SELECT bot_id FROM messages m JOIN journal j ON j.id=m.id"
+                                         " WHERE m.id=? AND j.kind='conversation_message'"
+                                         " AND NOT EXISTS (SELECT 1 FROM channel_messages WHERE message_id=m.id)",
+                                         {rows.number(5)});
             if (source.next() && policy.allows(currentActor, Action::bot_view, source.string(0))) {
                 item["conversationEventId"] = rows.number(5);
                 item["conversationBotId"] = source.string(0);

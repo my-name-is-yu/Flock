@@ -5,6 +5,7 @@
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <map>
@@ -13,14 +14,19 @@
 #include <string_view>
 
 namespace flockv0 {
+class ChannelStorage;
+class Database;
+class PolicyApprovals;
+
 class Runtime::Components::DatabaseLock {
 public:
-    DatabaseLock(Store::Impl& db, const std::function<Seconds()>& clock);
+    DatabaseLock(Database& db, const std::filesystem::path& path, PolicyApprovals& approvals, const std::function<Seconds()>& clock);
     ~DatabaseLock();
     DatabaseLock(const DatabaseLock&) = delete;
     DatabaseLock& operator=(const DatabaseLock&) = delete;
 private:
-    Store::Impl& db;
+    Database& db;
+    PolicyApprovals& approvals;
     int fd;
 };
 
@@ -28,7 +34,8 @@ class Runtime::Components::Workers {
 public:
     static constexpr unsigned batchLimit = 4;
 
-    Workers(Store::Impl& db, T3& t3, Maintenance& maintenance) : db(db), t3(t3), maintenance(maintenance) {}
+    Workers(Store::Impl& db, ChannelStorage& channelStorage, T3& t3, Maintenance& maintenance)
+        : db(db), channelStorage(channelStorage), t3(t3), maintenance(maintenance) {}
     Workers(const Workers&) = delete;
     Workers& operator=(const Workers&) = delete;
 
@@ -48,6 +55,7 @@ private:
     void collect(std::future<void>& worker, std::string_view operation);
 
     Store::Impl& db;
+    ChannelStorage& channelStorage;
     T3& t3;
     Maintenance& maintenance;
     std::stop_source shutdown;

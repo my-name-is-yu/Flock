@@ -148,7 +148,7 @@ WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
 
 Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(database.mutex);
-    remaining.settlePolicyApprovals(remaining.policyClock());
+    policyApprovals.settlePolicyApprovals(policyApprovals.now());
     Transaction snapshot(database.db, Transaction::Mode::read);
     const Policy policy(remaining);
     auto result = Json::array();
@@ -160,7 +160,7 @@ Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
     while (approvalBots.next())
         if (std::ranges::find(withCards, approvalBots.string(0)) == withCards.end()) withCards.push_back(approvalBots.string(0));
     for (const auto& id : withCards)
-        for (auto& card : remaining.policyApprovalCards(actor, id)) result.push_back(std::move(card));
+        for (auto& card : policyApprovals.policyApprovalCards(actor, id)) result.push_back(std::move(card));
     for (const auto& id : visible) {
         const auto scrub = secretStorage.redactor(id);
         const bool canDecide = policy.allows(actor, Action::bot_decide, id);
@@ -318,7 +318,7 @@ WHERE d.bot_id=? ORDER BY d.id DESC LIMIT 100
 
 void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
     std::lock_guard lock(database.mutex);
-    remaining.settlePolicyApprovals(remaining.policyClock());
+    policyApprovals.settlePolicyApprovals(policyApprovals.now());
     Transaction transaction(database.db);
     Policy policy(remaining);
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind, decision))
@@ -331,7 +331,7 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
 
     const auto kind = item.itemKind;
     if (kind == policy_approval) {
-        remaining.decidePolicyApproval(actor, item, decision);
+        policyApprovals.decidePolicyApproval(actor, item, decision);
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
         policy.fulfillSecret(actor, item.botId, item.itemId, textInput("value"));

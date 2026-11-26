@@ -144,7 +144,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message
                     authorization.commit();
                     return stop;
                 }
-                const auto gate = approveAction(policyOrigin(message), {action, target}, key, payload, ctx.clock(), false);
+                const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), {action, target}, key, payload,
+                                                                ctx.clock(), false);
                 authorization.commit();
                 if (gate == ApprovalGate::waiting) return waiting;
                 if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
@@ -155,7 +156,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(const Message
             const auto changeId = Policy(*this).applyBotChange(message.bot, actor, operation, target, name, id, step, ctx.applyBotChange,
                                                                exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(db);
-            consumePolicyApproval(key);
+            policyApprovals.consumePolicyApproval(key);
             saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
             completed.commit();
             return advance;
@@ -217,10 +218,10 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
                 suggestions.push_back(item);
             }
         }
-        if (const auto resource = channelToolPolicy(id, "reply")) {
-            const auto gate =
-                approveAction(policyOrigin(message), *resource, key,
-                              Json{{"text", reply}, {"suggestions", suggestions}, {"continuesQuestion", question != nullptr}}, clock());
+        if (const auto resource = channelStorage.channelToolPolicy(id, "reply")) {
+            const auto gate = policyApprovals.approveAction(
+                policyApprovals.policyOrigin(message), *resource, key,
+                Json{{"text", reply}, {"suggestions", suggestions}, {"continuesQuestion", question != nullptr}}, clock());
             if (gate == ApprovalGate::waiting) {
                 transaction.commit();
                 return waiting;
@@ -252,7 +253,7 @@ std::optional<Resource> Store::Impl::conversationCallResource(const Message& mes
     if (tool == "propose_memory_edit" || tool == "apply_memory_edit" || tool == "revert_memory_edit")
         return shared ? Resource{Action::shared_memory_write, field(decision.args, "docId")}
                       : Resource{Action::private_memory_write, message.bot};
-    if (!shared) return channelToolPolicy(message.id, tool);
+    if (!shared) return channelStorage.channelToolPolicy(message.id, tool);
 
     if (tool == "read_memory" || tool == "memory_history") return Resource{Action::shared_memory_read, field(decision.args, "docId")};
     return std::nullopt;
@@ -301,8 +302,8 @@ std::optional<Json> Store::Impl::applyLocalConversationCall(const Message& messa
         if (resource->action == Action::private_memory_write &&
             !Policy(*this).allows(turnActor(message), Action::bot_settings, resource->target))
             return toolFailure("Memory access denied");
-        const auto gate =
-            approveAction(policyOrigin(message), *resource, key, Json::array({decision.tool, decision.args}), now, true, waitMode);
+        const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), *resource, key,
+                                                        Json::array({decision.tool, decision.args}), now, true, waitMode);
         if (gate == ApprovalGate::waiting) return std::nullopt;
         if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
     }

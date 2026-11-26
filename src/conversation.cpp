@@ -108,7 +108,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
             p_->attachments.saveAttachments(id, attachments);
             receipt = {{"messageId", id}, {"status", "received"}};
         }
-        if (channel) p_->saveChannelMessage(receipt.at("messageId"), bot, *channel, existing.has_value());
+        if (channel) p_->channelStorage.saveChannelMessage(receipt.at("messageId"), bot, *channel, existing.has_value());
         transaction.commit();
     }
     return receipt;

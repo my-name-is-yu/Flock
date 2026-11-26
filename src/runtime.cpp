@@ -1,4 +1,5 @@
 #include "flock/runtime.hpp"
+#include "channel_storage.hpp"
 #include "runtime_lifecycle.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_outbox_dispatch.hpp"
@@ -31,6 +32,7 @@ RuntimeOptions withDefaultBotTools(RuntimeOptions options) {
 
 struct Runtime::Impl {
     Store::Impl& db;
+    ChannelStorage& channelStorage;
     Policy policy;
     Model& model;
     T3& t3;
@@ -57,13 +59,13 @@ struct Runtime::Impl {
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
-        : db(*store.p_), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)),
-          options(withDefaultBotTools(std::move(opts))),
-          maintenance(db, db.automationStorage, db.workflowStorage, options.clock, options.automationError, options.storageContention),
+        : db(*store.p_), channelStorage(db.channelStorage), policy(store.policy()), model(m), t3(adapter), soul(std::move(loader)),
+          options(withDefaultBotTools(std::move(opts))), maintenance(db, db.automationStorage, db.workflowStorage, db.policyApprovals,
+                                                                     options.clock, options.automationError, options.storageContention),
           prompts(db, db.workflowStorage), updates(db, db.journalStorage, db.taskEvents, db.taskRecords, db.waitStorage),
           questions(db, db.waitStorage), history(db, t3, policy, updates, options.sessionRead),
           reports(db, db.workflowStorage, t3, policy, updates, history, options.clock),
-          peerExchanges(db, policy, updates, reports, history, options.peers), workers(db, t3, maintenance),
+          peerExchanges(db, policy, updates, reports, history, options.peers), workers(db, channelStorage, t3, maintenance),
           runs(db, db.outboxStorage, db.workflowStorage, t3, updates, questions, reports, peerExchanges, options.clock,
                workers.stopToken()),
           dispatch(db, db.outboxStorage, db.memoryStorage, t3, policy, updates, questions, reports, runs, prompts, options.clock,
@@ -71,7 +73,8 @@ struct Runtime::Impl {
           decisions(db, updates, reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get()),
           taskTurn(db, db.memoryStorage, model, soul, options.clock, options.gitHost.get(), options.sessionRead, workers.stopToken(),
                    updates, reports, history, peerExchanges, runs, prompts, decisions),
-          taskScheduler(db, t3, updates, dispatch, options.requireT3Connection, workers.stopToken()), lock(db, options.clock) {}
+          taskScheduler(db, t3, updates, dispatch, options.requireT3Connection, workers.stopToken()),
+          lock(db, db.path, db.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(taskTurn); }
 
@@ -115,14 +118,14 @@ void Runtime::runConversations() {
     p_->maintenance.settleApprovals();
     p_->db.gitStorage.deliverGitWebhooks();
     p_->workers.wakeSessions();
-    p_->db.deliverChannels(p_->workers.stopToken());
+    p_->channelStorage.deliverChannels(p_->workers.stopToken());
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick && !p_->workers.stopToken().stop_requested(); ++i) {
         const auto pending = p_->db.pendingConversations(1, p_->options.clock());
         if (pending.empty()) break;
         p_->runTurn(pending.front().second);
     }
-    p_->db.deliverChannels(p_->workers.stopToken());
+    p_->channelStorage.deliverChannels(p_->workers.stopToken());
 }
 void Runtime::tick() {
     if (p_->workers.stopToken().stop_requested()) return;
@@ -136,7 +139,7 @@ void Runtime::tick() {
     for (const auto& work :
          p_->taskScheduler.nextBatch(Components::Workers::batchLimit, [this](const auto& job) { return p_->workers.isActive(job); }))
         p_->step(work);
-    p_->db.deliverChannels(p_->workers.stopToken());
+    p_->channelStorage.deliverChannels(p_->workers.stopToken());
 }
 void Runtime::tickConcurrent() {
     if (p_->workers.stopToken().stop_requested()) return;

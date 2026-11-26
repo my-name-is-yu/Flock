@@ -159,7 +159,7 @@ WHERE json_extract(effect,'$.kind')='message_session'
             destination->status = DestinationRunPhase::confirmation_pending;
             destination->detail =
                 "A Session message may have been accepted by T3, but Flock has no receipt to identify its Run. The task remains held.";
-            destination->retryAt = remaining.policyClock() + 5;
+            destination->retryAt = policyApprovals.now() + 5;
         }
     }
     if (waitingForSend) return false;

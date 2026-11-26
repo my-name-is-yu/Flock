@@ -1,7 +1,7 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
+#include "database.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 #include "flock/runtime.hpp"
@@ -15,11 +15,12 @@
 namespace flockv0 {
 class AutomationStorage;
 class WorkflowStorage;
+class PolicyApprovals;
 
 class Runtime::Components::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
-    Maintenance(Store::Impl&, AutomationStorage&, WorkflowStorage&, const std::function<Seconds()>& clock,
+    Maintenance(Store::Impl&, AutomationStorage&, WorkflowStorage&, PolicyApprovals&, const std::function<Seconds()>& clock,
                 const ErrorReporter& automationError, const ErrorReporter& storageContention);
 
     Seconds settleApprovals();
@@ -49,6 +50,7 @@ private:
     Store::Impl& db;
     AutomationStorage& automationStorage;
     WorkflowStorage& workflowStorage;
+    PolicyApprovals& approvals;
     const std::function<Seconds()>& clock;
     const ErrorReporter& automationError;
     const ErrorReporter& storageContention;

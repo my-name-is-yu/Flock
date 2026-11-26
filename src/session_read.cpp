@@ -249,8 +249,9 @@ public:
         if (!session || !inSessionScope(session->target, session->payload == connectedScope)) return std::nullopt;
         const auto resource = Resource::sessionRead(session->target.environmentId, session->target.threadId);
         if (policy_.forbidden(bot_, resource.action, resource.target)) return std::nullopt;
-        const auto gate = store_.approveAction(store_.policyOrigin(message_), resource, key, Json::array({call.tool, call.args}),
-                                               store_.policyClock(), false, ApprovalWait::defer);
+        const auto gate = store_.policyApprovals.approveAction(store_.policyApprovals.policyOrigin(message_), resource, key,
+                                                               Json::array({call.tool, call.args}), store_.policyApprovals.now(), false,
+                                                               ApprovalWait::defer);
         if (gate == ApprovalGate::allow) approved_ = session->target;
         tx.commit();
         return gate;
@@ -680,8 +681,9 @@ void Store::Impl::authorizeSessionHistory(const conversation::Message& message, 
 
 std::set<std::string> Store::Impl::connectedSessionEnvironments(const conversation::Message& message) {
     std::lock_guard lock(mutex);
-    if (!humanSessionRequest(message) && (message.principalSource != conversation::PrincipalSource::channel ||
-                                          message.channelScope.empty() || !channelMessageAuthorized(message.id, message.bot)))
+    if (!humanSessionRequest(message) &&
+        (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
+         !channelStorage.channelMessageAuthorized(message.id, message.bot)))
         return {};
     const auto actor = turnActor(message);
     if (!Policy(*this).allows(actor, Action::bot_settings, message.bot)) return {};

@@ -158,7 +158,7 @@ private:
             transaction.commit();
             return std::nullopt;
         }
-        const auto origin = store_.policyOrigin(message_);
+        const auto origin = store_.policyApprovals.policyOrigin(message_);
         const auto budget = store_.modelCalls.messageModelBudget(message_.id);
         std::vector<std::size_t> reserved;
         for (const auto& [slot, provider] : eligible) {
@@ -185,8 +185,8 @@ private:
         if (provider == ProviderState::routine) resource->routine = true;
         const auto key = callKey(slot);
         const auto payload = Json::array({call.tool, call.args});
-        const auto now = store_.policyClock();
-        const auto gate = store_.approveAction(origin, *resource, key, payload, now, false, ApprovalWait::defer);
+        const auto now = store_.policyApprovals.now();
+        const auto gate = store_.policyApprovals.approveAction(origin, *resource, key, payload, now, false, ApprovalWait::defer);
         if (gate == ApprovalGate::waiting) {
             approvalWaiting_ = true;
             blocked_[slot] = true;
@@ -201,7 +201,7 @@ private:
             blocked_[slot] = true;
             return false;
         }
-        store_.approveAction(origin, *resource, key, payload, now);
+        store_.policyApprovals.approveAction(origin, *resource, key, payload, now);
         return true;
     }
 
@@ -306,7 +306,7 @@ private:
             const auto& result = it->second;
             Transaction transaction(store_.db);
             saveSlot(it->first, result ? scrub.record(result->value) : Json(nullptr));
-            if (result && result->consumeApproval) store_.consumePolicyApproval(callKey(it->first));
+            if (result && result->consumeApproval) store_.policyApprovals.consumePolicyApproval(callKey(it->first));
             transaction.commit();
             it = slots.erase(it);
         }

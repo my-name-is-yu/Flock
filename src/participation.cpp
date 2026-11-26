@@ -152,7 +152,7 @@ UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1
 )SQL",
             {environment});
     db.exec("DELETE FROM t3_connected_environments WHERE environment_id=?", {environment});
-    db.settlePolicyApprovals();
+    db.policyApprovals.settlePolicyApprovals();
     const bool removeProvider = db.query("SELECT 1 FROM t3_connector WHERE "
                                          "NOT EXISTS(SELECT 1 FROM t3_connected_environments)")
                                     .next();
@@ -570,7 +570,7 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";
     exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'session_participation_stop',?,?)",
-         {policyClock(), Json{{"participationId", id}, {"state", state}}, bot});
+         {policyApprovals.now(), Json{{"participationId", id}, {"state", state}}, bot});
     const auto cutoff = last();
     exec((stopCascade + R"SQL(
 UPDATE session_participations SET state=?3, stopped_through=?2
@@ -669,8 +669,8 @@ UPDATE policy_approvals SET status='stale' WHERE status IN ('pending','approved'
                            {id, cutoff});
     std::vector<Id> released;
     while (approvals.next()) released.push_back(approvals.number(0));
-    for (const auto turn : released) releasePolicyTurn(turn);
-    settlePolicyApprovals();
+    for (const auto turn : released) policyApprovals.releasePolicyTurn(turn);
+    policyApprovals.settlePolicyApprovals();
     return {id, cutoff};
 }
 
@@ -695,7 +695,7 @@ WHERE c.state='pending' AND c.retry_at<=?3 AND (?1=0 OR (c.stop_id=?2 AND c.part
 ORDER BY c.participation_id,c.run
 )SQL")
                               .c_str(),
-                          {stop.participation, stop.cutoff, policyClock()});
+                          {stop.participation, stop.cutoff, policyApprovals.now()});
         while (rows.next()) pending.push_back({rows.number(0), {rows.string(1), rows.string(2)}, rows.string(3)});
     }
     for (const auto& item : pending) {
@@ -711,7 +711,7 @@ ORDER BY c.participation_id,c.run
         switch (outcome) {
         case QueueCancelOutcome::Retry:
             exec("UPDATE session_queue_cancellations SET retry_at=? WHERE participation_id=? AND run=?",
-                 {policyClock() + 5, item.participant, item.run});
+                 {policyApprovals.now() + 5, item.participant, item.run});
             break;
         case QueueCancelOutcome::Cancelled:
         case QueueCancelOutcome::AlreadyStarted:

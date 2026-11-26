@@ -238,7 +238,7 @@ void Policy::setMode(const Person& actor, std::string_view value) {
     if (mode() != value) {
         db_.exec("UPDATE policy_settings SET mode=?,revision=revision+1 WHERE id=1", {value});
         audit(actor, "", "mode_changed", {{"mode", value}});
-        db_.settlePolicyApprovals();
+        db_.policyApprovals.settlePolicyApprovals();
     }
     tx.commit();
 }
@@ -487,8 +487,9 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         if (db_.botLifecycle.botPaused(bot) || forbidden(bot, Action::secret_use, ref.name)) throw Conflict("Secret access denied");
         const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?", {destination}).next();
         const auto key = "secret/" + Json::array({task, operation}).dump();
-        const auto gate = db_.approveAction(db_.taskPolicyOrigin(entry), {Action::secret_use, std::string(destination), seen}, key,
-                                            Json{{"secret", ref.name}, {"destination", destination}}, db_.policyClock());
+        const auto gate = db_.policyApprovals.approveAction(
+            db_.policyApprovals.taskPolicyOrigin(entry), {Action::secret_use, std::string(destination), seen}, key,
+            Json{{"secret", ref.name}, {"destination", destination}}, db_.policyApprovals.now());
         if (gate != ApprovalGate::allow) {
             tx.commit();
             throw Conflict(gate == ApprovalGate::waiting ? "Secret use is waiting for policy approval." : std::string(approvalError(gate)));

@@ -3,11 +3,11 @@
 #include <optional>
 #include <string_view>
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 namespace flockv0 {
 
+class ChannelStorage;
 class Database;
 struct AssignedRun;
 struct CompletionEntry;
@@ -33,7 +33,7 @@ enum class JournalKind;
 
 class JournalStorage {
 public:
-    JournalStorage(Database& database, Store::Impl& remaining) : database(database), remaining(remaining) {}
+    JournalStorage(Database& database, ChannelStorage& channelStorage) : database(database), channelStorage(channelStorage) {}
 
     Id journal(Id, std::string_view kind, const Json&);
     Id journal(Id, const Wait&);
@@ -61,6 +61,6 @@ private:
     Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
 private:
     Database& database;
-    Store::Impl& remaining;
+    ChannelStorage& channelStorage;
 };
 }

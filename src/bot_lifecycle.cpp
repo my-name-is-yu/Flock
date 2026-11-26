@@ -77,9 +77,9 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
             task.cancelledByBotPause = true;
             p_->taskOperations.requestCancellation(task);
         }
-        p_->settlePolicyApprovals();
+        p_->policyApprovals.settlePolicyApprovals();
         p_->stopPausedBotParticipation(bot);
-        p_->dropPausedBotDeliveries(bot);
+        p_->channelStorage.dropPausedBotDeliveries(bot);
     } else {
         p_->automationStorage.skipDueAutomations(bot, clock());
         p_->gitStorage.skipPendingGitWebhooks(bot);
