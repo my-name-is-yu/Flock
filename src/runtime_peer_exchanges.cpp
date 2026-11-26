@@ -82,7 +82,7 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
     updates.consumeEvent(actor);
     if (!closing) actor.state = TaskState::peer_waiting;
     if (terminal(task) || task.state == TaskState::cancelling) return;
-    if (closing) db.clearWait(task, kind);
+    if (closing) db.waitStorage.clearWait(task, kind);
     updates.consumeEvent(task);
     auto event = encodeBotMessage(message);
     if (event.contains("evidence")) {
@@ -90,7 +90,7 @@ void Runtime::Components::PeerExchanges::transitionPeer(const PeerExchange& peer
         event.erase("evidence");
     }
     event["kind"] = kind;
-    db.event(task, "bot/" + message.messageId, std::move(event));
+    db.taskEvents.event(task, "bot/" + message.messageId, std::move(event));
     if (task.state != TaskState::queued) task.state = TaskState::deciding;
     updates.saveTask(task);
 }
@@ -134,7 +134,7 @@ void Runtime::Components::PeerExchanges::sendPeer(TaskData& sender, const Json& 
     peer.intake.request = note.empty() && forwarded ? forwarded->text : note;
     const auto source = work ? TaskSource::handoff : TaskSource::consultation;
     const auto id = db.submit(peer.intake, 0, nullptr, source);
-    auto recipient = db.load(id);
+    auto recipient = db.taskRecords.load(id);
     const PeerExchange exchange{action, kind, "working", "", sender.id, id};
     auto message = peerMessage(exchange, sender, recipient, "request", note, action);
     message.chargesBudget = charge;
@@ -180,7 +180,7 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
         throw Conflict("This reply does not match the open exchange and current task revision");
     const bool answering = type == "answer";
     const auto otherId = answering ? peer->recipient : peer->sender;
-    auto other = db.load(otherId);
+    auto other = db.taskRecords.load(otherId);
     if (db.botPaused(other.botId)) throw BotPaused{};
     if (terminal(other) || other.state != TaskState::peer_waiting) throw Conflict("The other Bot is no longer waiting");
     const bool closing = type == "result" || type == "failed";
@@ -192,8 +192,8 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
         task.state = TaskState::completed;
         task.peerOutcome = outcome;
         finishPeer(*peer, task, std::move(other), status, body, action);
-        db.journal(task.id, "peer_completed",
-                   {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
+        db.journalStorage.journal(task.id, "peer_completed",
+                                  {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
     } else {
         transitionPeer(*peer, task, other, peerMessage(*peer, task, other, type, body, action));
     }
@@ -228,7 +228,7 @@ void Runtime::Components::PeerExchanges::readPeerEvidence(const TaskData& task, 
     const PeerEvidenceEntry entry{event.at("exchangeId").get<std::string>(), messageId, history.readExcerpt(task.botId, req)};
     updates.change(task, [&](TaskData& current) {
         history.appendEventEvidence(current, event, encodePeerEvidence(entry));
-        db.journal(current.id, entry, decision.usage);
+        db.journalStorage.journal(current.id, entry, decision.usage);
         return true;
     });
 }
@@ -282,14 +282,14 @@ SELECT id,data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
 
 bool Runtime::Components::PeerExchanges::forwardedQuestionAnswer(const TaskData& task, const QuestionTarget& target) {
     std::lock_guard lock(db.mutex);
-    const auto event = db.currentEvent(task);
+    const auto event = db.taskEvents.currentEvent(task);
     const auto peer = db.peerExchange(task.id);
     if (!peer || peer->recipient != task.id || peer->kind != "work" || peer->phase != "working" || event.is_null() ||
         event["consumed"] == true || field(event, "kind") != "bot_answer" || field(event, "messageType") != "answer" ||
         field(event, "requestKind") != peer->kind || field(event, "exchangeId") != peer->id ||
         field(event, "messageId") != peer->lastMessage || field(event, "toBotId") != task.botId)
         return false;
-    const auto sender = db.load(peer->sender);
+    const auto sender = db.taskRecords.load(peer->sender);
     if (field(event, "fromBotId") != sender.botId) return false;
     auto original = db.query("SELECT data FROM events WHERE id=? AND task_id=?", {target.eventId, task.id});
     if (!original.next()) return false;

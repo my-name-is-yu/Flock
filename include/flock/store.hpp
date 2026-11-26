@@ -178,6 +178,9 @@ private:
                  const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
+    friend class JournalStorage;
+    friend class TaskEvents;
+    friend class WaitStorage;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

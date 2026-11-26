@@ -201,7 +201,8 @@ Store::Impl::CallOutcome Store::Impl::executeConversationReply(const Message& me
             if (continuesQuestion->get<bool>()) {
                 if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
                 const auto taskId = message.question->taskId;
-                if (const auto error = questionAnswerError(load(taskId), message, currentWait(taskId))) throw ToolError(error);
+                if (const auto error = questionAnswerError(taskRecords.load(taskId), message, waitStorage.currentWait(taskId)))
+                    throw ToolError(error);
                 question = &*message.question;
             }
         }

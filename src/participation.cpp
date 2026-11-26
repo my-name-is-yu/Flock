@@ -633,7 +633,7 @@ ORDER BY t.id
     std::vector<std::pair<Id, Id>> cancellations;
     while (children.next()) cancellations.emplace_back(children.number(0), children.number(1));
     for (const auto& [taskId, participation] : cancellations) {
-        auto task = load(taskId);
+        auto task = taskRecords.load(taskId);
         if (!terminal(task) && task.state != TaskState::cancelling) requestCancellation(task, {participation, cutoff});
     }
     auto selected = query((stopCascade + R"SQL(
@@ -655,7 +655,7 @@ WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thre
             unassigned.push_back(selected.number(0));
     }
     for (const auto taskId : unassigned) {
-        auto task = load(taskId);
+        auto task = taskRecords.load(taskId);
         requestCancellation(task);
     }
     auto approvals = query((stopCascade + R"SQL(
@@ -733,14 +733,14 @@ WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
 )SQL",
                                  {item.target.environmentId, item.target.threadId, item.run, item.participant});
                 if (run.next()) {
-                    auto task = load(run.number(0));
+                    auto task = taskRecords.load(run.number(0));
                     const auto& active = task.activeRun;
                     if (!terminal(task) && active && active->ref.runId == item.run && active->ref.threadId == item.target.threadId &&
                         active->environmentId == item.target.environmentId) {
                         // Queue cancellation confirms this Run never started.
                         task.activeRun.reset();
                         if (task.state == TaskState::cancelling)
-                            save(task);
+                            taskRecords.save(task);
                         else
                             requestCancellation(task);
                     }

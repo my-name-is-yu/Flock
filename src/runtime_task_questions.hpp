@@ -1,9 +1,6 @@
 #pragma once
 
 #include "runtime_components.hpp"
-#include "storage.hpp"
-#include "flock/store.hpp"
-#include "flock/runtime.hpp"
 #include "flock/task.hpp"
 #include "flock/task_interaction.hpp"
 
@@ -11,14 +8,18 @@
 #include <string_view>
 
 namespace flockv0 {
+class Database;
+class WaitStorage;
+
 class Runtime::Components::TaskQuestions {
 public:
-    explicit TaskQuestions(Store::Impl& db) : db(db) {}
+    TaskQuestions(Database& database, WaitStorage& waits) : database(database), waits(waits) {}
 
     void closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution = {});
     void suspendQuestion(TaskData& task);
     std::optional<DecisionCheckpoint> resumeQuestion(TaskData& task);
 private:
-    Store::Impl& db;
+    Database& database;
+    WaitStorage& waits;
 };
 }

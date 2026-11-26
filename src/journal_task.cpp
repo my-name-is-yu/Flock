@@ -1,3 +1,4 @@
+#include "journal_storage.hpp"
 #include "journal_task.hpp"
 #include "journal.hpp"
 #include "outbox_storage.hpp"
@@ -177,33 +178,33 @@ Json encodeJournalDecision(const DecisionEntry& entry) {
             {"evidence", entry.evidence},  {"usage", entry.usage}};
 }
 
-Id Store::Impl::journal(Id task, const CompletionEntry& entry) {
+Id JournalStorage::journal(Id task, const CompletionEntry& entry) {
     JournalKeys keys{.revisionId = entry.revisionId};
     if (const auto* workflow = std::get_if<WorkflowCompletion>(&entry.details); workflow && workflow->outcome)
         keys.workflowOutcome = enumName(workflowOutcomes, *workflow->outcome);
-    const auto id = writeJournal(task, JournalKind::completed, encodeCompletion(entry), keys);
-    queueChannelTaskUpdate(task, id, entry.text);
+    const auto id = database.writeJournal(task, JournalKind::completed, encodeCompletion(entry), keys);
+    remaining.queueChannelTaskUpdate(task, id, entry.text);
     return id;
 }
 
-Id Store::Impl::journal(Id task, const ToolErrorEntry& entry) {
-    return writeJournal(task, JournalKind::tool_error, encodeToolError(entry), {.feedbackEventId = entry.eventId});
+Id JournalStorage::journal(Id task, const ToolErrorEntry& entry) {
+    return database.writeJournal(task, JournalKind::tool_error, encodeToolError(entry), {.feedbackEventId = entry.eventId});
 }
 
-Id Store::Impl::journal(Id task, const DecisionEntry& entry) {
-    return writeJournal(task, JournalKind::decision, encodeJournalDecision(entry), {});
+Id JournalStorage::journal(Id task, const DecisionEntry& entry) {
+    return database.writeJournal(task, JournalKind::decision, encodeJournalDecision(entry), {});
 }
 
-Id Store::Impl::journalCancelRequested(Id task, SessionStop stop) {
-    if (!stop.participation) return writeJournal(task, JournalKind::cancel_requested, Json::object(), {});
-    return writeJournal(task, JournalKind::cancel_requested,
-                        {{"sessionParticipationId", stop.participation}, {"sessionStopId", stop.cutoff}},
-                        {.sessionParticipationId = stop.participation, .sessionStopId = stop.cutoff});
+Id JournalStorage::journalCancelRequested(Id task, SessionStop stop) {
+    if (!stop.participation) return database.writeJournal(task, JournalKind::cancel_requested, Json::object(), {});
+    return database.writeJournal(task, JournalKind::cancel_requested,
+                                 {{"sessionParticipationId", stop.participation}, {"sessionStopId", stop.cutoff}},
+                                 {.sessionParticipationId = stop.participation, .sessionStopId = stop.cutoff});
 }
 
-Id Store::Impl::journalCancelled(Id task) {
-    const auto id = writeJournal(task, JournalKind::cancelled, Json::object(), {});
-    queueChannelTaskUpdate(task, id, "The task was cancelled.");
+Id JournalStorage::journalCancelled(Id task) {
+    const auto id = database.writeJournal(task, JournalKind::cancelled, Json::object(), {});
+    remaining.queueChannelTaskUpdate(task, id, "The task was cancelled.");
     return id;
 }
 }

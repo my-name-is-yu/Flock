@@ -1,3 +1,5 @@
+#include "database.hpp"
+#include "journal_storage.hpp"
 #include "journal.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
@@ -143,20 +145,20 @@ Json encodeRunReport(const RunReportEntry& report) {
     return data;
 }
 
-Id Store::Impl::journal(Id task, const Wait& wait) {
+Id JournalStorage::journal(Id task, const Wait& wait) {
     const auto reason = wait.reason();
     auto data = encodeWaitData(wait);
     data["reason"] = waitReasonName(reason);
     data["id"] = wait.id;
     if (wait.allowance) data["allowance"] = *wait.allowance;
-    const auto id = writeJournal(task, JournalKind::waiting, data, {.waitId = wait.id, .waitReason = reason});
-    if (reason == WaitReason::user_question) queueChannelTaskUpdate(task, id, wait.text, wait.choices());
+    const auto id = database.writeJournal(task, JournalKind::waiting, data, {.waitId = wait.id, .waitReason = reason});
+    if (reason == WaitReason::user_question) remaining.queueChannelTaskUpdate(task, id, wait.text, wait.choices());
     return id;
 }
 
-Id Store::Impl::journal(Id task, const UserAnswerEntry& entry) {
-    return writeJournal(task, JournalKind::user_answer, encodeUserAnswer(entry),
-                        {.waitId = entry.waitId, .answerInConversation = entry.messageId.has_value()});
+Id JournalStorage::journal(Id task, const UserAnswerEntry& entry) {
+    return database.writeJournal(task, JournalKind::user_answer, encodeUserAnswer(entry),
+                                 {.waitId = entry.waitId, .answerInConversation = entry.messageId.has_value()});
 }
 
 OutboxInstruction decodeAcceptedInstruction(Id id, const Json& data) {
@@ -164,62 +166,69 @@ OutboxInstruction decodeAcceptedInstruction(Id id, const Json& data) {
     return decodeOutboxInstruction(data, {"journal", rowId});
 }
 
-Id Store::Impl::journal(Id task, const OutboxInstruction& entry) {
-    return writeJournal(task, JournalKind::instruction_accepted, instructionJson(entry),
-                        {.messageId = entry.messageId, .instructionStep = entry.step});
+Id JournalStorage::journal(Id task, const OutboxInstruction& entry) {
+    return database.writeJournal(task, JournalKind::instruction_accepted, instructionJson(entry),
+                                 {.messageId = entry.messageId, .instructionStep = entry.step});
 }
 
-Id Store::Impl::journal(Id task, const DeliveredInstructionEntry& entry) {
+Id JournalStorage::journal(Id task, const DeliveredInstructionEntry& entry) {
     const auto& instruction = entry.instruction;
-    return writeJournal(task, JournalKind::instruction_delivered,
-                        {{"actionId", entry.actionId},
-                         {"messageId", instruction.messageId},
-                         {"step", instruction.step},
-                         {"revisionId", entry.revisionId ? Json(*entry.revisionId) : Json(nullptr)},
-                         {"run", assignedRunJson(entry.run)},
-                         {"source", instruction.source ? sourceJson(*instruction.source) : Json(nullptr)}},
-                        {.revisionId = entry.revisionId, .messageId = instruction.messageId, .instructionStep = instruction.step});
+    return database.writeJournal(task, JournalKind::instruction_delivered,
+                                 {{"actionId", entry.actionId},
+                                  {"messageId", instruction.messageId},
+                                  {"step", instruction.step},
+                                  {"revisionId", entry.revisionId ? Json(*entry.revisionId) : Json(nullptr)},
+                                  {"run", assignedRunJson(entry.run)},
+                                  {"source", instruction.source ? sourceJson(*instruction.source) : Json(nullptr)}},
+                                 {.revisionId = entry.revisionId, .messageId = instruction.messageId, .instructionStep = instruction.step});
 }
 
-Id Store::Impl::journal(Id task, const TaskRevisionEntry& entry) {
-    return writeJournal(task, JournalKind::task_revision, {{"revisionId", entry.revisionId}, {"sourceMessageId", entry.sourceMessageId}},
-                        {.revisionId = entry.revisionId});
+Id JournalStorage::journal(Id task, const TaskRevisionEntry& entry) {
+    return database.writeJournal(task, JournalKind::task_revision,
+                                 {{"revisionId", entry.revisionId}, {"sourceMessageId", entry.sourceMessageId}},
+                                 {.revisionId = entry.revisionId});
 }
 
-Id Store::Impl::journal(Id task, const SendStartedEntry& entry) {
-    return writeJournal(task, JournalKind::send_started, {{"actionId", entry.actionId}}, {.actionId = entry.actionId});
+Id JournalStorage::journal(Id task, const SendStartedEntry& entry) {
+    return database.writeJournal(task, JournalKind::send_started, {{"actionId", entry.actionId}}, {.actionId = entry.actionId});
 }
 
-Id Store::Impl::journal(Id task, const RunReportEntry& entry) {
+Id JournalStorage::journal(Id task, const RunReportEntry& entry) {
     return writeRunReportJournal(task, JournalKind::report, entry);
 }
 
-Id Store::Impl::journalRunSettled(Id task, const SettledRunReport& entry) {
+Id JournalStorage::journalRunSettled(Id task, const SettledRunReport& entry) {
     return writeRunReportJournal(task, JournalKind::run_settled, runReportEntry(entry));
 }
 
-Id Store::Impl::writeRunReportJournal(Id task, JournalKind kind, const RunReportEntry& entry) {
-    return writeJournal(task, kind, encodeRunReport(entry),
-                        {.revisionId = entry.revisionId,
-                         .stopRequested = entry.stopRequested,
-                         .run = &entry.run,
-                         .environmentId = entry.environmentId,
-                         .resultRunId = entry.resultRunId,
-                         .status = entry.status});
+Id JournalStorage::writeRunReportJournal(Id task, JournalKind kind, const RunReportEntry& entry) {
+    return database.writeJournal(task, kind, encodeRunReport(entry),
+                                 {.revisionId = entry.revisionId,
+                                  .stopRequested = entry.stopRequested,
+                                  .run = &entry.run,
+                                  .environmentId = entry.environmentId,
+                                  .resultRunId = entry.resultRunId,
+                                  .status = entry.status});
 }
 
-Id Store::Impl::journalInterrupt(Id task, const RunStop& stop) {
+Id JournalStorage::journalInterrupt(Id task, const RunStop& stop) {
     JournalKeys keys;
     if (stop.run) {
         keys.run = &stop.run->ref;
         keys.environmentId = stop.run->environmentId;
     }
-    return writeJournal(task, JournalKind::interrupt_requested, runStopJson(stop), keys);
+    return database.writeJournal(task, JournalKind::interrupt_requested, runStopJson(stop), keys);
 }
 
-Id Store::Impl::journalInterrupt(Id task, const ConversationInterruptEntry& entry) {
-    return writeJournal(task, JournalKind::interrupt_requested,
-                        {{"messageId", entry.messageId}, {"step", entry.step}, {"run", assignedRunJson(entry.run)}},
-                        {.run = &entry.run.ref, .environmentId = entry.run.environmentId});
+Id JournalStorage::journalInterrupt(Id task, const ConversationInterruptEntry& entry) {
+    return database.writeJournal(task, JournalKind::interrupt_requested,
+                                 {{"messageId", entry.messageId}, {"step", entry.step}, {"run", assignedRunJson(entry.run)}},
+                                 {.run = &entry.run.ref, .environmentId = entry.run.environmentId});
 }
+
+Id JournalStorage::journal(Id id, std::string_view kind, const Json& data) {
+    database.exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
+    return database.last();
+}
+
 }

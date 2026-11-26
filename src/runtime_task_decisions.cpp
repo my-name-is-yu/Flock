@@ -62,10 +62,10 @@ void Runtime::Components::TaskDecisions::rejectDecision(const TaskData& task, co
             entry.arguments = decision.args;
         else
             entry.arguments = bounded(args, 2048);
-        db.journal(current.id, entry);
+        db.journalStorage.journal(current.id, entry);
         db.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {event["id"]});
         current.feedback.reset();
-        if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) db.wait(current, ModelFailureWait{}, why);
+        if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) db.waitStorage.wait(current, ModelFailureWait{}, why);
         return true;
     });
 }
@@ -75,7 +75,7 @@ void Runtime::Components::TaskDecisions::acceptReplyOrCompletion(const TaskData&
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
     const auto id = snapshot.id;
-    auto current = db.load(id);
+    auto current = db.taskRecords.load(id);
     if (current.generation != snapshot.generation || current.eventId != event["id"] ||
         current.currentRevision != snapshot.currentRevision || current.state != TaskState::deciding)
         return;
@@ -102,8 +102,9 @@ void Runtime::Components::TaskDecisions::complete(TaskData& current, const Json&
     current.pendingInstructions.clear();
     current.newSessionRequired = false;
     current.state = TaskState::completed;
-    db.journal(current.id, CompletionEntry{field(decision.args, "report"), current.currentRevision,
-                                           TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
+    db.journalStorage.journal(current.id,
+                              CompletionEntry{field(decision.args, "report"), current.currentRevision,
+                                              TaskCompletion{decision.reason, current.doneWhen, completionProvenance(current, event)}});
     updates.saveTask(current);
 }
 
@@ -214,10 +215,11 @@ void Runtime::Components::TaskDecisions::accept(const TaskData& snapshot, const 
         const auto action = actionId();
         updates.recordDecision(current, event, decision, action);
         if (tool == "ask_user") {
-            const auto waitId = db.wait(current,
-                                        ModelQuestionWait{args.value("choices", std::vector<std::string>{}), decision.reason,
-                                                          current.question ? current.question->target.requestId : std::string{}},
-                                        field(args, "question"));
+            const auto waitId =
+                db.waitStorage.wait(current,
+                                    ModelQuestionWait{args.value("choices", std::vector<std::string>{}), decision.reason,
+                                                      current.question ? current.question->target.requestId : std::string{}},
+                                    field(args, "question"));
             if (current.question) current.question->target = questionTarget(current, waitId);
         } else if (work && !current.runTargets().empty()) {
             dispatch.queueDestinations(current, action, instruction, args, event, charge);
@@ -232,7 +234,7 @@ bool Runtime::Components::TaskDecisions::continueStage(const TaskData& task) {
     if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
-        auto event = db.currentEvent(current);
+        auto event = db.taskEvents.currentEvent(current);
         if (!event.is_null() && event.at("consumed") != true && (event.at("kind") != "result" || event.contains("userAnswer")))
             return false;
         if (event.is_null()) event = Json::object();
@@ -258,7 +260,7 @@ bool Runtime::Components::TaskDecisions::resumeGitApproval(const TaskData& task)
                             {task.id, task.generation});
         if (!row.next()) return false;
         saved = row.json(0);
-        event = db.currentEvent(task);
+        event = db.taskEvents.currentEvent(task);
     }
     if (!gitHost || event.is_null()) return false;
     const TaskDecision decision{{field(saved, "tool"), saved.at("args"), field(saved, "reason")}};

@@ -119,7 +119,7 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
     while (rows.next()) {
         const auto spec = rows.json(0);
         const auto taskId = rows.number(2);
-        const auto task = taskId ? std::optional{readTask(rows, 14)} : std::nullopt;
+        const auto task = taskId ? std::optional{taskRecords.readTask(rows, 14)} : std::nullopt;
         const auto taskState = task ? std::optional{task->state} : std::nullopt;
         auto status = rows.string(1);
         if (taskState == TaskState::cancelled)
@@ -238,7 +238,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
         bool awaiting = false;
         do {
             if (const Id taskId = children.number(0)) {
-                auto task = load(taskId);
+                auto task = taskRecords.load(taskId);
                 if (!terminal(task) && task.state != TaskState::cancelling) requestCancellation(task);
                 awaiting |= !terminal(task);
             }
@@ -259,7 +259,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
                        {id, target});
     if (!stage.next()) throw Conflict("Unknown stage");
     const Id taskId = stage.number(0);
-    auto task = taskId ? std::optional{load(taskId)} : std::nullopt;
+    auto task = taskId ? std::optional{taskRecords.load(taskId)} : std::nullopt;
     if (stage.string(1) == "stopped" || (task && (task->state == TaskState::cancelled || task->state == TaskState::cancelling)))
         throw Conflict("Stage is stopping");
     if (stage.number(2) && (stage.string(1) == "failed" || (task && terminal(*task)))) {
@@ -292,7 +292,7 @@ void Store::Impl::advanceWorkflows(Seconds now) {
     while (overdue.next()) {
         const auto task = overdue.number(0);
         exec("UPDATE workflow_stages SET alerted=1 WHERE task_id=?", {task});
-        journal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
+        journalStorage.journal(task, "workflow_deadline_exceeded", {{"needsAttention", true}, {"observedAt", now}});
     }
     materializeWorkflowStages();
     tx.commit();
@@ -350,17 +350,17 @@ void Store::Impl::materializeWorkflowStages() {
              {id, stage});
         const TaskRoute route{field(routing, "environmentId"), field(routing, "projectId")};
         const auto taskId = startConversationTask(routing, bot, request, route, ready.number(4), std::nullopt, false);
-        auto task = load(taskId);
+        auto task = taskRecords.load(taskId);
         task.workflow = TaskWorkflow{id, stage, input};
         task.sourceResultRefs = std::move(sources);
         const bool hasPriorRevision = ready.number(6) != 0;
-        addRevision(task, hasPriorRevision ? scrub.text(ready.string(7)) : request,
-                    hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
+        taskRecords.addRevision(task, hasPriorRevision ? scrub.text(ready.string(7)) : request,
+                                hasPriorRevision ? scrub.text(ready.string(8)) : request, ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
             acceptInstruction(task, next.at("messageId"), next.at("step"), scrub.text(field(next, "text")), std::nullopt, nullptr);
         } else
-            save(task);
+            taskRecords.save(task);
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
              {taskId, input, id, spec.at("stageId")});
     }
@@ -431,14 +431,14 @@ bool Store::Impl::settleStageReport(TaskData& task) {
     if (task.state == TaskState::cancelling || task.replanning || !task.pendingInstructions.empty()) return true;
     exec("UPDATE workflow_stages SET status=?,output=?,result_id=? WHERE workflow_id=? AND stage_id=?",
          {ok ? "completed" : "failed", output, reportId, id, stage});
-    consumeEvent(task);
+    taskEvents.consumeEvent(task);
     task.state = TaskState::completed;
     const auto& text = reportUnavailable ? evidence.detail : evidence.report;
     std::optional<WorkflowCompletionOutcome> outcome;
     if (status == "completed" || status == "cancelled")
         outcome = ok ? WorkflowCompletionOutcome::completed : WorkflowCompletionOutcome::failed;
-    journal(task.id, CompletionEntry{ok ? text : "Workflow stage failed: " + text, task.currentRevision.value(),
-                                     WorkflowCompletion{reportSourceRun(report), outcome}});
+    journalStorage.journal(task.id, CompletionEntry{ok ? text : "Workflow stage failed: " + text, task.currentRevision.value(),
+                                                    WorkflowCompletion{reportSourceRun(report), outcome}});
     return true;
 }
 }

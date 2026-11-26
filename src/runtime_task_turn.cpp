@@ -74,15 +74,15 @@ void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& ev
     const auto attempts = event["failures"].get<int>() + 1;
     const auto why = bounded(db.secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
     db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?", {attempts, transient ? clock() + (1 << (attempts - 1)) : 0, event["id"]});
-    db.journal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
+    db.journalStorage.journal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
     task.feedback = why;
     if (cause == FailureCause::UnsupportedReasoningEffort)
-        db.wait(task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, why);
+        db.waitStorage.wait(task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, why);
     else if (attempts >= 3) {
         if (cause == FailureCause::BotNotes && db.automationBeforeDispatch(task.id))
-            db.wait(task, SimpleWaitReason::bot_notes_unavailable, why);
+            db.waitStorage.wait(task, SimpleWaitReason::bot_notes_unavailable, why);
         else
-            db.wait(task, ModelFailureWait{}, why);
+            db.waitStorage.wait(task, ModelFailureWait{}, why);
     }
 }
 
@@ -98,7 +98,7 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(
     const auto found = taskInferences.find(id);
     const auto& inference = found->second;
     Transaction transaction(db.db);
-    auto current = db.load(id);
+    auto current = db.taskRecords.load(id);
     if (!inference.usage.empty()) db.exec("UPDATE model_attempts SET usage=? WHERE id=?", {inference.usage, inference.attemptId});
     std::optional<TaskDecision> decision;
     if (current.state == TaskState::deciding && current.generation == inference.generation && current.eventId == inference.eventId &&
@@ -106,12 +106,12 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::persistTaskInference(
         if (const auto* error = std::get_if<ModelError>(&inference.outcome)) {
             const auto cause = error->code == ModelErrorCode::unsupported_reasoning_effort ? FailureCause::UnsupportedReasoningEffort
                                                                                            : FailureCause::Model;
-            recordFailure(current, db.currentEvent(current), error->what(), error->transient, cause);
+            recordFailure(current, db.taskEvents.currentEvent(current), error->what(), error->transient, cause);
             updates.saveTask(current);
         } else {
             const auto& call = std::get<ModelCall>(inference.outcome);
             decision = TaskDecision{call, inference.usage, inference.attemptId, call.rejection};
-            db.saveDecisionCheckpoint(current, {inference.generation, inference.eventId, inference.revisionId, *decision});
+            db.taskRecords.saveDecisionCheckpoint(current, {inference.generation, inference.eventId, inference.revisionId, *decision});
         }
     }
     transaction.commit();
@@ -176,14 +176,14 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         if (stop.stop_requested()) return std::nullopt;
-        auto current = db.load(task.id);
+        auto current = db.taskRecords.load(task.id);
         if (current.generation != task.generation || current.eventId != event["id"] || current.currentRevision != task.currentRevision ||
             current.state != TaskState::deciding)
             return std::nullopt;
         attempt = db.takeReservedTaskCall(event["id"]);
         if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(task.id), "task_decision", 0, task.id, event["id"]);
         if (!attempt) {
-            db.wait(current, SimpleWaitReason::model_budget, "This request used its step allowance.");
+            db.waitStorage.wait(current, SimpleWaitReason::model_budget, "This request used its step allowance.");
             updates.saveTask(current);
         }
         transaction.commit();
@@ -218,7 +218,7 @@ void Runtime::Components::TaskTurn::decide(const TaskData& task) {
     std::optional<TaskDecision> decision;
     {
         std::lock_guard lock(db.mutex);
-        event = db.currentEvent(task);
+        event = db.taskEvents.currentEvent(task);
         if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > clock()) return;
         peer = db.peerExchange(task.id);
         if (task.pendingDecision && TaskUpdates::checkpointMatches(*task.pendingDecision, task)) decision = task.pendingDecision->decision;

@@ -76,7 +76,7 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     const auto& environment = task.environmentId;
     const auto pending = std::exchange(task.pendingDestination, std::nullopt);
     if (const auto* problem = std::get_if<std::string>(&catalog)) {
-        wait(task, SimpleWaitReason::settings, *problem);
+        waitStorage.wait(task, SimpleWaitReason::settings, *problem);
         return true;
     }
     auto& projects = std::get<std::vector<T3Project>>(catalog);
@@ -84,7 +84,7 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     if (!remembered.empty() && std::ranges::find(projects, remembered, &T3Project::id) == projects.end())
         exec("DELETE FROM bot_t3_projects WHERE bot_id=? AND environment_id=? AND project_id=?", {bot, environment, remembered});
     if (projects.empty()) {
-        wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
+        waitStorage.wait(task, SimpleWaitReason::settings, "Add or unarchive a project in this T3 environment, then try again.");
         return true;
     }
     const auto id = task.id;
@@ -92,9 +92,9 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
     if (peer && peer->recipient == id && peer->kind == "work")
         std::erase_if(projects, [&](const T3Project& project) { return peerWorkRouteWouldCycle(peer->sender, environment, project.id); });
     if (projects.empty()) {
-        wait(task, SimpleWaitReason::settings,
-             "Each project in this environment would make project queues wait for one another. "
-             "Move this task to another environment or retry after related work finishes.");
+        waitStorage.wait(task, SimpleWaitReason::settings,
+                         "Each project in this environment would make project queues wait for one another. "
+                         "Move this task to another environment or retry after related work finishes.");
         return true;
     }
     auto selected = pending ? std::ranges::find(projects, pending->route.projectId, &T3Project::id) : projects.end();
@@ -109,7 +109,8 @@ bool Store::Impl::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
         return true;
     }
     if (projectQuestionOpen(bot, environment)) return false;
-    wait(task, projectQuestion(projects, secretStorage.redactor(bot)), "Which T3 project should this Bot use in this environment?");
+    waitStorage.wait(task, projectQuestion(projects, secretStorage.redactor(bot)),
+                     "Which T3 project should this Bot use in this environment?");
     return true;
 }
 }

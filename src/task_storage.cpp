@@ -1,3 +1,10 @@
+#include "conversation_storage.hpp"
+#include "journal_storage.hpp"
+#include <sqlite3.h>
+#include "task_events.hpp"
+#include "database.hpp"
+#include "wait_storage.hpp"
+#include "task_records.hpp"
 #include "task_storage.hpp"
 #include "task_context_storage.hpp"
 #include "task_interaction_storage.hpp"
@@ -521,7 +528,7 @@ const std::string& taskProjection() {
     return columns;
 }
 
-TaskData Store::Impl::readTask(const Statement& row, int col) const {
+TaskData TaskRecords::readTask(const Statement& row, int col) const {
     TaskData task;
     task.id = row.number(col++);
     task.botId = row.string(col++);
@@ -573,11 +580,11 @@ TaskData Store::Impl::readTask(const Statement& row, int col) const {
 
     RunTargets targets;
     RunResults results;
-    auto routes = query(R"SQL(
+    auto routes = database.query(R"SQL(
 SELECT name,environment_id,project_id,action_id,status,data
 FROM task_run_destinations WHERE task_id=? ORDER BY position
 )SQL",
-                        {task.id});
+                                 {task.id});
     while (routes.next()) {
         const auto result = !routes.null(3);
         const auto key = (result ? "runResults." : "runTargets.") + std::to_string(results.runs.size() + targets.size());
@@ -605,20 +612,20 @@ FROM task_run_destinations WHERE task_id=? ORDER BY position
     return decodeTaskPayload(std::move(task), row.string(col));
 }
 
-TaskData Store::Impl::load(Id id) const {
+TaskData TaskRecords::load(Id id) const {
     static const auto sql = "SELECT id," + std::string(taskColumns) + " FROM tasks WHERE id=?";
-    auto row = query(sql.c_str(), {id});
+    auto row = database.query(sql.c_str(), {id});
     if (!row.next()) throw Conflict("Task does not exist");
     return readTask(row);
 }
 
-Id Store::Impl::insertTask(const TaskData& task) {
+Id TaskRecords::insertTask(const TaskData& task) {
     static const auto sql = "INSERT INTO tasks(" + std::string(taskColumns) + ") VALUES" + std::string(taskPlaceholders);
-    exec(sql.c_str(), taskBindings(task, task.generation));
-    return last();
+    database.exec(sql.c_str(), taskBindings(task, task.generation));
+    return database.last();
 }
 
-void Store::Impl::save(TaskData& task) {
+void TaskRecords::save(TaskData& task) {
     const auto generation = task.generation + 1;
     auto values = taskBindings(task, generation);
     values.push_back(task.id);
@@ -626,16 +633,16 @@ void Store::Impl::save(TaskData& task) {
     constexpr auto insertRoute = R"SQL(
 INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_id,action_id,status,data) VALUES(?,?,?,?,?,?,?,?)
 )SQL";
-    exec("SAVEPOINT save_task");
+    database.exec("SAVEPOINT save_task");
     try {
-        exec(update.c_str(), values);
-        exec("DELETE FROM task_run_destinations WHERE task_id=?", {task.id});
+        database.exec(update.c_str(), values);
+        database.exec("DELETE FROM task_run_destinations WHERE task_id=?", {task.id});
         Id position = 0;
-        for (const auto& target : task.runTargets()) exec(insertRoute, destinationBindings(task.id, position++, target));
-        for (const auto& run : task.runResults()) exec(insertRoute, destinationBindings(task.id, position++, run));
-        exec("RELEASE save_task");
+        for (const auto& target : task.runTargets()) database.exec(insertRoute, destinationBindings(task.id, position++, target));
+        for (const auto& run : task.runResults()) database.exec(insertRoute, destinationBindings(task.id, position++, run));
+        database.exec("RELEASE save_task");
     } catch (...) {
-        sqlite3_exec(db, "ROLLBACK TO save_task; RELEASE save_task", nullptr, nullptr, nullptr);
+        sqlite3_exec(database.db, "ROLLBACK TO save_task; RELEASE save_task", nullptr, nullptr, nullptr);
         throw;
     }
     task.generation = generation;
@@ -670,43 +677,43 @@ std::optional<TaskBlocker> taskBlocker(const Statement& row) {
 }
 }
 
-std::optional<TaskBlocker> Store::Impl::queueBlocker(Id id) const {
+std::optional<TaskBlocker> TaskRecords::queueBlocker(Id id) const {
     static const auto sql = "WITH requested(id) AS (VALUES(?)), " + queueBlockers + "SELECT owner_id,bot_id,request,state FROM blockers";
-    auto row = query(sql.c_str(), {id});
+    auto row = database.query(sql.c_str(), {id});
     return row.next() ? taskBlocker(row) : std::nullopt;
 }
 
 TaskView Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
-    return p_->taskDetails(id, true);
+    return p_->taskRecords.taskDetails(id, true);
 }
 
-TaskView Store::Impl::taskDetails(Id id, bool includeBlocker) const {
+TaskView TaskRecords::taskDetails(Id id, bool includeBlocker) const {
     static const auto sql = "SELECT w.id,w.reason,w.data," + taskProjection() +
                             " FROM tasks t LEFT JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL WHERE t.id=?";
-    auto row = query(sql.c_str(), {id});
+    auto row = database.query(sql.c_str(), {id});
     if (!row.next()) throw Conflict("Task does not exist");
-    TaskView view{.task = readTask(row, 3), .wait = projectedWait(id, row, 0)};
+    TaskView view{.task = readTask(row, 3), .wait = waitStorage.projectedWait(id, row, 0)};
     if (includeBlocker && view.task.state == TaskState::queued) view.blockedBy = queueBlocker(id);
     addTaskDetails(view);
     return view;
 }
 
-void Store::Impl::addTaskDetails(TaskView& view) const {
+void TaskRecords::addTaskDetails(TaskView& view) const {
     const auto& task = view.task;
     if (auto pending = outboxStorage.outbox(task)) view.pendingAction.emplace(std::move(*pending));
-    auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
-                           " WHERE task_id=? ORDER BY number",
-                           {task.id});
+    auto revisions = database.query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
+                                    " WHERE task_id=? ORDER BY number",
+                                    {task.id});
     while (revisions.next()) {
         const auto source = revisions.number(4);
         view.revisions.push_back({revisions.number(0), revisions.number(1), revisions.string(2), revisions.string(3),
                                   source ? std::optional{source} : std::nullopt});
     }
-    auto runs = query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
-                      "outbox.revision_id,outbox.project_id FROM runs"
-                      " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid",
-                      {task.id});
+    auto runs = database.query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
+                               "outbox.revision_id,outbox.project_id FROM runs"
+                               " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid",
+                               {task.id});
     while (runs.next()) {
         const auto revision = runs.number(5);
         view.runs.push_back({.run = {{runs.string(0), runs.string(1), runs.string(2), {}},
@@ -722,8 +729,9 @@ std::vector<TaskView> Store::tasks(std::string_view bot, Id before, unsigned lim
     auto rows = p_->query(sql.c_str(), {bot, bot, before, before, std::clamp(limit, 1u, 200u)});
     std::vector<TaskView> result;
     while (rows.next()) {
-        auto& view = result.emplace_back(p_->readTask(rows, 7), p_->projectedWait(rows.number(7), rows, 4), taskBlocker(rows));
-        p_->addTaskDetails(view);
+        auto& view = result.emplace_back(p_->taskRecords.readTask(rows, 7), p_->waitStorage.projectedWait(rows.number(7), rows, 4),
+                                         taskBlocker(rows));
+        p_->taskRecords.addTaskDetails(view);
     }
     return result;
 }
@@ -733,7 +741,8 @@ std::vector<Store::ActiveTask> Store::activeTasks(std::string_view bot) const {
     static const auto sql = taskPageSql("bot_id=? AND state NOT IN ('completed','cancelled')");
     auto rows = p_->query(sql.c_str(), {bot});
     std::vector<ActiveTask> result;
-    while (rows.next()) result.push_back({p_->readTask(rows, 7), p_->projectedWait(rows.number(7), rows, 4), taskBlocker(rows)});
+    while (rows.next())
+        result.push_back({p_->taskRecords.readTask(rows, 7), p_->waitStorage.projectedWait(rows.number(7), rows, 4), taskBlocker(rows)});
     return result;
 }
 
@@ -748,14 +757,14 @@ GROUP BY bot_id,state,replanning)SQL");
     return result;
 }
 
-TaskView Store::Impl::sessionTask(Id id) const {
+TaskView TaskRecords::sessionTask(Id id) const {
     auto view = taskDetails(id, false);
-    auto reports = query(R"SQL(
+    auto reports = database.query(R"SQL(
 SELECT run_environment_id,run_thread_id,run_id,run_status,
        json_extract(data,'$.sessionCreatedAt')
 FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",
-                         {id});
+                                  {id});
     using SessionKey = std::pair<std::string, std::string>;
     using RunKey = std::tuple<std::string, std::string, std::string>;
     std::map<RunKey, std::string> statuses;
@@ -786,7 +795,7 @@ std::vector<TaskView> Store::sessionTasks(std::string_view bot, Id before, unsig
                           " ORDER BY id DESC LIMIT ?",
                           {bot, before, before, std::clamp(limit, 1u, 200u)});
     std::vector<TaskView> result;
-    while (rows.next()) result.push_back(p_->sessionTask(rows.number(0)));
+    while (rows.next()) result.push_back(p_->taskRecords.sessionTask(rows.number(0)));
     return result;
 }
 
@@ -802,8 +811,56 @@ SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
 WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",
                               {*after, through, bot});
-        while (rows.next()) tasks.push_back(p_->sessionTask(rows.number(0)));
+        while (rows.next()) tasks.push_back(p_->taskRecords.sessionTask(rows.number(0)));
     }
     return {through, std::move(tasks)};
 }
+
+Id TaskEvents::event(TaskData& task, std::string_view key, Json data) {
+    database.exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task.id, key, data});
+    if (!sqlite3_changes(database.db)) return 0;
+    const auto id = database.last();
+    task.eventId = id;
+    return id;
+}
+
+Json TaskEvents::currentEvent(const TaskData& task) const {
+    const auto id = task.eventId;
+    auto row = database.query("SELECT data,failures,retry_at,evidence,consumed FROM events WHERE id=? AND task_id=?", {id, task.id});
+    if (!row.next()) return nullptr;
+    auto result = row.json(0);
+    result["id"] = id;
+    result["failures"] = row.number(1);
+    result["retryAt"] = row.number(2);
+    result["evidence"] = row.json(3);
+    result["consumed"] = row.number(4) != 0;
+    return result;
+}
+
+void TaskEvents::consumeEvent(const TaskData& task) {
+    remaining.releaseModelCall(remaining.takeReservedTaskCall(task.eventId));
+    database.exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task.eventId, task.id});
+}
+
+Id TaskRecords::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {
+    if (!conversation_storage::hasText(intent) || !conversation_storage::hasText(doneWhen))
+        throw Conflict("Task revision needs intent and completion criteria");
+    if (source) {
+        auto row = database.query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task.botId});
+        if (!row.next()) throw Conflict("Task revision must come from this Bot's conversation");
+    }
+    database.exec(R"SQL(
+INSERT INTO task_revisions(task_id,number,intent,done_when,source_message_id)
+SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
+)SQL",
+                  {task.id, intent, doneWhen, source ? Json(source) : Json(nullptr), task.id});
+    const auto revision = database.last();
+    task.currentRevision = revision;
+    task.blocker.reset();
+    task.intent = intent;
+    task.doneWhen = doneWhen;
+    journalStorage.journal(task.id, TaskRevisionEntry{revision, source});
+    return revision;
+}
+
 }

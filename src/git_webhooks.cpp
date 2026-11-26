@@ -206,7 +206,7 @@ WHERE json_extract(result,'$.data.id')=?1
         const auto taskId = event.at("taskId").get<Id>();
         const auto bot = field(event, "botId");
         if (!canReceiveGitWebhook(bot, event)) continue;
-        const auto task = load(taskId);
+        const auto task = taskRecords.load(taskId);
         event.erase("botId");
         event.erase("deliveryId");
         event.erase("feedbackId");

@@ -210,7 +210,7 @@ WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND q.wait_reason='us
 const char* Store::Impl::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
-    const auto asked = waitAnchor(task.id, wait->id);
+    const auto asked = waitStorage.waitAnchor(task.id, wait->id);
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
@@ -220,7 +220,7 @@ const char* Store::Impl::questionAnswerError(const TaskData& task, const Message
 }
 
 Json Store::Impl::taskState(const TaskData& task, const Message& message, bool fullContract) const {
-    const auto waiting = currentWait(task.id);
+    const auto waiting = waitStorage.currentWait(task.id);
     auto wait = waiting ? waitView(*waiting) : Json(nullptr);
     if (waiting) wait["answerable"] = !questionAnswerError(task, message, waiting);
     Json view = {{"generation", task.generation},
@@ -280,7 +280,7 @@ SELECT t.id FROM tasks t LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
 )SQL",
                      {taskId, message.bot, message.channelScope, message.channelScope});
-    if (row.next()) return load(taskId);
+    if (row.next()) return taskRecords.load(taskId);
     throw ToolError("No task with taskId " + std::to_string(taskId));
 }
 
@@ -401,7 +401,7 @@ ORDER BY id DESC LIMIT 1
     };
     const auto addTask = [&](Id taskId) {
         if (!listed.insert(taskId).second) return;
-        const auto task = load(taskId);
+        const auto task = taskRecords.load(taskId);
         Json view = {{"taskId", taskId}, {"request", bounded(task.request, 800)}, {"environmentId", task.environmentId}};
         view.update(taskState(task, message));
         if (!localMachines.empty() && task.activeRun)
@@ -452,15 +452,15 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
             const auto data = row.json(2);
             replyTo = {{"messageId", message.replyTo}};
             if (kind == "waiting") {
-                const auto task = load(taskId);
-                const auto current = currentWait(taskId);
+                const auto task = taskRecords.load(taskId);
+                const auto current = waitStorage.currentWait(taskId);
                 const auto asked = decodeWaitingEntry(message.replyTo, data);
                 replyTo.update(waitView(asked));
                 replyTo.update({{"kind", "task_question"},
                                 {"taskId", taskId},
                                 {"revisionId", task.currentRevision.value_or(0)},
                                 {"generation", task.generation},
-                                {"current", current && current->id == asked.id && waitIsActionable(task)}});
+                                {"current", current && current->id == asked.id && waitStorage.waitIsActionable(task)}});
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
                 const auto decoded = taskResult(message.replyTo, kind, data);
@@ -625,11 +625,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume, selectedSession);
         if (!doneWhen.empty() || !targets.empty()) {
-            auto task = load(id);
+            auto task = taskRecords.load(id);
             if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
             if (!targets.empty()) task.destinations = std::move(targets);
             if (!commit.empty()) task.requestedCommit = std::move(commit);
-            save(task);
+            taskRecords.save(task);
         }
         Json receipt{{"ok", true}, {"effect", "started"}, {"taskId", id}};
         if (selectedSession) receipt["existingSession"] = true;
@@ -664,7 +664,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto waitId = identifier(args, "waitId", true);
         const auto task = ownTask(taskId, message);
         const auto answer = text(args, "text", limits::messages::maxWaitAnswerBytes, true);
-        const auto wait = currentWait(taskId);
+        const auto wait = waitStorage.currentWait(taskId);
         if (!wait || wait->id != waitId)
             throw ToolError("That question is no longer open", {{"taskId", task.id}, {"current", taskState(task, message)}});
         if (const auto error = questionAnswerError(task, message, wait))
@@ -693,7 +693,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         expectGeneration(task);
         active(task);
         operate(turnActor(message), TaskTarget::from(task, 0), "cancel", Json::object());
-        const auto state = load(task.id).state;
+        const auto state = taskRecords.load(task.id).state;
         return {{"ok", true}, {"effect", state == TaskState::cancelled ? "cancelled" : "cancelling"}, {"taskId", task.id}};
     }
     if (tool == "read_result") {
@@ -753,7 +753,7 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
                 break;
             }
             last = rows.number(0);
-            found.push_back(viewTask(load(last), false));
+            found.push_back(viewTask(taskRecords.load(last), false));
         }
         Json response = {{"ok", true}, {"tasks", std::move(found)}};
         if (more) response["before"] = last;
@@ -813,7 +813,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         for (const auto& action : actions) {
             text += "\n- " + field(action, "effect") + ": ";
             if (action.contains("taskId"))
-                text += requestName(load(action.at("taskId")));
+                text += requestName(taskRecords.load(action.at("taskId")));
             else if (action.contains("workflowId")) {
                 auto workflow = query("SELECT request FROM workflows WHERE id=?", {action.at("workflowId")});
                 workflow.next();
@@ -835,7 +835,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .actions = std::move(actions),
                                        .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
-    const auto replyId = journalConversationReply(linked, message.bot, entry);
+    const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
     if (!message.channelScope.empty() && channelMessageAuthorized(message.id, message.bot))
         queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});

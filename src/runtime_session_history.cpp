@@ -106,7 +106,7 @@ void Runtime::Components::SessionHistory::appendEventEvidence(const TaskData& ta
 void Runtime::Components::SessionHistory::recordSessionRead(const TaskData& task, const Json& event, Json entry, const Json& usage) {
     appendEventEvidence(task, event, entry);
     if (!usage.empty()) entry["usage"] = usage;
-    db.journal(task.id, "session_read", entry);
+    db.journalStorage.journal(task.id, "session_read", entry);
 }
 
 Runtime::Components::SessionHistory::PrefillResult Runtime::Components::SessionHistory::prefillHistory(const TaskData& task,

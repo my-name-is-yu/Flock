@@ -127,16 +127,16 @@ bool Store::Impl::recordDestinationReport(TaskData& task, DestinationRun& run, c
     run.retryAt.reset();
     run.stopRetryAt.reset();
     run.evidenceAttempts = 0;
-    const auto wait = currentWait(task.id);
+    const auto wait = waitStorage.currentWait(task.id);
     const auto* deadline = wait ? wait->verification() : nullptr;
     if (deadline && deadline->actionId == run.actionId) {
-        clearWait(task, "run_finished");
+        waitStorage.clearWait(task, "run_finished");
         task.state = TaskState::running;
     }
     auto priorReport = query("SELECT 1 FROM journal WHERE task_id=? AND kind='report'"
                              " AND run_environment_id=? AND run_thread_id=? AND run_id=? AND revision_id IS ? LIMIT 1",
                              {task.id, run.environmentId, ref.threadId, ref.runId, revision});
-    if (!priorReport.next()) journal(task.id, entry);
+    if (!priorReport.next()) journalStorage.journal(task.id, entry);
     if (advanceDestinationSessionMessageRun(task, run)) return false;
     auto pendingSends = query(R"SQL(
 SELECT json_extract(effect,'$.actionId') FROM conversation_steps
@@ -169,8 +169,8 @@ WHERE json_extract(effect,'$.kind')='message_session'
     task.state = TaskState::completed;
     auto summary = std::to_string(count) + " of " + std::to_string(runs.size()) + " T3 Runs completed";
     if (task.requestedCommit) summary += " with a verified commit";
-    journal(task.id, CompletionEntry{std::move(summary) + ".", task.currentRevision,
-                                     FanoutCompletion{task.doneWhen, outcome, task.requestedCommit}});
+    journalStorage.journal(task.id, CompletionEntry{std::move(summary) + ".", task.currentRevision,
+                                                    FanoutCompletion{task.doneWhen, outcome, task.requestedCommit}});
     return true;
 }
 }

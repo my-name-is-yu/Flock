@@ -1,5 +1,11 @@
 #pragma once
+#include "task_interaction_storage.hpp"
 #include "database.hpp"
+#include "json_fields.hpp"
+#include "wait_storage.hpp"
+#include "task_records.hpp"
+#include "task_events.hpp"
+#include "journal_storage.hpp"
 #include "attachment_storage.hpp"
 #include "outbox_storage.hpp"
 #include "run_ref_storage.hpp"
@@ -70,7 +76,6 @@ struct ModelBudget {
     Id initialLimit;
 };
 
-std::string field(const Json&, std::string_view);
 inline bool hasDestinationSelector(const Json& args) {
     return args.is_object() && (args.contains("destination") || args.contains("environmentId") || args.contains("projectId") ||
                                 args.contains("gatewayEnvironmentId"));
@@ -80,7 +85,6 @@ std::string conversationGatewayEnvironmentId(const Json& alias);
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name = {});
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
-QuestionTarget questionTarget(const TaskData&, Id waitId = 0);
 std::string effectiveDoneWhen(const TaskData& task);
 DestinationRun& destinationRun(TaskData& task, std::string_view action);
 bool destinationStopRequested(const std::optional<Outbox>& action, const RunRef&);
@@ -186,11 +190,15 @@ struct GitPrKey {
 };
 
 struct Store::Impl : Database {
+    OutboxStorage outboxStorage{*this};
+    JournalStorage journalStorage{*this, *this};
+    TaskEvents taskEvents{*this, *this};
+    WaitStorage waitStorage{*this, *this, journalStorage, outboxStorage};
+    TaskRecords taskRecords{*this, journalStorage, outboxStorage, waitStorage};
     const std::filesystem::path path;
     const MemorySeed memorySeed;
     const AutomationModelResolver automationModel;
     SecretStorage secretStorage{*this, path.parent_path()};
-    OutboxStorage outboxStorage{*this};
     AttachmentStorage attachments{*this};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
@@ -325,11 +333,6 @@ struct Store::Impl : Database {
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
-    TaskData load(Id) const;
-    TaskView taskDetails(Id, bool includeBlocker) const;
-    TaskView sessionTask(Id) const;
-    void addTaskDetails(TaskView&) const;
-    std::optional<TaskBlocker> queueBlocker(Id) const;
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
@@ -351,7 +354,6 @@ struct Store::Impl : Database {
     std::map<std::pair<Id, int>, std::map<std::size_t, ToolCallResult>> unpersistedToolResults;
     ModelBudget messageModelBudget(Id messageId) const;
     ModelBudget taskModelBudget(Id taskId) const;
-    Id waitAllowance(Id taskId, WaitReason reason) const;
     Id reserveModelCall(const ModelBudget&, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
     Id takeReservedTaskCall(Id event);
@@ -443,12 +445,7 @@ struct Store::Impl : Database {
                              const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr);
     bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
                            const TaskChange* change);
-    Id addRevision(TaskData&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
-    TaskData readTask(const Statement&, int col = 0) const;
-    Id insertTask(const TaskData&);
-    void save(TaskData&);
-    void saveDecisionCheckpoint(TaskData&, DecisionCheckpoint);
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
@@ -470,48 +467,13 @@ struct Store::Impl : Database {
     Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, TaskSource sourceKind = TaskSource::request,
               std::optional<TaskTrigger> trigger = {}, std::optional<std::string> requester = {});
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&, Id sourceMessage = 0, std::optional<InboxKind> = {});
-    bool waitIsActionable(const TaskData& task) const;
-    Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
     bool recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const;
     bool replanReady(const TaskData& task) const;
     void peerMessage(const PeerExchange&, const BotMessageEntry&, std::optional<Id> forwardedSource);
     void requestCancellation(TaskData&, SessionStop stop = {});
-    Id journal(Id, std::string_view kind, const Json&);
-    Id journal(Id, const Wait&);
-    Id journal(Id, const CompletionEntry&);
-    Id journal(Id, const ToolErrorEntry&);
-    Id journal(Id, const DecisionEntry&);
-    Id journalCancelRequested(Id, SessionStop);
-    Id journalCancelled(Id);
-    Id journal(Id, const UserAnswerEntry&);
-    Id journal(Id, const OutboxInstruction&);
-    Id journal(Id, const DeliveredInstructionEntry&);
-    Id journal(Id, const TaskRevisionEntry&);
-    Id journal(Id, const SendStartedEntry&);
-    Id journal(Id, const RunReportEntry&);
-    Id journal(Id, const PeerEvidenceEntry&, const Json& usage);
-    Id journal(Id, const PrReviewRequestedEntry&);
-    Id journal(Id, const GitPrFollowupEntry&);
-    Id journalRunSettled(Id, const SettledRunReport&);
-    Id journalConversationMessage(std::string_view bot, const ConversationMessageEntry&);
-    Id journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry&);
-    void journalConversationBudgetApproved(Id message, Id pause, std::string_view bot);
-    Id journalInterrupt(Id, const RunStop&);
-    Id journalInterrupt(Id, const ConversationInterruptEntry&);
-    Id event(TaskData&, std::string_view key, Json data);
-    Json currentEvent(const TaskData&) const;
-    Id wait(TaskData&, Wait);
-    Id wait(TaskData&, WaitDetails, std::string text, std::optional<WaitRun> run = {});
-    std::optional<Wait> currentWait(Id task) const;
-    std::optional<Wait> projectedWait(Id task, const Statement&, int col) const;
-    void clearWait(TaskData&, std::string_view resolution);
     bool recordDestinationReport(TaskData& task, DestinationRun& run, const Observation&);
-    void consumeEvent(const TaskData&);
-    void unlockQuestion(TaskData&, std::string_view reason);
-private:
-    Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
 };
 
 std::optional<InboxKind> inboxWaitKind(WaitReason reason);

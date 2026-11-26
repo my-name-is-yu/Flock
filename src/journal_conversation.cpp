@@ -1,7 +1,8 @@
+#include "database.hpp"
+#include "journal_storage.hpp"
 #include "journal_conversation.hpp"
 #include "journal.hpp"
 #include "record_decode.hpp"
-#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 
@@ -99,16 +100,16 @@ ConversationReplyEntry decodeConversationReply(Id id, const Json& data) {
     });
 }
 
-Id Store::Impl::journalConversationMessage(std::string_view bot, const ConversationMessageEntry& entry) {
+Id JournalStorage::journalConversationMessage(std::string_view bot, const ConversationMessageEntry& entry) {
     auto data = Json::object();
     if (const auto* invite = std::get_if<ConversationInvitationEntry>(&entry.detail))
         data["sessionInvitation"] = encodeConversationInvitation(*invite);
     else if (const auto* wake = std::get_if<ConversationWakeEntry>(&entry.detail))
         data["sessionWake"] = encodeConversationWake(*wake);
-    return writeJournal(std::nullopt, JournalKind::conversation_message, data, {}, bot);
+    return database.writeJournal(std::nullopt, JournalKind::conversation_message, data, {}, bot);
 }
 
-Id Store::Impl::journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry& entry) {
+Id JournalStorage::journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry& entry) {
     const auto status = enumName(replyStatuses, entry.status);
     Json data{{"replyToMessageId", entry.replyToMessageId}, {"text", entry.text}, {"status", status}};
     std::optional<std::string_view> route;
@@ -117,20 +118,20 @@ Id Store::Impl::journalConversationReply(std::optional<Id> task, std::string_vie
     if (!entry.actions.is_null()) data["actions"] = entry.actions;
     if (!entry.suggestions.is_null()) data["suggestions"] = entry.suggestions;
     if (!entry.artifacts.is_null()) data["artifacts"] = entry.artifacts;
-    const auto reply = writeJournal(task, JournalKind::conversation_reply, data,
-                                    {.replyToMessageId = entry.replyToMessageId,
-                                     .taskQuestionMessageId = entry.taskQuestionMessageId,
-                                     .conversationRoute = route,
-                                     .conversationStatus = status},
-                                    bot);
-    exec("UPDATE journal SET data=json_set(data,'$.messageId',id) WHERE id=?", {reply});
+    const auto reply = database.writeJournal(task, JournalKind::conversation_reply, data,
+                                             {.replyToMessageId = entry.replyToMessageId,
+                                              .taskQuestionMessageId = entry.taskQuestionMessageId,
+                                              .conversationRoute = route,
+                                              .conversationStatus = status},
+                                             bot);
+    database.exec("UPDATE journal SET data=json_set(data,'$.messageId',id) WHERE id=?", {reply});
     return reply;
 }
 
-void Store::Impl::journalConversationBudgetApproved(Id message, Id pause, std::string_view bot) {
+void JournalStorage::journalConversationBudgetApproved(Id message, Id pause, std::string_view bot) {
     const auto status = enumName(replyStatuses, ConversationReplyStatus::done);
-    exec("UPDATE journal SET conversation_status=?1,data=json_set(data,'$.status',?1) WHERE id=?2", {status, pause});
-    writeJournal(std::nullopt, JournalKind::conversation_budget_approved, {{"messageId", message}, {"waitMessageId", pause}},
-                 {.messageId = message, .waitMessageId = pause}, bot);
+    database.exec("UPDATE journal SET conversation_status=?1,data=json_set(data,'$.status',?1) WHERE id=?2", {status, pause});
+    database.writeJournal(std::nullopt, JournalKind::conversation_budget_approved, {{"messageId", message}, {"waitMessageId", pause}},
+                          {.messageId = message, .waitMessageId = pause}, bot);
 }
 }
