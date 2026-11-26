@@ -1,3 +1,4 @@
+import '/tooltip.js';
 import { accentColor } from '/avatars.js';
 import { listenForBrowserNotifications } from '/browser-notifications.mjs';
 import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';

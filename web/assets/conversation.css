@@ -146,36 +146,8 @@
 }
 .profile-caption:has(.needs-you:not([hidden])):active { transform: scale(.97); }
 .profile-caption:has(.needs-you:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
-.needs-you-tooltip {
-  position: absolute; top: calc(100% + .38rem); left: 50%; translate: -50% -2px;
-  display: inline-flex; align-items: center; gap: .32rem; white-space: nowrap;
-  padding: .26rem .5rem; border-radius: 9px;
-  background: light-dark(#1f1e24, #262629);
-  border: 1px solid light-dark(rgb(0 0 0 / .12), rgb(255 255 255 / .09));
-  color: light-dark(#ffffff, #ececec);
-  font-size: .74rem; font-weight: 500; letter-spacing: .01em;
-  box-shadow: 0 8px 22px rgb(0 0 0 / .36);
-  opacity: 0; pointer-events: none;
-  transition: opacity .12s ease-out, translate .12s ease-out;
-}
-.needs-you-tooltip kbd {
-  display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 .24rem;
-  border-radius: 5px;
-  background: light-dark(rgb(255 255 255 / .14), rgb(255 255 255 / .08));
-  border: 1px solid light-dark(rgb(255 255 255 / .12), rgb(255 255 255 / .07));
-  color: light-dark(rgb(255 255 255 / .86), var(--text-2));
-  font-family: inherit; font-size: .68rem; font-weight: 500; line-height: 1;
-}
-@media (hover: hover) and (pointer: fine) {
-  .profile-identity:has(.needs-you:not([hidden])):has(.profile-caption:hover) .needs-you-tooltip {
-    opacity: 1; translate: -50% 0; transition-delay: .12s;
-  }
-}
-.profile-identity:has(.needs-you:focus-visible) .needs-you-tooltip { opacity: 1; translate: -50% 0; }
 .main:has(.decision-layer:not([hidden])) .profile-caption,
-.main:has(.decision-layer:not([hidden])) .needs-you-tooltip,
-.main.decision-morphing .profile-caption,
-.main.decision-morphing .needs-you-tooltip { opacity: 0; transition: none; }
+.main.decision-morphing .profile-caption { opacity: 0; transition: none; }
 .main:has(.decision-layer:not([hidden])) .profile-caption .needs-you { visibility: hidden; }
 .peer-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .peer-faces { display: flex; flex: none; justify-content: center; }

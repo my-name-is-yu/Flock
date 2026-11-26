@@ -106,7 +106,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     <section class="studio-start" id="studio-start" hidden>
       <header class="studio-head">
         <h2 id="studio-start-title">New Bot</h2>
-        <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
+        <button type="button" class="icon-button studio-close" data-close aria-label="Close" data-tooltip="Close" data-shortcut="Esc">${uiIcon('close')}</button>
       </header>
       <div class="studio-start-list">
         <button type="button" class="studio-start-option" data-preset="custom">
@@ -124,14 +124,14 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         <div class="studio-hero-avatar" id="studio-hero-avatar"></div>
         <div class="studio-name">
           <input class="studio-name-input" id="studio-bot-name" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Bot name" aria-label="Name">
-          <button type="button" id="studio-random-name" class="icon-button studio-name-random" aria-label="Random name" title="Random name">${uiIcon('dice')}</button>
+          <button type="button" id="studio-random-name" class="icon-button studio-name-random" aria-label="Random name" data-tooltip="Random name">${uiIcon('dice')}</button>
         </div>
       </div>
 
       <div class="studio-panel">
         <header class="studio-head">
           <h2 id="studio-title">New Bot</h2>
-          <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
+          <button type="button" class="icon-button studio-close" data-close aria-label="Close" data-tooltip="Close" data-shortcut="Esc">${uiIcon('close')}</button>
         </header>
 
         <div class="studio-bar">
@@ -140,7 +140,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
             <button type="button" data-kind="icon" data-label="Icons" aria-pressed="false">Icons</button>
             <button type="button" data-kind="upload" data-label="Upload" aria-pressed="false">Upload</button>
           </div>
-          <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" title="Shuffle appearance">${uiIcon('shuffle')}</button>
+          <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" data-tooltip="Shuffle appearance">${uiIcon('shuffle')}</button>
         </div>
 
         <div class="studio-gallery" id="studio-gallery" role="group" aria-label="Avatar choices"></div>
@@ -211,7 +211,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     swatch.type = 'button';
     swatch.className = 'studio-swatch';
     swatch.dataset.color = hex;
-    swatch.title = label;
+    swatch.dataset.tooltip = label;
     swatch.setAttribute('aria-label', label);
     swatch.style.setProperty('--swatch', hex);
     els.colors.append(swatch);
@@ -449,7 +449,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           btn.type = 'button';
           btn.className = 'studio-choice';
           btn.dataset.value = value;
-          btn.title = label;
+          btn.dataset.tooltip = label;
           btn.setAttribute('aria-label', label);
           const mini = document.createElement('span');
           mini.className = 'studio-mini';

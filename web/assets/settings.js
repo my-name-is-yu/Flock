@@ -1,3 +1,4 @@
+import '/tooltip.js';
 import { actionLabel, actionLabels } from '/action-labels.mjs';
 import {
   browserNotificationsEnabled, listenForBrowserNotifications, notificationPermission, onNotificationPreferenceChange,
