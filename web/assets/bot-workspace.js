@@ -18,8 +18,8 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     <dl class="settings-workspace-facts" hidden>
       <dt>Model</dt><dd></dd>
       <dt>Reasoning effort</dt><dd></dd>
-      <dt>Environment</dt><dd></dd>
-      <dt>Project</dt><dd></dd>
+      <dt>T3 environment</dt><dd></dd>
+      <dt>T3 project</dt><dd></dd>
     </dl>
     <form class="settings-workspace-form" hidden>
       <div class="settings-workspace-model">
@@ -31,14 +31,14 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
         </label>
       </div>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
-      <label class="settings-workspace-field">Environment
+      <label class="settings-workspace-field">T3 environment
         <input name="environmentId" list="settings-t3-environments" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
       <datalist id="settings-t3-environments"></datalist>
-      <label class="settings-workspace-field">Project
+      <label class="settings-workspace-field">T3 project
         <input name="projectId" maxlength="256" autocomplete="off" spellcheck="false">
       </label>
-      <p class="settings-workspace-hint">Set both T3 IDs for new sessions and scheduled work. You can leave a default destination unset.</p>
+      <p class="settings-workspace-hint">Where this Bot’s work runs. Copy both IDs from T3, or leave them empty and the Bot picks or asks.</p>
       <div class="settings-card-actions">
         <button type="button" class="dialog-button quiet">Cancel</button>
         <button type="submit" class="dialog-button primary">Save</button>
@@ -77,8 +77,10 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     missing.hidden = !!draft || configured;
     modelText.textContent = catalogModel(workspace.model)?.displayName ?? workspace.model;
     effortText.textContent = effortLabel(workspace.reasoningEffort);
-    environmentText.textContent = workspace.environmentId || 'Not set';
-    projectText.textContent = workspace.projectId || 'Not set';
+    for (const [text, value] of [[environmentText, workspace.environmentId], [projectText, workspace.projectId]]) {
+      text.textContent = value || 'Chosen per request';
+      text.classList.toggle('unset', !value);
+    }
   }
   function update({ model = '', reasoningEffort = '', environmentId = '', projectId = '' }, canEdit = editable) {
     const current = { model, reasoningEffort, environmentId, projectId };
