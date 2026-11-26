@@ -647,8 +647,8 @@ function editSystem(key, state) {
       : 'Bots can read the T3 threads of their own work when a report isn’t enough. Changes apply after restart.', form);
 }
 
-function systemValues(title, current, next) {
-  if (String(current) === String(next)) return rowLabel(title, String(current));
+function systemValues(title, current, next, pending) {
+  if (!pending) return rowLabel(title, String(current));
   const values = element('span', '', 'system-values');
   values.append(String(current), ' → ', element('b', String(next)), ' after restart');
   return rowLabel(title, values);
@@ -660,18 +660,16 @@ function renderSystem(state) {
     row('system', rowLabel('Server settings unavailable', 'Sign in as an installation administrator to manage this server.'));
     return;
   }
-  const {active, next, saved, overrides, restartRequired} = state;
-  const nextPort = next ? next.port : overrides.port ? active.port : saved.port;
-  const nextRead = next ? next.sessionRead : overrides.sessionRead ? active.sessionRead : saved.sessionRead;
-  const port = row('system', systemValues('Web port', active.port || 'Automatic', nextPort || 'Automatic'));
+  const {active, next, overrides, pending} = state;
+  const port = row('system', systemValues('Web port', active.port || 'Automatic', next.port || 'Automatic', pending.port));
   if (overrides.port) port.append(statusBadge('Set at launch'));
   else actionButton(port, 'Change', () => editSystem('port', state)).setAttribute('aria-label', 'Change Web port');
   const sessionRead = row('system', systemValues('Read T3 threads', sessionReadOptions[active.sessionRead],
-    sessionReadOptions[nextRead] ?? sessionReadOptions.off));
+    sessionReadOptions[next.sessionRead], pending.sessionRead));
   if (overrides.sessionRead) sessionRead.append(statusBadge('Set at launch'));
   else actionButton(sessionRead, 'Change', () => editSystem('sessionRead', state))
     .setAttribute('aria-label', 'Change when Bots read T3 threads');
-  if (restartRequired) restartNotice('system');
+  if (pending.port || pending.sessionRead) restartNotice('system');
 }
 
 export function showInstallationUnavailable() {
