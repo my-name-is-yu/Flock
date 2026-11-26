@@ -442,14 +442,19 @@ std::optional<FormattedBareUrl> formattedBareUrl(cmark_node* node, const std::ve
     if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
     const auto raw = lines[line - 1];
     if (auto span = formattedBareUrlAt(node, raw, 0)) return span;
-    if (!paragraph || line == cmark_node_get_start_line(paragraph)) return std::nullopt;
-    const auto indentation = raw.find_first_not_of(" \t");
-    if (indentation == raw.npos) return std::nullopt;
-    if (indentation > 0)
-        if (auto span = formattedBareUrlAt(node, raw, static_cast<int>(indentation))) return span;
-    const int paragraphIndent = cmark_node_get_start_column(paragraph) - 1;
-    if (paragraphIndent <= 0 || paragraphIndent == static_cast<int>(indentation)) return std::nullopt;
-    return formattedBareUrlAt(node, raw, static_cast<int>(indentation) - paragraphIndent);
+    const auto literal = value(cmark_node_get_literal(node));
+    for (const auto url : bareUrls(raw, 0, raw.size())) {
+        const auto sourceStart = static_cast<int>(url.data() - raw.data());
+        for (auto marker = url.find_first_of("*_"); marker != url.npos; marker = url.find_first_of("*_", marker + 1)) {
+            const auto prefix = url.substr(0, marker);
+            const bool matches = prefix.find('&') == prefix.npos ? literal.ends_with(prefix) : literal.ends_with(decodeBareUrl(prefix));
+            if (!matches) continue;
+            const int adjustment = sourceStart + static_cast<int>(marker) - cmark_node_get_end_column(node);
+            if (adjustment != 0)
+                if (auto span = formattedBareUrlAt(node, raw, adjustment)) return span;
+        }
+    }
+    return std::nullopt;
 }
 
 void promoteBareLinks(cmark_node* node, const std::vector<std::string_view>& lines) {

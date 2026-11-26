@@ -324,6 +324,11 @@ void bareUrls() {
               "<p><a href=\"https://example.com/\">https://example.com/</a>"
               "<strong><a href=\"https://docs.example\">docs</a></strong></p>",
           "A bare link swallowed a link inside adjacent formatting");
+    for (const auto prefix : {"> See\n ", "> See\n>  "})
+        check(
+            markdown::toHtml(std::string(prefix) + "https://example.com/__init__.py") ==
+                "<blockquote><p>See<br>\n<a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a></p></blockquote>",
+            "A space before a quoted continuation changed the bare link target");
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
