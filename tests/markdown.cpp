@@ -281,6 +281,21 @@ void bareUrls() {
     check(markdown::toHtml("xhttps://example.com <https://example.com/&q> &amp;") ==
               "<p>xhttps://example.com <a href=\"https://example.com/&amp;q\">https://example.com/&amp;q</a> &amp;</p>",
           "autolinking matched inside a word or double-linked an explicit autolink");
+    check(markdown::toHtml("See https://example.com/__init__.py and https://example.com/?q=*test*。") ==
+              "<p>See <a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a> and "
+              "<a href=\"https://example.com/?q=*test*\">https://example.com/?q=*test*</a>。</p>",
+          "Markdown syntax or Japanese punctuation changed a bare link destination");
+    check(markdown::toHtml("“https://example.com/資料” （https://example.com/report）") ==
+              "<p>“<a href=\"https://example.com/資料\">https://example.com/資料</a>” "
+              "（<a href=\"https://example.com/report\">https://example.com/report</a>）</p>",
+          "Quotation marks or full-width parentheses entered a bare link");
+    check(markdown::toHtml("> See **https://example.com/__init__.py**") ==
+              "<blockquote><p>See <strong><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a>"
+              "</strong></p></blockquote>",
+          "Linking a bare URL broke the enclosing Markdown");
+    const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
+    check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
+          "A bare URL exposed an encoded protected value");
 }
 
 int main() {

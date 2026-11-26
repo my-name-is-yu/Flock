@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace flockv0::markdown {
 namespace {
@@ -253,46 +254,97 @@ std::string link(cmark_node* node, Target target, unsigned depth) {
     return label + "（" + destination + "）";
 }
 
+std::string_view bareUrlAt(std::string_view text) {
+    if (!text.starts_with("http://") && !text.starts_with("https://")) return {};
+    auto end =
+        std::ranges::find_if(text, [](unsigned char ch) { return std::isspace(ch) || ch == '<' || ch == '>' || ch == '"' || ch == '`'; });
+    auto url = text.substr(0, static_cast<std::size_t>(end - text.begin()));
+    const auto unmatched = std::ranges::count(url, ')') - std::ranges::count(url, '(');
+    auto extraParentheses = unmatched;
+    while (!url.empty()) {
+        if (std::string_view(".,;:!?'").find(url.back()) != std::string_view::npos) {
+            url.remove_suffix(1);
+        } else if (url.back() == ')' && extraParentheses > 0) {
+            url.remove_suffix(1);
+            --extraParentheses;
+        } else {
+            static constexpr std::string_view closingPunctuation[] = {"。", "、", "，", "．", "！", "？", "）",
+                                                                      "］", "」", "』", "”",  "’",  "】"};
+            const auto suffix = std::ranges::find_if(closingPunctuation, [&](auto mark) { return url.ends_with(mark); });
+            if (suffix == std::end(closingPunctuation)) break;
+            url.remove_suffix(suffix->size());
+        }
+    }
+    return safeUrl(url) ? url : std::string_view{};
+}
+
+std::vector<std::string_view> sourceLines(std::string_view source) {
+    std::vector<std::string_view> lines;
+    for (;;) {
+        const auto end = source.find_first_of("\r\n");
+        lines.push_back(source.substr(0, end));
+        if (end == source.npos) return lines;
+        source.remove_prefix(end + (source.substr(end).starts_with("\r\n") ? 2 : 1));
+    }
+}
+
+std::size_t inlineContentEnd(cmark_node* node, int line, std::size_t lineLength) {
+    for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent)) {
+        const auto type = cmark_node_get_type(parent);
+        if (type != CMARK_NODE_EMPH && type != CMARK_NODE_STRONG) break;
+        if (cmark_node_get_end_line(parent) != line) continue;
+        const auto end = cmark_node_get_end_column(parent);
+        const int delimiter = type == CMARK_NODE_STRONG ? 2 : 1;
+        if (end >= delimiter) lineLength = std::min(lineLength, static_cast<std::size_t>(end - delimiter));
+    }
+    return lineLength;
+}
+
+void findBareUrls(cmark_node* node, const std::vector<std::string_view>& lines, std::vector<std::string_view>& urls) {
+    const auto type = cmark_node_get_type(node);
+    if (type == CMARK_NODE_LINK || type == CMARK_NODE_IMAGE) return;
+    if (type != CMARK_NODE_TEXT) {
+        for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child)) findBareUrls(child, lines, urls);
+        return;
+    }
+    const int line = cmark_node_get_start_line(node);
+    const int column = cmark_node_get_start_column(node);
+    const int end = cmark_node_get_end_column(node);
+    if (line < 1 || static_cast<std::size_t>(line) > lines.size() || column < 1 || end < column || cmark_node_get_end_line(node) != line)
+        return;
+    const auto raw = lines[line - 1];
+    const auto content = raw.substr(0, inlineContentEnd(node, line, raw.size()));
+    const auto textEnd = std::min(content.size(), static_cast<std::size_t>(end));
+    for (auto start = content.find("http", column - 1); start < textEnd; start = content.find("http", start + 1)) {
+        if (!urls.empty() && content.data() + start < urls.back().data() + urls.back().size()) continue;
+        if (start > 0 && (std::isalnum(static_cast<unsigned char>(content[start - 1])) || content[start - 1] == '/')) continue;
+        if (const auto url = bareUrlAt(content.substr(start)); !url.empty()) urls.push_back(url);
+    }
+}
+
+std::optional<std::string> markdownWithBareUrlLinks(std::string_view source, cmark_node* root) {
+    if (source.find("http") == source.npos) return std::nullopt;
+    std::vector<std::string_view> urls;
+    findBareUrls(root, sourceLines(source), urls);
+    if (urls.empty()) return std::nullopt;
+    std::string result;
+    std::size_t done = 0;
+    for (const auto url : urls) {
+        const auto start = static_cast<std::size_t>(url.data() - source.data());
+        result += source.substr(done, start - done);
+        result += '<';
+        result += url;
+        result += '>';
+        done = start + url.size();
+    }
+    result += source.substr(done);
+    return result;
+}
+
 bool insideLink(cmark_node* node) {
     for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent))
         if (cmark_node_get_type(parent) == CMARK_NODE_LINK) return true;
     return false;
-}
-
-// Chat messages carry bare URLs; link the safe ones the way chat apps do. Trailing sentence
-// punctuation and an unbalanced closing parenthesis stay outside the link.
-std::string autolinked(std::string_view text, Target target) {
-    std::string result;
-    std::size_t done = 0;
-    for (auto start = text.find("http", 0); start != text.npos; start = text.find("http", start + 1)) {
-        if (start < done) continue;
-        if (start > 0 && (std::isalnum(static_cast<unsigned char>(text[start - 1])) || text[start - 1] == '/')) continue;
-        const auto rest = text.substr(start);
-        if (!rest.starts_with("http://") && !rest.starts_with("https://")) continue;
-        auto end = start;
-        while (end < text.size() && !std::isspace(static_cast<unsigned char>(text[end])) && text[end] != '<' && text[end] != '"') ++end;
-        while (end > start) {
-            const char last = text[end - 1];
-            if (std::string_view(".,;:!?'").find(last) != std::string_view::npos) {
-                --end;
-                continue;
-            }
-            if (last == ')') {
-                const auto url = text.substr(start, end - start);
-                if (std::ranges::count(url, '(') < std::ranges::count(url, ')')) {
-                    --end;
-                    continue;
-                }
-            }
-            break;
-        }
-        const auto url = text.substr(start, end - start);
-        if (!safeUrl(url) || url.find("://") + 3 >= url.size()) continue;
-        result += escape(text.substr(done, start - done), target);
-        result += "<a href=\"" + escape(url, target, true) + "\">" + escape(url, target) + "</a>";
-        done = end;
-    }
-    return result + escape(text.substr(done), target);
 }
 
 std::string image(cmark_node* node, Target target, unsigned depth) {
@@ -358,9 +410,7 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
     case CMARK_NODE_HTML_BLOCK:
     case CMARK_NODE_HTML_INLINE: return escape(value(cmark_node_get_literal(node)), target);
     case CMARK_NODE_THEMATIC_BREAK: return target == Target::html ? "<hr>" : target == Target::html_text ? "" : "---";
-    case CMARK_NODE_TEXT:
-        if (target == Target::html && !insideLink(node)) return autolinked(value(cmark_node_get_literal(node)), target);
-        return escape(value(cmark_node_get_literal(node)), target);
+    case CMARK_NODE_TEXT: return escape(value(cmark_node_get_literal(node)), target);
     case CMARK_NODE_SOFTBREAK:
     case CMARK_NODE_LINEBREAK: return target == Target::html ? "<br>\n" : "\n";
     case CMARK_NODE_CODE: return code(value(cmark_node_get_literal(node)), target, false);
@@ -414,6 +464,11 @@ std::string convert(std::string_view source, Target target, const SensitiveText&
     auto* document = cmark_parse_document(bytes, source.size(), CMARK_OPT_DEFAULT);
     if (!document) return escape(source, target);
     std::unique_ptr<cmark_node, decltype(&cmark_node_free)> root(document, cmark_node_free);
+    if (target == Target::html) {
+        if (const auto linked = markdownWithBareUrlLinks(source, root.get())) {
+            if (auto* parsed = cmark_parse_document(linked->data(), linked->size(), CMARK_OPT_DEFAULT)) root.reset(parsed);
+        }
+    }
     if (target == Target::html &&
         ((sensitive && sensitive(render(root.get(), Target::html_text, 0))) || hasSensitiveUrl(root.get(), sensitive)))
         return "<p>[redacted]</p>";
