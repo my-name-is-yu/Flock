@@ -46,7 +46,8 @@ function place() {
   const below = anchor.bottom + gap;
   const above = anchor.top - gap - height;
   const preferAbove = target.dataset.tooltipSide === 'top' && above >= margin;
-  const top = Math.max(margin, preferAbove || below + height + margin > innerHeight ? above : below);
+  const side = preferAbove || below + height + margin > innerHeight ? above : below;
+  const top = Math.max(margin, Math.min(side, innerHeight - height - margin));
   const centered = anchor.left + anchor.width / 2 - width / 2;
   const left = Math.min(Math.max(centered, margin), innerWidth - width - margin);
   tip.style.translate = `${Math.round(left)}px ${Math.round(top)}px`;
@@ -104,7 +105,7 @@ document.addEventListener('focusout', (event) => {
 });
 for (const type of ['pointerdown', 'wheel', 'scroll']) document.addEventListener(type, hide, { capture: true, passive: true });
 document.addEventListener('toggle', (event) => {
-  if (target && event.target.contains(target)) hide();
+  if (target && event.newState === 'open' && event.target.contains(target)) hide();
 }, { capture: true });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && target) hide();

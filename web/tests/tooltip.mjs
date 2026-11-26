@@ -41,6 +41,16 @@ async function exercise() {
   await wait(600);
   check(!open(), 'An open menu still showed its tooltip');
 
+  const summary = document.querySelector('#more summary');
+  pointer('pointerover', summary);
+  await wait(600);
+  check(open(), 'The menu button did not show its tooltip');
+  document.getElementById('more').open = true;
+  await wait(50);
+  check(!open(), 'Opening the menu left its tooltip over it');
+  pointer('pointerout', summary, document.body);
+  await wait(700);
+
   pointer('pointerover', close, null, 'touch');
   await wait(600);
   check(!open(), 'Touch showed a tooltip');
@@ -59,12 +69,23 @@ async function exercise() {
   pointer('pointerout', long, document.body);
   await wait(700);
 
-  const summary = document.querySelector('#actions > summary');
+  const more = document.getElementById('more');
+  more.open = false;
   summary.focus();
-  check(open() && tip().textContent === 'Conversation actions', 'Keyboard focus did not show the tooltip');
-  summary.parentElement.open = true;
+  check(open() && tip().textContent === 'More actions', 'Keyboard focus did not show the tooltip');
+  more.open = true;
   await wait(50);
   check(!open(), 'Opening the menu from the keyboard left its tooltip over the menu');
+  more.querySelector('button').focus();
+  more.open = false;
+  summary.focus();
+  await wait(50);
+  check(open() && tip().textContent === 'More actions', 'Closing the menu hid the tooltip of the control that took focus back');
+  const rendered = document.createElement('details');
+  rendered.open = true;
+  document.body.append(rendered);
+  await wait(50);
+  check(open(), 'Another disclosure opening elsewhere hid the tooltip');
 }
 
 const assets = new URL('../assets/', import.meta.url);
@@ -75,7 +96,7 @@ const index = `<!doctype html><html><head><link rel="stylesheet" href="/style.cs
   <button id="menu" aria-haspopup="menu" aria-expanded="true" data-tooltip="Menu">m</button>
   <time id="time" aria-description="Nov 26, 2026, 14:38">14:38</time>
   <button id="long" aria-label="Session" aria-description="${'Check the release plan and report regressions. '.repeat(80)}">s</button>
-  <details id="actions"><summary aria-label="Conversation actions" data-tooltip="Conversation actions">a</summary><button>Find</button></details>
+  <details id="more"><summary aria-label="More actions" data-tooltip="More actions">…</summary><button>Find</button></details>
   <script type="module">
     import '/tooltip.js';
     try {
@@ -100,7 +121,7 @@ try {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
-    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=5000', '--dump-dom',
+    '--disable-background-networking', `--user-data-dir=${directory}`, '--virtual-time-budget=10000', '--dump-dom',
     `http://127.0.0.1:${server.address().port}/`], { encoding: 'utf8', timeout: 25000 });
   const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
   if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the tooltip checks');

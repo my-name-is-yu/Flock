@@ -188,8 +188,9 @@ async function exercise() {
   const sessionRows = () => [...document.querySelectorAll('.session-row')];
   const sessionLabel = (row) => row?.querySelector('.activity-status span:last-child')?.textContent;
   const [finished, historical] = sessionRows();
-  check(sessionLabel(finished) === '17:30' && finished.getAttribute('aria-description').includes('17:30') &&
-    sessionLabel(historical) === 'Complete' && !historical.getAttribute('aria-description').includes('Started'),
+  check(sessionLabel(finished) === '17:30' && finished.dataset.tooltip.includes('17:30') &&
+    finished.querySelector(':scope > .sr-only')?.textContent.includes('Nov 20, 2026, 17:30') &&
+    sessionLabel(historical) === 'Complete' && !historical.dataset.tooltip.includes('Started'),
     'The sidebar used the request time instead of the Session creation time');
   window.rollSessionDate();
   check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
