@@ -75,7 +75,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
             return stop;
         }
         auto result = offered ? webEvidenceActionDenied() : toolFailure(decision.rejection);
-        if (!offered && isGitTool(tool) && gitEffectStarted(key)) {
+        if (!offered && isGitTool(tool) && gitStorage.gitEffectStarted(key)) {
             result["delivery"] = "unknown";
             result["error"] = "The host outcome is unknown. Check the target before retrying.";
         }
@@ -105,7 +105,7 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
         if (!allowed) return stop;
     }
 
-    auto result = gitConversationTool(ctx.gitHost, message, decision, key);
+    auto result = gitStorage.gitConversationTool(ctx.gitHost, message, decision, key);
     if (result.value("policyWaiting", false)) return waiting;
 
     std::lock_guard lock(mutex);

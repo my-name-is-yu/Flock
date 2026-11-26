@@ -1,4 +1,6 @@
+#include "git_storage.hpp"
 #include "storage.hpp"
+#include "flock/git_host.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 #include "flock/json.hpp"
@@ -32,75 +34,77 @@ bool terminalPrOperation(std::string_view status) {
 }
 }
 
-bool Store::Impl::gitPrWatchUnavailable(const GitRepository& repo, Id pr, Id task) const {
-    return gitPrMutationsInFlight.contains({repo.host, repo.repo, pr}) || query(R"SQL(
+bool GitStorage::gitPrWatchUnavailable(const GitRepository& repo, Id pr, Id task) const {
+    return gitPrMutationsInFlight.contains({repo.host, repo.repo, pr}) || database
+                                                                              .query(R"SQL(
 SELECT 1 FROM git_pr_watches w WHERE (w.host,w.repo,w.pr_number)=(?,?,?) AND w.task_id<>?
 AND NOT EXISTS (SELECT 1 FROM deleted_bots d WHERE d.bot=w.bot_id)
 )SQL",
-                                                                                {repo.host, repo.repo, pr, task})
+                                                                                     {repo.host, repo.repo, pr, task})
                                                                               .next();
 }
 
-bool Store::Impl::watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest& pr,
-                             GitWatchStart start) {
+bool GitStorage::watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest& pr,
+                            GitWatchStart start) {
     const auto& repo = pr.target.base;
     if (gitPrWatchUnavailable(repo, pr.number, task)) return false;
-    auto prior =
-        query("SELECT task_id,event_cursor FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)", {repo.host, repo.repo, pr.number});
+    auto prior = database.query("SELECT task_id,event_cursor FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)",
+                                {repo.host, repo.repo, pr.number});
     const bool hasPriorWatch = prior.next();
     const auto headObservedAt = hasPriorWatch ? latestGitWebhookId() : deliveryCursor;
     if (hasPriorWatch && prior.number(0) != task) {
         const auto previousDeliveryCursor = prior.number(1);
-        exec("INSERT INTO git_pr_watch_origins VALUES(?,?,?,?) ON CONFLICT DO NOTHING",
-             {repo.host, repo.repo, pr.number, previousDeliveryCursor});
+        database.exec("INSERT INTO git_pr_watch_origins VALUES(?,?,?,?) ON CONFLICT DO NOTHING",
+                      {repo.host, repo.repo, pr.number, previousDeliveryCursor});
         if (start == GitWatchStart::operationIntent) deliveryCursor = headObservedAt;
-        exec(R"SQL(
+        database.exec(R"SQL(
 UPDATE git_pr_watches SET task_id=?,bot_id=?,run=?,url=?,event_cursor=? WHERE (host,repo,pr_number)=(?,?,?)
 )SQL",
-             {task, bot, run, pr.url, deliveryCursor, repo.host, repo.repo, pr.number});
+                      {task, bot, run, pr.url, deliveryCursor, repo.host, repo.repo, pr.number});
     } else {
-        exec(R"SQL(
+        database.exec(R"SQL(
 INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
  DO UPDATE SET url=excluded.url
 )SQL",
-             {repo.host, repo.repo, pr.number, task, bot, run, pr.url, deliveryCursor});
+                      {repo.host, repo.repo, pr.number, task, bot, run, pr.url, deliveryCursor});
     }
     if (!pr.headSha.empty()) {
-        exec(R"SQL(
+        database.exec(R"SQL(
 INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
  DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
 )SQL",
-             {repo.host, repo.repo, pr.number, headObservedAt, pr.headSha});
+                      {repo.host, repo.repo, pr.number, headObservedAt, pr.headSha});
     }
     gitWebhooksDrainedAt.reset();
     return true;
 }
 
-Json Store::Impl::openGitPr(GitHost& host, const GitContext& context, const GitOpenPr& input, std::string_view invocation, bool newIntent,
-                            std::string_view reason) {
+Json GitStorage::openGitPr(GitHost& host, const GitContext& context, const GitOpenPr& input, std::string_view invocation, bool newIntent,
+                           std::string_view reason) {
     auto request = input;
     const auto& [base, head, baseRef, headRef] = request.target;
     const auto intent = std::string(invocation) + (newIntent ? "/new" : "");
     bool create;
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (botLifecycle.botPaused(context.botId)) throw BotPaused{};
-        auto operation = query(R"SQL(
+        auto operation = database.query(R"SQL(
 SELECT operation_id,task_id,bot_id,status,pr_number,url FROM git_pr_operations
 WHERE host=?1 AND base_repo=?2 AND base_ref=?3 AND head_repo=?4 AND head_ref=?5
 AND (status IN ('pending','ambiguous','rejected') OR (task_id=?6 AND (invocation=?7 OR (status='created' AND NOT ?8))))
 ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','rejected') DESC,rowid DESC LIMIT 1
 )SQL",
-                               {base.host, base.repo, baseRef, head.repo, headRef, context.taskId, intent, int{newIntent}});
+                                        {base.host, base.repo, baseRef, head.repo, headRef, context.taskId, intent, int{newIntent}});
         create = !operation.next();
         if (create) {
-            if (Policy(*this).forbidden(context.botId, Action::repository_pr, base.resource())) throw Conflict("Repository access denied");
+            if (Policy(remaining).forbidden(context.botId, Action::repository_pr, base.resource()))
+                throw Conflict("Repository access denied");
             request.operationId = actionId();
-            exec("INSERT INTO git_pr_operations VALUES(?,?,?,?,?,?,?,?,?,?,"
-                 "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
-                 {request.operationId, base.host, base.repo, baseRef, head.repo, headRef, context.taskId, context.botId,
-                  runJson(context.run), intent});
+            database.exec("INSERT INTO git_pr_operations VALUES(?,?,?,?,?,?,?,?,?,?,"
+                          "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
+                          {request.operationId, base.host, base.repo, baseRef, head.repo, headRef, context.taskId, context.botId,
+                           runJson(context.run), intent});
             auto pending = prResult(request.operationId, "pending");
             pending["reason"] = reason;
             journalStorage.journal(context.taskId, "git_mutation",
@@ -130,9 +134,10 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     } catch (const std::exception&) {
     }
 
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
-    auto saved = query("SELECT status,pr_number,url,run,event_cursor FROM git_pr_operations WHERE operation_id=?", {request.operationId});
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    auto saved =
+        database.query("SELECT status,pr_number,url,run,event_cursor FROM git_pr_operations WHERE operation_id=?", {request.operationId});
     if (!saved.next()) throw Conflict("PR operation is missing");
     const auto previous = saved.string(0);
     if (terminalPrOperation(previous)) return prResult(request.operationId, previous, saved.number(1), saved.string(2));
@@ -153,8 +158,8 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
         }
     }
     const auto result = prResult(request.operationId, state, number, url);
-    exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
-         {state, number ? Json(number) : Json(nullptr), number ? Json(url) : Json(nullptr), request.operationId});
+    database.exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
+                  {state, number ? Json(number) : Json(nullptr), number ? Json(url) : Json(nullptr), request.operationId});
 
     if (state == "ambiguous") {
         auto candidates = Json::array();
@@ -162,19 +167,20 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
             if (gitPrWatchUnavailable(base, id, context.taskId)) continue;
             candidates.push_back({{"prNumber", id}, {"url", pr.url}, {"headSha", pr.headSha}, {"awaitingReview", pr.awaitingReview}});
         }
-        auto pending = query("SELECT id,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'", {request.operationId});
+        auto pending =
+            database.query("SELECT id,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'", {request.operationId});
         const bool hasPending = pending.next();
         if (!hasPending || pending.json(1) != candidates) {
-            if (hasPending) exec("UPDATE pr_review_items SET status='superseded' WHERE id=?", {pending.number(0)});
-            insertPrReview(
+            if (hasPending) database.exec("UPDATE pr_review_items SET status='superseded' WHERE id=?", {pending.number(0)});
+            inboxStorage.insertPrReview(
                 task, "https://" + base.resource() + "/pulls", "Reconcile pull request creation",
                 "Verify the original PR for " + head.resource() + ":" + headRef + " into " + baseRef +
                     ". Choose a verified candidate, reject this operation, or retry with the same branches to check the host again.",
                 {}, request.operationId, candidates);
         }
     } else {
-        exec("UPDATE pr_review_items SET status=? WHERE operation_id=? AND status='pending'",
-             {state == "created" ? "linked" : "superseded", request.operationId});
+        database.exec("UPDATE pr_review_items SET status=? WHERE operation_id=? AND status='pending'",
+                      {state == "created" ? "linked" : "superseded", request.operationId});
     }
     if (state != previous) {
         auto entry = gitJournal(context, "git_open_pr", base, result);
@@ -186,13 +192,13 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     return scrub.record(result, SecretRedactor::Fields::external);
 }
 
-void Store::Impl::decideGitPr(const InboxTarget& item, std::string_view decision, const Json& data, const TaskData& task) {
-    auto row = query(R"SQL(
+void GitStorage::decideGitPr(const InboxTarget& item, std::string_view decision, const Json& data, const TaskData& task) {
+    auto row = database.query(R"SQL(
 SELECT o.operation_id,o.host,o.base_repo,o.head_repo,o.base_ref,o.head_ref,o.run,i.candidates,o.event_cursor
 FROM pr_review_items i JOIN git_pr_operations o ON o.operation_id=i.operation_id
 WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
 )SQL",
-                     {item.itemId, item.taskId, item.botId});
+                              {item.itemId, item.taskId, item.botId});
     if (!row.next()) throw DecisionUnavailable{};
     const auto operation = row.string(0);
     const auto base = GitRepository::parse(row.string(1), row.string(2));
@@ -203,7 +209,7 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     std::string url;
     const bool link = decision == "link_pr";
     if (link) {
-        const Policy policy(*this);
+        const Policy policy(remaining);
         if (policy.forbidden(item.botId, Action::repository_pr, base.resource()) ||
             (head != base && !policy.allows(item.botId, Action::repository_read, head.resource())))
             throw DecisionDenied{};
@@ -227,9 +233,9 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
             gitInboxItem(task, "awaiting/" + url, url, "Pull request awaiting review", "Review the linked pull request.");
     }
     const auto status = link ? "created" : "rejected";
-    exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
-         {status, link ? Json(number) : Json(nullptr), link ? Json(url) : Json(nullptr), operation});
-    exec("UPDATE pr_review_items SET status=? WHERE id=?", {link ? "linked" : "rejected", item.itemId});
+    database.exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
+                  {status, link ? Json(number) : Json(nullptr), link ? Json(url) : Json(nullptr), operation});
+    database.exec("UPDATE pr_review_items SET status=? WHERE id=?", {link ? "linked" : "rejected", item.itemId});
     journalStorage.journal(
         item.taskId, "git_mutation",
         secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));

@@ -1,4 +1,6 @@
+#include "git_storage.hpp"
 #include "conversation_storage.hpp"
+#include "flock/git_host.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 #include "flock/json.hpp"
@@ -46,7 +48,7 @@ std::string_view followupType(GitFollowup followup) {
 }
 }
 
-bool Store::receiveGitWebhook(const GitWebhook& event) {
+bool GitStorage::receiveGitWebhook(const GitWebhook& event) {
     const auto repo = GitRepository::parse(event.host, event.repo);
     const auto& sha = event.headSha;
     const auto& digest = event.payloadDigest;
@@ -55,8 +57,8 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     const bool validRelatedIds = event.jobId >= 0 && event.feedbackId >= 0;
     if (!validDigest || !validEventIdentity || !validRelatedIds || !hasValidWebhookTarget(event))
         throw std::invalid_argument("Invalid Git webhook event");
-    std::lock_guard lock(p_->mutex);
-    const auto scrub = p_->secretStorage.sharedRedactor();
+    std::lock_guard lock(database.mutex);
+    const auto scrub = secretStorage.sharedRedactor();
     scrub.requirePublic({repo.host, repo.repo, event.eventId, event.action, sha});
     Json data{{"kind", event.kind},
               {"action", event.action},
@@ -75,67 +77,68 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
         if (side == "LEFT" || side == "RIGHT") location["side"] = side;
         data["reviewLocation"] = std::move(location);
     }
-    Transaction transaction(p_->db);
-    p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
-             {repo.host, event.eventId, repo.repo, data, digest.empty() ? Json(nullptr) : Json(digest)});
-    if (sqlite3_changes(p_->db) == 0) return false;
+    Transaction transaction(database.db);
+    database.exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
+                  {repo.host, event.eventId, repo.repo, data, digest.empty() ? Json(nullptr) : Json(digest)});
+    if (sqlite3_changes(database.db) == 0) return false;
     if (event.kind == "pull_request" && event.action == "synchronize" && !sha.empty()) {
-        p_->exec(R"SQL(
+        database.exec(R"SQL(
 INSERT INTO git_pr_heads SELECT ?1,?2,value,?3,?4,1 FROM json_each(?5) WHERE true
  ON CONFLICT(host,repo,pr_number,event_cursor) DO UPDATE SET head_sha=excluded.head_sha,synchronized=1
 )SQL",
-                 {repo.host, repo.repo, p_->last(), sha, event.prNumbers});
+                      {repo.host, repo.repo, database.last(), sha, event.prNumbers});
     }
     transaction.commit();
-    p_->gitWebhooksDrainedAt.reset();
+    gitWebhooksDrainedAt.reset();
     return true;
 }
 
-void Store::Impl::gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title,
-                               std::string_view prompt) {
+void GitStorage::gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title,
+                              std::string_view prompt) {
     const auto id = task.id;
-    if (!query("SELECT 1 FROM pr_review_items WHERE task_id=? AND git_key=?", {id, key}).next())
-        insertPrReview(task, url, title, prompt, key);
+    if (!database.query("SELECT 1 FROM pr_review_items WHERE task_id=? AND git_key=?", {id, key}).next())
+        inboxStorage.insertPrReview(task, url, title, prompt, key);
 }
 
-bool Store::Impl::canReceiveGitWebhook(std::string_view bot, const Json& event) {
+bool GitStorage::canReceiveGitWebhook(std::string_view bot, const Json& event) {
     if (botLifecycle.botPaused(bot)) return false;
     const auto repo = GitRepository::parse(field(event, "host"), field(event, "repo"));
-    return query(R"SQL(
+    return database
+               .query(R"SQL(
 SELECT 1 FROM git_pr_watches w JOIN tasks t ON t.id=w.task_id AND t.bot_id=w.bot_id
 WHERE w.host=? AND w.repo=? AND w.pr_number=? AND w.task_id=? AND w.bot_id=?
 AND t.state NOT IN ('cancelled','cancelling')
 )SQL",
-                 {repo.host, repo.repo, event.at("prNumber"), event.at("taskId"), bot})
+                      {repo.host, repo.repo, event.at("prNumber"), event.at("taskId"), bot})
                .next() &&
-           Policy(*this).allows(bot, Action::repository_read, repo.resource());
+           Policy(remaining).allows(bot, Action::repository_read, repo.resource());
 }
 
-Id Store::Impl::latestGitWebhookId() const {
-    auto row = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
+Id GitStorage::latestGitWebhookId() const {
+    auto row = database.query("SELECT coalesce(max(id),0) FROM git_webhook_events");
     row.next();
     return row.number(0);
 }
 
-void Store::Impl::skipPendingGitWebhooks(std::string_view bot) {
+void GitStorage::skipPendingGitWebhooks(std::string_view bot) {
     const auto cursor = latestGitWebhookId();
-    exec(R"SQL(
+    database.exec(R"SQL(
 INSERT INTO git_pr_watch_origins(host,repo,pr_number,event_cursor)
 SELECT host,repo,pr_number,event_cursor FROM git_pr_watches WHERE bot_id=? AND event_cursor<?
 ON CONFLICT DO NOTHING
 )SQL",
-         {bot, cursor});
-    exec("UPDATE git_pr_watches SET event_cursor=?1 WHERE bot_id=?2 AND event_cursor<?1", {cursor, bot});
+                  {bot, cursor});
+    database.exec("UPDATE git_pr_watches SET event_cursor=?1 WHERE bot_id=?2 AND event_cursor<?1", {cursor, bot});
     gitWebhooksDrainedAt.reset();
 }
 
-void Store::Impl::deliverGitWebhooks() {
-    std::lock_guard lock(mutex);
-    const auto version = dataVersion();
+void GitStorage::deliverGitWebhooks() {
+    std::lock_guard lock(database.mutex);
+    const auto version = database.dataVersion();
     if (gitWebhooksDrainedAt == version) return;
     constexpr unsigned batchSize = 100;
-    Transaction transaction(db);
-    auto rows = query(R"SQL(
+    Transaction transaction(database.db);
+    auto rows = database.query(R"SQL(
 WITH watches AS (
  SELECT w.host,w.repo,w.pr_number,w.task_id,w.bot_id,w.run,w.url,
         w.event_cursor AS delivery_cursor,coalesce(o.event_cursor,w.event_cursor) AS attribution_cursor
@@ -163,7 +166,7 @@ WHERE id>delivery_cursor AND (explicit_pr OR watch_count=1)
                  WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
 ORDER BY id,pr_number LIMIT ?
 )SQL",
-                      {batchSize});
+                               {batchSize});
     Json deliveries = Json::array();
     while (rows.next()) {
         auto event = rows.json(4);
@@ -187,8 +190,9 @@ ORDER BY id,pr_number LIMIT ?
         const auto host = field(event, "host");
         const auto repo = field(event, "repo");
         if (feedback && gitFeedbackMutationsInFlight.contains({host, repo, pr.get<Id>()})) continue;
-        exec("INSERT INTO git_webhook_deliveries VALUES(?,?)", {delivery, pr});
-        if (feedback && query(R"SQL(
+        database.exec("INSERT INTO git_webhook_deliveries VALUES(?,?)", {delivery, pr});
+        if (feedback && database
+                            .query(R"SQL(
 SELECT 1 FROM git_mutations
 WHERE json_extract(result,'$.data.id')=?1
   AND json_extract(invocation,'$[2].host')=?2
@@ -200,7 +204,7 @@ WHERE json_extract(result,'$.data.id')=?1
         AND json_extract(invocation,'$[2].number')=?4
         AND json_type(invocation,'$[2].commentId') IS NULL))
 )SQL",
-                              {feedback, host, repo, pr, kind})
+                                   {feedback, host, repo, pr, kind})
                             .next())
             continue;
         const auto taskId = event.at("taskId").get<Id>();
@@ -231,7 +235,8 @@ WHERE json_extract(result,'$.data.id')=?1
         if (kind == "pull_request" && (action == "review_requested" || action == "ready_for_review"))
             title = "Pull request awaiting review";
         if (kind == "pull_request" && action == "review_requested" && !reviewer.empty()) {
-            auto receipt = query(R"SQL(
+            auto receipt =
+                database.query(R"SQL(
 DELETE FROM git_review_receipts WHERE rowid=(
  SELECT r.rowid FROM git_review_receipts r
  LEFT JOIN pr_review_items i ON i.task_id=r.task_id AND i.git_key=r.inbox_key
@@ -240,24 +245,28 @@ DELETE FROM git_review_receipts WHERE rowid=(
  ORDER BY r.after_event,r.rowid LIMIT 1
 ) RETURNING inbox_key
 )SQL",
-                                 {taskId, event.at("host"), event.at("repo"), pr, reviewer, delivery, task.currentRevision.value_or(0)});
+                               {taskId, event.at("host"), event.at("repo"), pr, reviewer, delivery, task.currentRevision.value_or(0)});
             if (receipt.next()) inboxKey = receipt.string(0);
         }
         if (!title.empty()) gitInboxItem(task, inboxKey, url, title, prompt.empty() ? title : prompt);
 
         const Json routing{
             {"environmentId", task.environmentId}, {"projectId", task.projectId}, {"config", task.config}, {"gitEvent", event}};
-        exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'git_webhook',?,?)",
-             {taskId, unixTime(), scrub.record(event), bot});
-        const auto message = last();
-        exec(R"SQL(
+        database.exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'git_webhook',?,?)",
+                      {taskId, unixTime(), scrub.record(event), bot});
+        const auto message = database.last();
+        database.exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messages WHERE bot_id=?
 )SQL",
-             {message, bot, key, routing, static_cast<int>(conversation::PrincipalSource::gitWebhook), bot});
-        exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {message});
+                      {message, bot, key, routing, static_cast<int>(conversation::PrincipalSource::gitWebhook), bot});
+        database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {message});
     }
     transaction.commit();
     if (deliveries.size() < batchSize) gitWebhooksDrainedAt = version;
+}
+
+bool Store::receiveGitWebhook(const GitWebhook& event) {
+    return p_->gitStorage.receiveGitWebhook(event);
 }
 }

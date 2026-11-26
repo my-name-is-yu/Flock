@@ -193,7 +193,7 @@ std::optional<TaskDecision> Runtime::Components::TaskTurn::inferDecision(const T
         transaction.commit();
     }
     if (!attempt) return std::nullopt;
-    if (gitHost && event.at("kind") == "result") db.projectTaskGitReads(*gitHost, task, event);
+    if (gitHost && event.at("kind") == "result") db.gitStorage.projectTaskGitReads(*gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
     try {
         auto turn = db.modelCalls.callModel(task.botId, model,

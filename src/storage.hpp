@@ -6,6 +6,9 @@
 #include "task_routing.hpp"
 #include "task_operations.hpp"
 #include "model_calls.hpp"
+#include "git_storage.hpp"
+#include "inbox_storage.hpp"
+#include "policy_origin.hpp"
 #include "json_fields.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
@@ -86,7 +89,6 @@ inline bool hasDestinationSelector(const Json& args) {
 inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
 std::string effectiveDoneWhen(const TaskData& task);
-Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
@@ -103,11 +105,6 @@ struct ConversationModelCheckpoint {
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 std::string redactT3Tokens(std::string);
 
-struct PolicyOrigin {
-    std::string bot, scope, requester;
-    Id anchor = 0, turn = 0, task = 0, revision = 0, generation = 0;
-    bool background = false;
-};
 struct CompletionEntry;
 struct ToolErrorEntry;
 struct DecisionEntry;
@@ -139,17 +136,10 @@ private:
 
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
-enum class GitWatchStart { operationIntent, mutationAdmission };
-struct GitPrKey {
-    std::string host, repo;
-    Id number;
-    auto operator<=>(const GitPrKey&) const = default;
-};
-
 struct Store::Impl : Database {
     ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage};
-    TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls, outboxStorage,
-                                  peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage};
+    TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls,  outboxStorage,
+                                  peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
     TaskRouting taskRouting{*this, *this, peerStorage, secretStorage, waitStorage};
     TaskRunReports taskRunReports{*this, *this, journalStorage, outboxStorage, waitStorage};
     OutboxStorage outboxStorage{*this};
@@ -169,6 +159,8 @@ struct Store::Impl : Database {
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
     std::vector<std::string> rootPeople;
     WebIdentityState webIdentity;
+    InboxStorage inboxStorage{*this, secretStorage, taskRecords, waitStorage, journalStorage, *this, modelCalls, taskOperations};
+    GitStorage gitStorage{*this, secretStorage, inboxStorage, taskRecords, journalStorage, webIdentity, *this, botLifecycle};
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     std::mutex sessionQueueCancellationMutex;
@@ -219,40 +211,6 @@ struct Store::Impl : Database {
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     bool t3EnvironmentConnected(std::string_view environment);
-    Statement actionablePrReviews(std::string_view bot) const;
-    Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
-                 std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
-    void projectTaskGitReads(GitHost&, const TaskData& task, Json& event);
-    Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
-    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent, std::string_view reason);
-    void deliverGitWebhooks();
-    void skipPendingGitWebhooks(std::string_view bot);
-    std::optional<Id> gitWebhooksDrainedAt;
-    Id latestGitWebhookId() const;
-    std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;
-    class GitPrMutationClaim;
-    bool canReceiveGitWebhook(std::string_view bot, const Json& event);
-    struct GitPrFollowup {
-        enum class Status { available, attempted, limitReached };
-        SessionTarget session;
-        PolicyOrigin origin;
-        std::string operation;
-        Json target;
-        Status status;
-    };
-    std::optional<GitPrFollowup> gitPrFollowup(const conversation::Message&, const IntakeResolver&);
-    bool currentGitPrCheck(GitHost&, const conversation::Message&);
-    std::string gitPrFollowupInstruction(const conversation::Message&, const GitPrFollowup&, const Decision&) const;
-    void recordGitPrFollowup(const conversation::Message&, const GitPrFollowup&);
-    bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
-    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
-                    GitWatchStart = GitWatchStart::operationIntent);
-    void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const TaskData& task);
-    void gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title, std::string_view prompt);
-    void insertPrReview(const TaskData& task, std::string_view url, std::string_view title, std::string_view prompt,
-                        std::string_view gitKey, std::string_view operationId = {}, const Json& candidates = Json::array());
-    std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
-    void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     struct CompletedToolCall {
         Json value;
@@ -354,8 +312,6 @@ struct Store::Impl : Database {
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
                    const LinkedTaskDestinations& linked);
-    Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
-    bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const WorkSession* selectedSession,
                        const LinkedTaskDestinations& linked);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
@@ -364,7 +320,5 @@ struct Store::Impl : Database {
     Json resultReference(Id messageId, const conversation::Message&) const;
     bool conversationPending(std::string_view bot) const;
 };
-
-std::optional<InboxKind> inboxWaitKind(WaitReason reason);
 
 }

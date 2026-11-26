@@ -483,7 +483,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
     task.state = next;
     taskRecords.save(task);
-    if (kind) remaining.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
+    if (kind) inboxStorage.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
 
 bool Store::hasTask(Id id) const {

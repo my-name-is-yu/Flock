@@ -316,7 +316,7 @@ AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE i
          {item.itemId});
     releasePolicyTurn(row.number(4));
     releasePolicyTask(item.itemId, choice);
-    recordInboxDecision(currentActor, item, choice);
+    inboxStorage.recordInboxDecision(currentActor, item, choice);
     policy.audit(currentActor, item.botId, "approval_decided", {{"itemId", item.itemId}, {"decision", choice}});
 }
 

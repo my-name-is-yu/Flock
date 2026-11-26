@@ -14,6 +14,7 @@ namespace flockv0 {
 class Database;
 class AutomationStorage;
 class BotLifecycleStorage;
+class InboxStorage;
 class JournalStorage;
 class ModelCalls;
 class OutboxStorage;
@@ -39,11 +40,11 @@ public:
     TaskOperations(Database& database, AutomationStorage& automationStorage, BotLifecycleStorage& botLifecycle, Store::Impl& remaining,
                    JournalStorage& journalStorage, ModelCalls& modelCalls, OutboxStorage& outboxStorage, PeerStorage& peerStorage,
                    SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
-                   WaitStorage& waitStorage)
+                   WaitStorage& waitStorage, InboxStorage& inboxStorage)
         : database(database), automationStorage(automationStorage), botLifecycle(botLifecycle), remaining(remaining),
           journalStorage(journalStorage), modelCalls(modelCalls), outboxStorage(outboxStorage), peerStorage(peerStorage),
           secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage) {}
+          waitStorage(waitStorage), inboxStorage(inboxStorage) {}
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
@@ -70,5 +71,6 @@ private:
     TaskRecords& taskRecords;
     TaskRouting& taskRouting;
     WaitStorage& waitStorage;
+    InboxStorage& inboxStorage;
 };
 }

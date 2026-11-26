@@ -1,5 +1,7 @@
+#include "git_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_peer.hpp"
+#include "flock/git_host.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
@@ -15,7 +17,7 @@
 
 namespace flockv0 {
 
-std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conversation::Message& message, const IntakeResolver& intake) {
+std::optional<GitStorage::GitPrFollowup> GitStorage::gitPrFollowup(const conversation::Message& message, const IntakeResolver& intake) {
     using enum conversation::PrincipalSource;
     if (message.principalSource != gitWebhook) return std::nullopt;
     const auto& event = message.routing.at("gitEvent");
@@ -31,7 +33,7 @@ std::optional<Store::Impl::GitPrFollowup> Store::Impl::gitPrFollowup(const conve
         return std::nullopt;
     }
 
-    auto pr = query(R"SQL(
+    auto pr = database.query(R"SQL(
 SELECT o.operation_id,o.head_repo,o.head_ref,o.url,r.environment_id,r.thread_id,
        coalesce(json_extract(o.run,'$.gatewayEnvironmentId'),'')
 FROM git_pr_watches w JOIN git_pr_operations o
@@ -46,7 +48,7 @@ AND coalesce((SELECT json_extract(e.data,'$.action') FROM git_webhook_events e
  ORDER BY e.id DESC LIMIT 1),'') <> 'closed'
 LIMIT 2
 )SQL",
-                    {event.at("host"), event.at("repo"), event.at("prNumber"), taskId, message.bot});
+                             {event.at("host"), event.at("repo"), event.at("prNumber"), taskId, message.bot});
     if (!pr.next()) return std::nullopt;
     SessionTarget destination{pr.string(4), pr.string(5), pr.string(6)};
     const auto operation = pr.string(0);
@@ -58,19 +60,20 @@ LIMIT 2
     }
     const auto& connectionEnvironment =
         destination.gatewayEnvironmentId.empty() ? destination.environmentId : destination.gatewayEnvironmentId;
-    if (pr.next() || !t3EnvironmentConnected(connectionEnvironment) || sessionParticipationStopped(message.bot, destination, message.id))
+    if (pr.next() || !remaining.t3EnvironmentConnected(connectionEnvironment) ||
+        remaining.sessionParticipationStopped(message.bot, destination, message.id))
         return std::nullopt;
 
     std::string requester;
     std::string requesterBot = message.bot;
     if (task.sourceMessageId) {
-        const auto source = loadTurnMessage(*task.sourceMessageId);
+        const auto source = remaining.loadTurnMessage(*task.sourceMessageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
-            const auto actor = turnActor(source);
-            if (Policy(*this).allows(actor, Action::bot_talk, source.bot) &&
-                (source.principalSource != session || activeSessionOrigin(source)))
-                requester = policyOrigin(source).requester;
+            const auto actor = remaining.turnActor(source);
+            if (Policy(remaining).allows(actor, Action::bot_talk, source.bot) &&
+                (source.principalSource != session || remaining.activeSessionOrigin(source)))
+                requester = remaining.policyOrigin(source).requester;
         }
     } else if (const auto& requesterId = task.requester) {
         const auto& person = *requesterId;
@@ -79,23 +82,23 @@ LIMIT 2
             const auto role = webIdentity.resolve(person);
             actor = role ? Person{person, *role} : Person{};
         }
-        if (Policy(*this).allows(actor, Action::bot_talk, message.bot)) requester = person;
+        if (Policy(remaining).allows(actor, Action::bot_talk, message.bot)) requester = person;
     }
     if (requester.empty()) return std::nullopt;
 
-    auto human = query(R"SQL(
+    auto human = database.query(R"SQL(
 SELECT coalesce(max(m.id),0) FROM messages m WHERE m.bot_id=? AND m.person_id=? AND m.text<>''
  AND json_type(m.routing,'$.sessionWake') IS NULL
  AND (m.principal_source IN (?,?,?) OR EXISTS (SELECT 1 FROM session_asks a WHERE a.message_id=m.id))
 )SQL",
-                       {requesterBot, requester, int(trusted), int(web), int(channel)});
+                                {requesterBot, requester, int(trusted), int(web), int(channel)});
     human.next();
     const auto anchor = human.number(0);
-    auto attempts = query(R"SQL(
+    auto attempts = database.query(R"SQL(
 SELECT coalesce(max(git_event_id=?),0),count(*) FILTER (WHERE id>?)
 FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND operation_id=?
 )SQL",
-                          {event.at("eventId"), anchor, taskId, operation});
+                                   {event.at("eventId"), anchor, taskId, operation});
     attempts.next();
     using enum GitPrFollowup::Status;
     const auto status = attempts.number(0) ? attempted : attempts.number(1) >= 2 ? limitReached : available;
@@ -107,7 +110,7 @@ FROM journal WHERE task_id=? AND kind='git_pr_followup_requested' AND operation_
                          status};
 }
 
-bool Store::Impl::currentGitPrCheck(GitHost& host, const conversation::Message& message) {
+bool GitStorage::currentGitPrCheck(GitHost& host, const conversation::Message& message) {
     const auto& event = message.routing.at("gitEvent");
     const Decision status{
         "git_pr_status", {{"host", event.at("host")}, {"repo", event.at("repo")}, {"prNumber", event.at("prNumber")}}, {}};
@@ -118,8 +121,8 @@ bool Store::Impl::currentGitPrCheck(GitHost& host, const conversation::Message& 
     return field(pr, "state") == "open" && field(pr, "headSha") == field(event, "headSha");
 }
 
-std::string Store::Impl::gitPrFollowupInstruction(const conversation::Message& message, const GitPrFollowup& followup,
-                                                  const Decision& decision) const {
+std::string GitStorage::gitPrFollowupInstruction(const conversation::Message& message, const GitPrFollowup& followup,
+                                                 const Decision& decision) const {
     using conversation_storage::text;
     using conversation_storage::ToolError;
     if (!decision.args.is_object() || decision.args.size() != 2)
@@ -144,7 +147,7 @@ std::string Store::Impl::gitPrFollowupInstruction(const conversation::Message& m
            cited.dump(-1, ' ', false, Json::error_handler_t::replace);
 }
 
-void Store::Impl::recordGitPrFollowup(const conversation::Message& message, const GitPrFollowup& followup) {
+void GitStorage::recordGitPrFollowup(const conversation::Message& message, const GitPrFollowup& followup) {
     const auto& eventId = message.routing.at("gitEvent").at("eventId").get_ref<const std::string&>();
     journalStorage.journal(followup.origin.task, GitPrFollowupEntry{followup.operation, eventId, message.id});
 }

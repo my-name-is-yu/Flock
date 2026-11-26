@@ -117,6 +117,8 @@ private:
     Store::Impl& db_;
     friend class AutomationStorage;
     friend class MemoryStorage;
+    friend class InboxStorage;
+    friend class GitStorage;
     friend class Store;
     friend class ModelCalls;
     friend class TaskOperations;
