@@ -78,8 +78,6 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   status TASK
   history TASK [--after ID] [--limit N]
   answer TASK WAIT REVISION GENERATION TEXT
-  retry TASK WAIT REVISION GENERATION
-  reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
   cancel TASK [WAIT REVISION GENERATION]
   t3 connect [MCP_URL] [--port PORT]
   t3 reconnect ENVIRONMENT [--port PORT]
@@ -454,7 +452,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     runtime.requestStop();
 }
 
-void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {
+void operate(const std::filesystem::path& home, const std::string& operation, Arguments& args) {
     const auto task = number(args, "task ID");
     auto store = openStore(home);
     const auto status = Tasks(store).task(task);
@@ -465,28 +463,9 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
         target.generation = number(args, "generation", 0);
     }
     Json details = Json::object();
-    if (operation == "answer")
-        details["text"] = args.pop("answer");
-    else if (operation == "reconcile") {
-        while (!args.empty()) {
-            const auto flag = args.pop("reconciliation option");
-            if (flag == "--thread")
-                details["threadId"] = args.pop("Thread ID");
-            else if (flag == "--run")
-                details["runId"] = args.pop("Run ID");
-            else if (flag == "--question")
-                details["questionId"] = args.pop("question ID");
-            else
-                throw Conflict("Unknown reconciliation option: " + flag);
-        }
-    }
+    if (operation == "answer") details["text"] = args.pop("answer");
     args.end();
 
-    if (operation == "reconcile") {
-        details = TaskControl(store).reconciliationData(
-            task, target.waitId, std::move(details),
-            [&](std::string_view id, std::string_view request) { return bots.get(id).intake(request); });
-    }
     TaskControl(store).operate(localOwner, target, operation, details);
     print(taskJson(Tasks(store).task(task)));
 }
@@ -593,8 +572,8 @@ int runCli(Arguments& args) {
         print(taskJson(Tasks(store).task(id)));
     } else if (command == "history" || command == "tasks")
         taskCommand(home, command, args);
-    else if (command == "answer" || command == "retry" || command == "reconcile" || command == "cancel")
-        operate(home, bots, command, args);
+    else if (command == "answer" || command == "cancel")
+        operate(home, command, args);
     else
         throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;

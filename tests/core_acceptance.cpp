@@ -140,6 +140,8 @@ struct Script : Model {
     std::function<Decision(const ModelInput&)> script;
     int calls = 0;
     Json usage = Json::object();
+    bool authenticated = false;
+    bool hasAuthentication() const override { return authenticated; }
     ModelTurn decide(const ModelInput& input) override {
         ++calls;
         return {{script(input)}, usage};
@@ -151,9 +153,9 @@ struct SimulatedT3 : T3 {
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
     bool delayLaunchRunId = false;
-    bool failBeforeWorkSend = false;
     bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
+    Delivery unconfirmedDelivery;
     std::string expectedBranch = "main";
     std::map<std::string, Observation> runs;
     std::map<std::string, RunRef> assignments;
@@ -188,7 +190,6 @@ struct SimulatedT3 : T3 {
             return {Delivery::Kind::Accepted, {}, {}};
         }
         check(cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos, "missing full action marker");
-        if (std::exchange(failBeforeWorkSend, false)) return {};
         if (rejectWork && rejectWork(cmd))
             return {Delivery::Kind::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
         const auto serial = launches + follows + selectedStarts + 1;
@@ -218,7 +219,7 @@ struct SimulatedT3 : T3 {
         recovery.push_back(cmd);
         if (cmd.tool == CommandTool::answer_session_question && runs.at(cmd.target.runId).kind == Observation::Kind::Running)
             return {Delivery::Kind::Accepted, {}, {}};
-        if (!hasReconciledRun || !assignments.contains(cmd.actionId)) return {};
+        if (!hasReconciledRun || !assignments.contains(cmd.actionId)) return unconfirmedDelivery;
         return {Delivery::Kind::Accepted, assignments.at(cmd.actionId), {}};
     }
     Observation observe(const std::string&, const Json&, const RunRef& ref) override {
@@ -237,7 +238,10 @@ struct SimulatedT3 : T3 {
     Excerpt read(const ReadRequest& req) override {
         const bool reported =
             std::any_of(runs.begin(), runs.end(), [&](const auto& entry) { return entry.second.resultRunId == req.runId; });
-        check(!req.runId.empty() && (runs.contains(req.runId) || reported), "read unrelated Run");
+        const bool knownSession = req.wholeSession && req.runId.empty() && std::ranges::any_of(assignments, [&](const auto& entry) {
+                                      return entry.second.threadId == req.threadId;
+                                  });
+        check(knownSession || (!req.runId.empty() && (runs.contains(req.runId) || reported)), "read unrelated Session or Run");
         readRequests.push_back(req);
         ++reads;
         if (beforeRead) beforeRead();
@@ -382,10 +386,12 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
     const auto task = seedSelectedTask(f);
     f.t3.runs["other-run"] = {};
     f.t3.loseAcknowledgement = true;
-    f.wait(task, "unknown_delivery");
+    f.reach(task, "sending");
+    f.runtime->tick();
     check(f.t3.selectedStarts == 1 && f.t3.launches == 0, "Selected work created another Thread");
     f.t3.runs.at("run-1").status = "queued";
     f.restart();
+    f.now += 5;
     f.reach(task, "running");
     f.now += 2 * 86400;
     f.runtime->tick();
@@ -435,17 +441,18 @@ void disconnectBlocksSendingAndRetry() {
         }
         f.reach(id, "sending");
         f.t3.onPreflight = [&] { connections.disconnect("e"); };
-        auto wait = f.wait(id, "auth");
+        const auto wait = f.wait(id, "auth");
         const auto sent = followUp ? 1u : 0u;
         check(f.t3.seen.size() == sent && f.logs(id, "send_started") == sent, "A disconnect during preflight admitted a new T3 send");
         f.restart();
         f.t3.onPreflight = [] { throw std::runtime_error("A disconnected environment reached T3 preflight"); };
-        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
-        wait = f.wait(id, "auth");
+        f.now += 5;
+        f.runtime->tick();
+        check(f.wait(id, "auth") == wait, "A connection check repeated the sign-in notice");
         check(f.t3.seen.size() == sent && f.t3.reconciles == 0, "Retrying an unsent action after disconnect contacted T3");
         f.t3.onPreflight = {};
         connections.connect("e", localOwner.id, 4173);
-        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
+        f.now += 5;
         f.reach(id, "running");
         check(f.t3.seen.size() == sent + 1 && f.t3.reconciles == 0, "Reconnecting did not permit one send of the waiting action");
     }
@@ -474,9 +481,10 @@ void disconnectKeepsOwnedRunRecovery() {
     const auto queued = f.submit();
     f.model.script = [](const ModelInput&) { return work(); };
     f.t3.loseAcknowledgement = true;
-    const auto wait = f.wait(id, "unknown_delivery");
+    f.reach(id, "sending");
+    f.runtime->tick();
     connections.disconnect("e");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
+    f.now += 5;
     f.reach(id, "running");
     f.runtime->tick();
     check(f.t3.launches == 1 && f.t3.reconciles == 1 && f.t3.polls > 0,
@@ -570,53 +578,82 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
           "Resume replayed a reminder that became due while dispatch held the lock");
 }
 
+void transientFailuresKeepRetrying() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [&](const ModelInput&) {
+        if (f.model.calls <= 8) throw ModelError("The model connection dropped", true);
+        return work();
+    };
+    f.reach(id, "deciding");
+    for (const auto delay : {1, 2, 4, 8, 16, 32, 60, 60}) {
+        const int calls = f.model.calls;
+        f.runtime->tick();
+        if (calls == 3) f.restart();
+        f.now += delay - 1;
+        f.runtime->tick();
+        check(f.model.calls == calls + 1 && f.task(id)["wait"].is_null() && f.t3.seen.empty(),
+              "A transient failure paused the task or retried before its capped backoff");
+        ++f.now;
+    }
+    f.reach(id, "running");
+    check(f.model.calls == 9 && f.t3.launches == 1 && f.logs(id, "waiting") == 0,
+          "The task did not resume on its original event after the model recovered");
+}
+
+void taskResumesAfterModelSignIn() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [&](const ModelInput&) {
+        if (!f.model.authenticated) throw ModelError("ChatGPT profile unavailable", ModelErrorCode::authentication_required);
+        return work();
+    };
+    const auto wait = f.wait(id, "model_failure");
+    f.restart();
+    for (int tick = 0; tick < 4; ++tick) f.runtime->tick();
+    check(f.wait(id, "model_failure") == wait && f.logs(id, "waiting") == 1 && f.model.calls == 1 && f.t3.seen.empty(),
+          "A missing ChatGPT sign-in repeated the notice or spent another model request");
+    f.model.authenticated = true;
+    f.reach(id, "running");
+    check(f.model.calls == 2 && f.t3.launches == 1, "The original task did not resume once ChatGPT was connected");
+}
+
 void invalidDecisions() {
     Fixture f;
     const auto id = f.submit();
     f.model.script = [&](const ModelInput& input) -> Decision {
         check(input.event["kind"] == "intake", "wrong decision event");
         if (f.model.calls == 1) return complete();
-        if (f.model.calls == 2) return {"invented", Json::object(), "unknown tool"};
-        throw ModelError("The model returned two tool calls", false);
-    };
-    f.runtime->tick();
-    f.runtime->tick();
-    f.restart();
-    const auto wait = f.wait(id, "model_failure");
-    check(f.model.calls == 5 && f.logs(id, "model_failure") == 3 && f.logs(id, "tool_error") == 2 && f.t3.launches == 0 &&
-              f.logs(id, "decision") == 0,
-          "invalid initial action executed");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "retry");
-    f.rejects(id, wait, "retry");
-    f.model.script = [](const ModelInput& input) {
-        check(input.feedback.empty() && input.event.at("decisionFeedback").empty(), "retry kept prior errors");
+        if (f.model.calls == 3) throw ModelError("Malformed model response", ModelErrorCode::invalid_tool_output);
+        if (f.model.calls < 9) return {"invented", Json::object(), "unknown tool"};
+        check(input.event.at("decisionFeedback").back().at("tool") == "invented", "The Bot lost its latest rejected decision");
         return work();
     };
+    f.reach(id, "deciding");
+    f.runtime->tick();
+    f.restart();
     f.reach(id, "running");
+    check(f.logs(id, "tool_error") == 8 && f.logs(id, "waiting") == 0 && f.t3.launches == 1 && f.logs(id, "decision") == 1,
+          "A rejected decision parked the task or executed an invalid action");
+
     f.t3.question("run-1");
     f.t3.runs.at("run-1").question.fields.push_back({.id = "checks", .multiple = true, .options = {{"Lint", "lint"}}});
-    f.model.script = [](const ModelInput&) { return work(); };
-    const auto questionWait = f.wait(id, "model_failure");
-    check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence, "invalid in-question action executed");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, questionWait), "retry");
+    f.reach(id, "deciding");
     int answerAttempts = 0;
     f.model.script = [&](const ModelInput& input) {
         auto answer = reply();
-        if (++answerAttempts == 1)
+        if (++answerAttempts < 9)
             answer.args["answers"]["checks"] = Json::array({"lint", "another check"});
         else {
-            check(!input.event.at("decisionFeedback").empty(), "model did not receive feedback on its invalid answer");
+            check(!input.event.at("decisionFeedback").empty(), "The Bot lost feedback on its invalid answer");
             answer.args["answers"]["checks"] = "another check";
         }
         return answer;
     };
     f.reach(id, "running");
-    check(answerAttempts == 2 && f.t3.replies == 1 && f.t3.seen.back().answers.at("checks") == "another check",
-          "T3 received the invalid answer instead of the model's correction");
-    f.t3.finish("run-1");
-    f.model.script = [](const ModelInput&) { return work(); };
-    f.wait(id, "model_failure");
-    check(f.t3.launches == 1 && f.task(id)["doneWhen"] == Evidence, "doneWhen overwritten");
+    check(answerAttempts == 9 && f.t3.replies == 1 && f.t3.seen.back().answers.at("checks") == "another check" &&
+              f.task(id)["doneWhen"] == Evidence && f.logs(id, "waiting") == 0,
+          "T3 received an invalid answer or lost the saved criteria");
 }
 
 void correctInvalidTaskArguments() {
@@ -694,15 +731,10 @@ void replayQuestionDecision(std::string_view outage = {}) {
         check(f.model.calls == 2 && f.task(id)["state"] == (outage.empty() ? "deciding" : "waiting") && !f.t3.replies,
               "reply did not stop between inference and effect");
         f.restart();
-        if (outage == "settings") {
-            const auto task = Tasks(*f.store).task(id);
-            TaskControl(*f.store).operate(localOwner, TaskTarget::from(task.task, task.wait.value().id), "reconcile");
-        }
         if (stillOpen)
             f.t3.question("run-1");
         else
             f.t3.runs.at("run-1") = {};
-        if (outage == "settings") f.runtime->tick();
         f.reach(id, "running");
         check(f.model.calls == 2 && f.t3.replies == int(stillOpen) && !f.task(id).contains("pendingDecision"),
               "restart repeated inference or applied a stale question reply");
@@ -877,43 +909,38 @@ void waitsExpireWithReality() {
 
 void connectionRecoveryRestoresSessionQuestion() {
     for (const auto* outage : {"auth", "settings"}) {
-        for (const bool manual : {false, true}) {
-            Fixture f;
-            const auto id = f.submit();
-            f.model.script = [](const ModelInput& i) {
-                if (i.event.at("kind") == "intake") return work();
-                if (i.event.contains("userAnswer")) return reply();
-                auto question = ask();
-                question.args["choices"] = {"main", "dev"};
-                return question;
-            };
-            f.reach(id, "running");
-            f.t3.question("run-1");
-            const auto old = f.wait(id, "user_question");
-            f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable, .status = outage};
-            f.runtime->tick();
-            const auto connection = f.wait(id, outage);
-            check(f.task(id).at("question").at("suspendedWaitId") == old, "connection wait lost the suspended question");
-            check(Inbox(*f.store).inbox(localOwner, "alpha").empty(), "question remained actionable during the outage");
-            f.rejects(id, old, "answer", {{"text", "dev"}});
-            if (manual) TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, connection), "reconcile");
-            f.restart();
-            f.t3.question("run-1");
-            f.runtime->tick();
-            const auto restored = f.wait(id, "user_question");
-            const auto inbox = Inbox(*f.store).inbox(localOwner, "alpha");
-            check(restored != old && restored != connection && inbox.size() == 1 && inbox[0]["waitId"] == restored &&
-                      inbox[0]["prompt"] == "Which branch?" && inbox[0]["choices"] == Json::array({"main", "dev"}) && f.model.calls == 2,
-                  "the live question did not return with its clarification and a fresh target");
-            f.rejects(id, old, "answer", {{"text", "dev"}});
-            f.rejects(id, connection, "reconcile");
-            TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, restored), "answer",
-                                          {{"text", "main"}});
-            f.reach(id, "running");
-            check(f.t3.replies == 1 && f.t3.seen.back().target.runId == "run-1" && f.t3.launches == 1 &&
-                      f.logs(id, "session_question") == 1 && f.logs(id, "user_answer") == 1,
-                  "recovered question did not resume the original Run exactly once");
-        }
+        Fixture f;
+        const auto id = f.submit();
+        f.model.script = [](const ModelInput& i) {
+            if (i.event.at("kind") == "intake") return work();
+            if (i.event.contains("userAnswer")) return reply();
+            auto question = ask();
+            question.args["choices"] = {"main", "dev"};
+            return question;
+        };
+        f.reach(id, "running");
+        f.t3.question("run-1");
+        const auto old = f.wait(id, "user_question");
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable, .status = outage};
+        f.runtime->tick();
+        const auto connection = f.wait(id, outage);
+        check(f.task(id).at("question").at("suspendedWaitId") == old, "connection wait lost the suspended question");
+        check(Inbox(*f.store).inbox(localOwner, "alpha").empty(), "question remained actionable during the outage");
+        f.rejects(id, old, "answer", {{"text", "dev"}});
+        f.restart();
+        f.t3.question("run-1");
+        f.runtime->tick();
+        const auto restored = f.wait(id, "user_question");
+        const auto inbox = Inbox(*f.store).inbox(localOwner, "alpha");
+        check(restored != old && restored != connection && inbox.size() == 1 && inbox[0]["waitId"] == restored &&
+                  inbox[0]["prompt"] == "Which branch?" && inbox[0]["choices"] == Json::array({"main", "dev"}) && f.model.calls == 2,
+              "the live question did not return with its clarification and a fresh target");
+        f.rejects(id, old, "answer", {{"text", "dev"}});
+        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, restored), "answer", {{"text", "main"}});
+        f.reach(id, "running");
+        check(f.t3.replies == 1 && f.t3.seen.back().target.runId == "run-1" && f.t3.launches == 1 && f.logs(id, "session_question") == 1 &&
+                  f.logs(id, "user_answer") == 1,
+              "recovered question did not resume the original Run exactly once");
     }
 }
 
@@ -986,14 +1013,32 @@ void failedPreflightIsUnsent() {
     const auto id = f.submit();
     f.model.script = [](const ModelInput&) { return work(); };
     f.t3.onPreflight = [] { throw ModelError("Missing T3 settings", false); };
-    const auto wait = f.wait(id, "settings");
+    f.wait(id, "settings");
     check(f.t3.seen.empty() && f.logs(id, "send_started") == 0, "failed preflight started a delivery");
     f.restart();
     f.t3.onPreflight = {};
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
+    f.now += 5;
     f.reach(id, "running");
     check(f.t3.launches == 1 && f.t3.reconciles == 0 && f.logs(id, "send_started") == 1,
           "preflight failure did not leave one unsent action");
+}
+
+void projectDiscoveryResumesWhenT3Responds() {
+    Fixture f;
+    const auto id = f.submit("Check the default project", "alpha", "");
+    f.t3.projectsByEnvironment["e"] = {};
+    f.model.script = [](const ModelInput&) { return work(); };
+    const auto wait = f.wait(id, "settings");
+    f.now += 5;
+    f.runtime->tick();
+    check(f.wait(id, "settings") == wait && f.model.calls == 0 && f.t3.seen.empty(),
+          "An empty T3 project list repeated its notice or started work");
+    f.restart();
+    f.t3.projectsByEnvironment["e"] = {{"p", "Available project", {}}};
+    f.now += 5;
+    f.reach(id, "running");
+    check(f.t3.launches == 1 && f.model.calls == 1 && f.t3.seen.front().projectId == "p" && f.task(id)["wait"].is_null(),
+          "The original task did not start when a T3 project became available");
 }
 
 void recoveredDelivery() {
@@ -1012,18 +1057,14 @@ void recoveredDelivery() {
         f.reach(id, "sending");
         f.restart();
         f.t3.loseAcknowledgement = true;
-        auto waiting = f.wait(id, "unknown_delivery");
+        f.runtime->tick();
         f.restart();
         f.t3.generation = "fresh-oauth-session";
-        f.t3.hasReconciledRun = false;
-        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, waiting), "reconcile");
-        waiting = f.wait(id, "unknown_delivery");
-        check(f.t3.seen.size() == (launch ? 1ul : 2ul), "unmatched delivery was resent");
-        f.t3.hasReconciledRun = true;
-        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, waiting), "reconcile");
+        f.now += 5;
         f.reach(id, "running");
-        check(f.t3.reconciles == 2 && f.t3.recovery.back().authGeneration == "same-oauth-session",
-              "recovery lost original authentication generation");
+        check(f.t3.reconciles == 1 && f.t3.seen.size() == (launch ? 1u : 2u) && f.model.calls == (launch ? 1 : 2) &&
+                  f.t3.recovery.back().authGeneration == "same-oauth-session",
+              "Automatic delivery check changed the saved send, made an extra model request, or lost the original sign-in identity");
         f.restart();
         if (launch) {
             f.t3.finish("run-1");
@@ -1042,9 +1083,9 @@ void recoveredDelivery() {
     f.t3.question("run-1");
     f.reach(id, "sending");
     f.t3.loseAcknowledgement = true;
-    const auto wait = f.wait(id, "unknown_delivery");
+    f.runtime->tick();
     f.restart();
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
+    f.now += 5;
     f.reach(id, "running");
     check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 1, "recovered answer created duplicate work");
 }
@@ -1059,16 +1100,79 @@ void launchReceiptSurvivesRecovery() {
     check(f.logs(id, "run_id_pending") == 1, "launch receipt did not persist");
 
     f.restart();
-    f.t3.hasReconciledRun = false;
-    const auto wait = f.wait(id, "unknown_delivery");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile");
-    f.t3.hasReconciledRun = true;
+    f.now += 5;
     f.reach(id, "running");
-    check(f.t3.recovery.back().launchReceiptThreadId == "thread-1" && !f.t3.recovery.back().candidate && f.t3.launches == 1,
+    check(f.t3.recovery.back().receipt && f.t3.recovery.back().receipt->threadId == "thread-1" && f.t3.launches == 1,
           "reconciliation lost the launch receipt or sent another launch");
 }
 
-void unsentAnswerRemainsRetryable() {
+void unconfirmedDeliveryAcrossRestart() {
+    Fixture f;
+    f.read = "on_demand";
+    f.restart();
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id, "sending");
+    f.t3.delayLaunchRunId = true;
+    f.t3.hasReconciledRun = false;
+    f.t3.unconfirmedDelivery = {Delivery::Kind::Auth, {}, "T3 sign-in expired"};
+    f.runtime->tick();
+    const auto original = f.t3.seen.front();
+    f.restart();
+    f.runtime->tick();
+    check(f.t3.seen.size() == 1 && f.t3.reconciles == 0, "Restart sent the original action or skipped the delivery check interval");
+    f.now += 5;
+    f.runtime->tick();
+    f.wait(id, "auth");
+    check(f.t3.seen.size() == 1 && f.t3.reconciles == 1 && f.model.calls == 1,
+          "A sign-in error during a check retried the send or called the Bot");
+
+    f.restart();
+    f.t3.unconfirmedDelivery = {Delivery::Kind::Unknown, {}, "T3 history does not identify the Run", true};
+    f.now += 5;
+    f.runtime->tick();
+    const auto unresolved = Tasks(*f.store).task(id);
+    check(f.t3.seen.size() == 1 && f.t3.reconciles == 2 && unresolved.pendingAction &&
+              unresolved.pendingAction->phase == OutboxPhase::started && unresolved.task.state == TaskState::deciding &&
+              Inbox(*f.store).inbox(localOwner, "alpha").empty(),
+          "An inconclusive check reopened the send or put the task in Needs you");
+
+    f.restart();
+    int decisions = 0;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        const auto& saved = event.at("action");
+        check(event.at("kind") == "delivery_unconfirmed" && saved.at("actionId") == original.actionId &&
+                  saved.at("session").at("threadId") == "thread-1" &&
+                  saved.at("instruction").get<std::string>().find("Check the fixture") != std::string::npos &&
+                  event.at("detail") == "T3 history does not identify the Run" && f.t3.seen.size() == 1,
+              "The Bot lost the saved delivery evidence or Flock sent the action again");
+        if (++decisions == 1) return {"session_read", {{"threadId", "other-thread"}, {"runId", ""}}, {}};
+        if (decisions == 2) {
+            check(event.at("decisionFeedback").size() == 1 && f.t3.reads == 0, "An unrelated Session was read");
+            return {"session_read", {{"threadId", "thread-1"}, {"runId", ""}}, {}};
+        }
+        check(input.evidence.size() == 1 && f.t3.reads == 1 && f.t3.readRequests.front().wholeSession,
+              "The Bot could not read the Session identified by the original receipt");
+        if (decisions == 3) throw ModelError("Model temporarily unavailable", true);
+        return work("delegate", false);
+    };
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.runtime->tick();
+    f.restart();
+    f.now += 5;
+    f.reach(id, "running");
+    check(decisions == 4 && f.t3.seen.size() == 2 && f.t3.seen.back().actionId != original.actionId && f.t3.reconciles == 4 &&
+              std::ranges::all_of(f.t3.recovery,
+                                  [&](const auto& attempt) {
+                                      return attempt.actionId == original.actionId && attempt.instruction == original.instruction;
+                                  }),
+          "Recovery lost the saved action or sent work before the Bot chose a new action");
+}
+
+void unsentAnswerRecoversAutomatically() {
     Fixture f;
     const auto id = f.submit();
     f.model.script = [](const ModelInput& i) { return i.event["kind"] == "intake" ? work() : reply(); };
@@ -1077,22 +1181,17 @@ void unsentAnswerRemainsRetryable() {
     f.t3.question("run-1");
     f.reach(id, "sending");
     f.t3.failNextAnswerRead = true;
-    const auto wait = f.wait(id, "unknown_delivery");
+    f.runtime->tick();
     const auto answer = f.t3.seen.back();
-    check(f.t3.replies == 0 && f.task(id)["wait"]["text"].get<std::string>().find("was not sent") != std::string::npos,
-          "the user was not told the Session answer was unsent");
-
+    const auto pending = Tasks(*f.store).task(id).pendingAction;
+    check(f.t3.replies == 0 && pending && pending->phase == OutboxPhase::ready, "An answer blocked before sending lost its saved action");
     f.restart();
-    f.rejects(id, wait, "reconcile", {{"questionId", "another-question"}});
-    check(f.task(id).at("wait").at("id") == wait && f.t3.replies == 0,
-          "a mismatched reconciliation hint allowed an unsent answer to proceed");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "reconcile",
-                                  {{"questionId", answer.questionId}});
+    f.now += 5;
     f.reach(id, "running");
-    const auto retry = f.t3.seen.back();
+    const auto delivered = f.t3.seen.back();
     check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 0 && f.task(id)["activeRun"] == run &&
-              f.logs(id, "session_answered") == 1 && retry.actionId == answer.actionId && retry.questionId == answer.questionId,
-          "the unsent Session answer was not retried once for the same Run and question");
+              f.logs(id, "session_answered") == 1 && delivered.actionId == answer.actionId && delivered.questionId == answer.questionId,
+          "The saved answer was not sent exactly once to its original Run and question");
 }
 
 void cancelDuringDelivery() {
@@ -1136,7 +1235,8 @@ void settleWhileAnswerDeliveryIsUnknown() {
         f.reach(id, "running");
         f.t3.question("run-1");
         f.t3.loseAcknowledgement = true;
-        const auto wait = f.wait(id, "unknown_delivery");
+        f.reach(id, "sending");
+        f.runtime->tick();
         f.t3.question("run-1");
         f.restart();
 
@@ -1149,9 +1249,7 @@ void settleWhileAnswerDeliveryIsUnknown() {
         }
         f.t3.finish("run-1", cancel ? "interrupted" : "completed");
         if (!cancel) {
-            for (int i = 0; i < 12 && f.task(id)["wait"]["id"] == wait; ++i) f.runtime->tick();
             const auto review = f.wait(id, "user_question");
-            f.rejects(id, wait, "reconcile");
             TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, review), "cancel");
         }
         f.reach(id, "cancelled");
@@ -2167,7 +2265,8 @@ void peerConsultationAndPermission() {
         ++deniedAttempts;
         return botRequest("gamma", "consult", "What is the release policy?");
     };
-    f.wait(denied, "model_failure");
+    f.reach(denied, "deciding");
+    for (int i = 0; i < 6; ++i) f.runtime->tick();
     check(deniedAttempts == 6 && TaskList(*f.store).tasks().size() == 1 && f.botMessages("alpha").empty(),
           "an unlisted recipient received a message or the available send tool was not exercised");
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(denied).task, 0), "cancel");
@@ -2357,8 +2456,8 @@ void recoveredRunAcceptsQuestion() {
     const auto id = TaskIntake(*f.store).submit({"alpha", "Recover and answer", "e", "p"});
     f.reach(id, "sending");
     f.t3.loseAcknowledgement = true;
-    const auto deliveryWait = f.wait(id, "unknown_delivery");
-    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, deliveryWait), "reconcile");
+    f.runtime->tick();
+    f.now += 5;
     f.reach(id, "running");
     check(f.model.calls == 1 && f.t3.reconciles == 1 && f.t3.launches == 1, "delivery recovery used a model call or resent the Run");
     f.t3.question("run-1");
@@ -2600,7 +2699,8 @@ void peerProjectCycle() {
         if (input.task["id"] == alpha) return botRequest("beta", "work", "Verify in the second project");
         return botRequest("alpha", "work", "Verify in the first project");
     };
-    f.wait(beta, "model_failure");
+    for (int tick = 0; tick < 8 && f.logs(beta, "tool_error") == 0; ++tick) f.runtime->tick();
+    check(f.logs(beta, "tool_error") == 1, "The Bot did not receive the route conflict");
     const auto messagesBeforeCancel = f.botMessages("beta");
     check(f.task(beta)["doneWhen"] == "" && TaskList(*f.store).tasks("alpha").size() == 1 && messagesBeforeCancel.size() == 1 &&
               messagesBeforeCancel.front().at("fromBotId") == "alpha",
@@ -2709,9 +2809,10 @@ void pendingPeerMovePreventsNewExchange() {
           "the first move could not reserve a free destination");
     f.restart();
     f.startRemoteSender();
-    f.wait(f.remoteSender, "model_failure");
-    check(f.task(f.remoteSender).at("wait").at("text").get<std::string>().find("project queues") != std::string::npos &&
-              TaskList(*f.store).tasks("alpha").size() == 1 && f.botMessages("alpha").size() == 1,
+    for (int tick = 0; tick < 8 && f.logs(f.remoteSender, "tool_error") == 0; ++tick) f.runtime->tick();
+    const auto rejection = lastTaskEvent(*f.store, f.remoteSender, "tool_error");
+    check(rejection.at("data").dump().find("project queues") != std::string::npos && TaskList(*f.store).tasks("alpha").size() == 1 &&
+              f.botMessages("alpha").size() == 1,
           "a new exchange was opened against the already accepted destination");
 }
 
@@ -2897,11 +2998,17 @@ int main() {
     for (const auto& [name, run] : std::vector<std::pair<const char*, void (*)()>>{{"exclusive Runtime database lock",
                                                                                     runtimeDatabaseLockIsExclusive},
                                                                                    {"invalid decisions", invalidDecisions},
+                                                                                   {"transient model recovery",
+                                                                                    transientFailuresKeepRetrying},
+                                                                                   {"model sign-in recovers automatically",
+                                                                                    taskResumesAfterModelSignIn},
                                                                                    {"correct invalid task arguments",
                                                                                     correctInvalidTaskArguments},
                                                                                    {"external wait releases project and accepts instructions",
                                                                                     externalWaitReleasesProjectAndAcceptsInstructions},
                                                                                    {"failed preflight", failedPreflightIsUnsent},
+                                                                                   {"project discovery recovers automatically",
+                                                                                    projectDiscoveryResumesWhenT3Responds},
                                                                                    {"replay saved question decision",
                                                                                     [] { replayQuestionDecision(); }},
                                                                                    {"clarification and failure", ambiguityAndFailure},
@@ -2923,10 +3030,12 @@ int main() {
                                                                                    {"reconsider new directions after question recovery",
                                                                                     connectionRecoveryReconsidersNewDirections},
                                                                                    {"delivery recovery", recoveredDelivery},
+                                                                                   {"unconfirmed delivery across restart",
+                                                                                    unconfirmedDeliveryAcrossRestart},
                                                                                    {"launch receipt recovery",
                                                                                     launchReceiptSurvivesRecovery},
                                                                                    {"retry unsent Session answer",
-                                                                                    unsentAnswerRemainsRetryable},
+                                                                                    unsentAnswerRecoversAutomatically},
                                                                                    {"cancel during delivery", cancelDuringDelivery},
                                                                                    {"selected work reconciles and cancels only its own queued Run",
                                                                                     selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},

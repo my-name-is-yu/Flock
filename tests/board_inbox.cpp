@@ -28,9 +28,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <barrier>
 #include <cstdlib>
-#include <future>
 #include <iostream>
 #include <sqlite3.h>
 #include <exception>
@@ -187,7 +185,6 @@ InboxTarget pending(Store& store, InboxKind kind, std::string_view bot = {}) {
 void exercise(const std::filesystem::path& path) {
     using enum InboxKind;
     Store store(path);
-    Store concurrent(path);
     Database db(path);
     BotAccess botAccess{store};
     SecretRequests secretRequests{store};
@@ -207,12 +204,14 @@ void exercise(const std::filesystem::path& path) {
     sessions.questionProject = "question";
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; });
     for (int step = 0; step < 12; ++step) runtime.tick();
-    check(taskJson(Tasks(store).task(unknown)).at("wait").at("reason") == "unknown_delivery", "fixture did not pause on delivery");
+    const auto delivery = Tasks(store).task(unknown);
+    check(!delivery.wait && delivery.pendingAction && delivery.pendingAction->phase == OutboxPhase::started && sessions.reconciles == 0,
+          "The fixture did not preserve the unconfirmed action before rechecking T3");
 
     const auto report = taskJson(Tasks(store).task(question));
     const auto secret = secretRequests.requestSecret("review", {"report-credential"});
     for (const auto* kind : {"extra_run", "deadline", "model_budget", "conversation_model_budget", "stuck", "conversation_stuck",
-                             "pr_review", "pr_reconciliation"})
+                             "pr_review", "pr_reconciliation", "unknown_delivery"})
         rejected<std::invalid_argument>([kind] { parseInboxKind(kind); }, "a removed inbox kind was accepted");
     const auto before = db.exec("PRAGMA data_version");
     const auto inbox = Inbox(store).inbox(alice);
@@ -225,8 +224,7 @@ void exercise(const std::filesystem::path& path) {
     check(Inbox(store).inbox(alice, "private").empty() && Inbox(store).inbox(reader, "review").empty(),
           "inbox membership restrictions were ignored");
     check(row(inbox, "itemKind", "user_question").at("choices") == Json::array({"Draft", "Final"}) &&
-              row(inbox, "itemKind", "protected_input").at("itemId") == secret &&
-              row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 3,
+              row(inbox, "itemKind", "protected_input").at("itemId") == secret && inbox.size() == 2,
           "inbox omitted a pending decision or its prompt");
     const auto readerQuestion = row(Inbox(store).inbox(reader), "itemKind", "user_question");
     const auto waitAnchor = report.at("wait").at("messageId");
@@ -311,39 +309,6 @@ SELECT )SQL" +
     rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, withdrawing, "answer", {{"text", "Final"}}); },
                                   "withdrawn question accepted an answer");
 
-    const auto delivery = pending(store, unknown_delivery);
-    db.exec("CREATE TRIGGER reject_audit BEFORE INSERT ON inbox_decisions BEGIN SELECT RAISE(ABORT,'test rollback'); END");
-    const auto previous = taskJson(Tasks(store).task(unknown));
-    rejected<std::runtime_error>([&] { Inbox(store).decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}}); },
-                                 "failed history insertion did not abort a decision");
-    check(taskJson(Tasks(store).task(unknown)) == previous && pending(store, unknown_delivery) == delivery && sessions.reconciles == 0,
-          "failed history insertion committed reconciliation intent or wait update");
-    db.exec("DROP TRIGGER reject_audit");
-    std::barrier ready(2);
-    const auto act = [&](Store& connection, const Person& actor) {
-        ready.arrive_and_wait();
-        try {
-            Inbox(connection).decideInbox(actor, delivery, "reconcile", {{"threadId", "candidate"}});
-            return actor.id;
-        } catch (const DecisionUnavailable&) {
-            return std::string{};
-        }
-    };
-    auto first = std::async(std::launch::async, [&] { return act(store, alice); });
-    auto second = std::async(std::launch::async, [&] { return act(concurrent, bob); });
-    const auto a = first.get();
-    const auto b = second.get();
-    check(a.empty() != b.empty(), "simultaneous delivery reconciliations took effect more or less than once");
-    const auto decided = row(TaskHistory(store).history(unknown), "kind", "inbox_decision").at("data");
-    check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 &&
-              decided.at("decision") == "reconcile" && decided.at("targetRevision") == delivery.targetRevision,
-          "task history lost who decided, when, or what they reviewed");
-
-    const auto reconciling = Tasks(store).task(unknown);
-    check(reconciling.pendingAction && reconciling.pendingAction->command.candidate &&
-              reconciling.pendingAction->command.candidate->threadId == "candidate" && reconciling.task.state == TaskState::sending &&
-              sessions.reconciles == 0,
-          "reconciliation did not commit the canonical delivery intent");
     secretRequests.requestSecret("review", {"after-restart"});
 }
 
@@ -416,9 +381,7 @@ int main() {
         chatDecision(directory.path / "chat.db");
         Store restarted(path);
         const auto history = Inbox(restarted).decisionHistory(alice);
-        const auto delivery = row(history, "itemKind", "unknown_delivery");
-        check(history.size() == 2 && delivery.at("decidedAt").get<Id>() > 0 &&
-                  (delivery.at("decidedBy") == "alice" || delivery.at("decidedBy") == "bob") &&
+        check(history.size() == 1 &&
                   row(Inbox(restarted).inbox(alice), "itemKind", "protected_input").at("prompt") == "Supply a value for after-restart",
               "restart lost pending requests or recorded decisions");
     } catch (const std::exception& error) {

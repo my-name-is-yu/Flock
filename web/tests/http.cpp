@@ -798,8 +798,18 @@ void exercise(const std::filesystem::path& path) {
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return std::string{}; };
-    auto runtime = std::make_unique<Runtime>(store, model, t3, notes);
-    const auto web = callbacks();
+    Seconds now = unixTime();
+    auto web = callbacks();
+    bool corrected = false;
+    web.intake = [read = web.intake, &corrected](std::string_view bot, std::string_view request) {
+        auto routing = read(bot, request);
+        if (corrected && bot == "settings") routing.config["session"] = {{"runtimeMode", "approval-required"}};
+        return routing;
+    };
+    RuntimeOptions options;
+    options.clock = [&] { return now; };
+    options.intake = web.intake;
+    auto runtime = std::make_unique<Runtime>(store, model, t3, notes, options);
     auto server = startWeb(store, 0, web);
     const auto port = server->port();
     Browser browser(*server);
@@ -830,8 +840,20 @@ void exercise(const std::filesystem::path& path) {
               triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
     const auto settingsPage = browser.get("/api/view?bot=settings");
-    check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
-          "configuration failure was not classified");
+    const auto& settingsWait = settingsPage.at("waits").at(0);
+    check(settingsWait.at("id") == settings && settingsWait.at("wait").at("reason") == "settings" &&
+              settingsPage.at("activeTasks").at(0).at("problem").at("text") == settingsWait.at("wait").at("text") &&
+              browser.get("/api/inbox").at("items").size() == 1,
+          "The settings problem was missing from the task or appeared in Needs you");
+    for (const auto* operation : {"retry", "reconcile"})
+        browser.post("/api/operations",
+                     {{"botId", "settings"},
+                      {"taskId", settings},
+                      {"operation", operation},
+                      {"waitId", settingsWait.at("wait").at("id")},
+                      {"targetRevision", settingsWait.at("currentRevision")},
+                      {"targetGeneration", settingsWait.at("generation")}},
+                     400);
     const auto list = browser.get("/api/bots");
     const auto releaseRow = std::find_if(list.begin(), list.end(), [](const Json& bot) { return bot.at("id") == "release"; });
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
@@ -889,27 +911,15 @@ void exercise(const std::filesystem::path& path) {
     finished.kind = Observation::Kind::Finished;
     finished.report = "T3 finished while the browser was closed";
     finished.status = "completed";
-    runtime = std::make_unique<Runtime>(store, model, t3, notes);
+    corrected = true;
+    now += 5;
+    runtime = std::make_unique<Runtime>(store, model, t3, notes, options);
     tick(*runtime, 2);
-    auto updatedBots = callbacks();
-    updatedBots.intake = [read = updatedBots.intake](std::string_view bot, std::string_view request) {
-        auto routing = read(bot, request);
-        if (bot == "settings") routing.config["session"] = {{"runtimeMode", "approval-required"}};
-        return routing;
-    };
-    server = startWeb(store, port, std::move(updatedBots));
+    server = startWeb(store, port, web);
     Browser reopened(*server);
-    const auto& settingsWait = settingsPage.at("waits").at(0);
-    reopened.post("/api/operations", {{"botId", "settings"},
-                                      {"taskId", settings},
-                                      {"waitId", settingsWait.at("wait").at("id")},
-                                      {"operation", "reconcile"},
-                                      {"targetRevision", settingsWait.at("currentRevision")},
-                                      {"targetGeneration", settingsWait.at("generation")},
-                                      {"session", {{"runtimeMode", "invalid-client-setting"}}}});
-    tick(*runtime, 2);
-    check(Tasks(cli).task(settings).task.state == TaskState::running && t3.launches["settings"] == 1,
-          "Web reconciliation did not start the Session with the corrected Bot settings");
+    check(Tasks(cli).task(settings).task.state == TaskState::running && t3.launches["settings"] == 1 &&
+              reopened.get("/api/view?bot=settings").at("waits").empty(),
+          "Correcting the Bot's Session settings did not resume the saved launch automatically");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"], "report", "report", "T3 finished while the browser was closed") &&
               hasEvent(page["events"], "completed", "text", "Draft complete") &&

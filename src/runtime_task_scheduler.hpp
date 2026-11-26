@@ -27,7 +27,7 @@ public:
     };
 
     TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3, TaskUpdates& updates,
-                  OutboxDispatch& dispatch, bool requireT3Connection, std::stop_token shutdown);
+                  OutboxDispatch& dispatch, bool requireT3Connection, const std::function<Seconds()>& clock, std::stop_token shutdown);
     void activate(TaskData task);
     std::vector<Work> nextBatch(std::size_t slots, const std::function<bool(const Work&)>& isActive);
 private:
@@ -42,6 +42,7 @@ private:
     TaskUpdates& updates;
     OutboxDispatch& dispatch;
     bool requireT3Connection;
+    const std::function<Seconds()>& clock;
     std::stop_token shutdown;
     Work lastScheduled;
 };

@@ -18,6 +18,7 @@ struct ReadRequest {
     std::size_t offset = 0;
     Json config = Json::object();
     std::string gatewayEnvironmentId;
+    bool wholeSession = false;
 };
 struct Excerpt {
     std::string text, threadId, runId, itemId, nextCursor;

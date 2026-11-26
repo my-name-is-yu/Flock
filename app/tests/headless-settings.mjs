@@ -18,7 +18,7 @@ const cli = (...args) => JSON.parse(execFileSync(executable, [...cliArgs, ...arg
 const launch = ["never", "environment.launch", "demo-*"];
 
 async function waitForState(messageId, state) {
-  const deadline = Date.now() + 6000;
+  const deadline = Date.now() + 10000;
   let task;
   do {
     task = cli("tasks", "release").find((item) => item.sourceMessageId === messageId);
@@ -81,7 +81,6 @@ try {
     assert.match(blocked.wait.text, /denied by installation policy/);
     assert.equal(blocked.lastRun, null);
     assert.deepEqual(cli("rules", "remove", ...launch), []);
-    cli("reconcile", ...[blocked.id, blocked.wait.id, blocked.currentRevision, blocked.generation].map(String));
     await waitForState(next.messageId, "completed");
   } finally {
     daemon.kill();

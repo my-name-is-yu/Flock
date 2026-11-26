@@ -92,15 +92,15 @@ struct Store::Impl {
                                                 taskRecords,
                                                 taskRunReports};
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
-    TaskOperations taskOperations{database,      automationStorage, botLifecycle, permissions, journalStorage, outboxStorage, peerStorage,
-                                  secretStorage, taskEvents,        taskRecords,  taskRouting, waitStorage,    inboxStorage};
+    TaskOperations taskOperations{database,      botLifecycle, permissions, journalStorage, outboxStorage, peerStorage,
+                                  secretStorage, taskEvents,   taskRecords, taskRouting,    waitStorage,   inboxStorage};
     TaskRouting taskRouting{database, permissions, peerStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
     TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage};
     OutboxStorage outboxStorage{database};
     PeerStorage peerStorage{database};
     JournalStorage journalStorage{database, channelStorage};
     TaskEvents taskEvents{database};
-    WaitStorage waitStorage{database, journalStorage, outboxStorage, peerStorage};
+    WaitStorage waitStorage{database, journalStorage, peerStorage};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
     SecretStorage secretStorage{database, path.parent_path()};
     MemoryStorage memoryStorage;

@@ -77,7 +77,14 @@ bool runtime::SessionHistory::readEvidence(const TaskData& task, const Json& eve
     if (req.view != "messages" && req.view != "activity") throw Conflict("Unsupported history view");
     const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
     const auto active = runRef(report.value("run", Json::object()));
-    if (active.threadId == req.threadId && (active.runId == req.runId || field(report, "resultRunId") == req.runId)) {
+    const auto delivery = event.at("kind") == "delivery_unconfirmed" ? event.at("action") : Json::object();
+    const auto session = runRef(delivery.value("session", Json(nullptr)));
+    if (!req.threadId.empty() && session.threadId == req.threadId && (req.runId.empty() || session.runId == req.runId) &&
+        field(delivery, "actionId") == task.actionId) {
+        req.environmentId = delivery.at("environmentId");
+        req.gatewayEnvironmentId = field(delivery, "gatewayEnvironmentId");
+        req.wholeSession = req.runId.empty();
+    } else if (active.threadId == req.threadId && (active.runId == req.runId || field(report, "resultRunId") == req.runId)) {
         req.environmentId = report.at("environmentId");
         req.gatewayEnvironmentId = active.gatewayEnvironmentId;
         if (req.gatewayEnvironmentId.empty() && !task.hasDestinations()) req.gatewayEnvironmentId = task.gatewayEnvironmentId.value_or("");
@@ -89,7 +96,7 @@ bool runtime::SessionHistory::readEvidence(const TaskData& task, const Json& eve
         req.environmentId = row.string(0);
         if (row.next()) throw Conflict("History reference matches more than one Session");
     }
-    if (req.threadId.empty() || req.runId.empty()) throw Conflict("History reference does not belong to this task");
+    if (req.threadId.empty() || (req.runId.empty() && !req.wholeSession)) throw Conflict("History reference does not belong to this task");
     if (!policy.allows(task.botId, Resource::sessionRead(req.environmentId, req.threadId))) throw Conflict("Session read access required");
     auto entry = encodeSessionExcerpt(readExcerpt(task.botId, req));
     return updates.change(task, [&](TaskData& current) {

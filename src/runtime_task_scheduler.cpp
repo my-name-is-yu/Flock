@@ -22,9 +22,10 @@
 
 namespace flockv0 {
 runtime::TaskScheduler::TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3, TaskUpdates& updates,
-                                      OutboxDispatch& dispatch, bool requireT3Connection, std::stop_token shutdown)
+                                      OutboxDispatch& dispatch, bool requireT3Connection, const std::function<Seconds()>& clock,
+                                      std::stop_token shutdown)
     : database(database), taskEvents(taskEvents), taskRouting(taskRouting), t3(t3), updates(updates), dispatch(dispatch),
-      requireT3Connection(requireT3Connection), shutdown(shutdown) {}
+      requireT3Connection(requireT3Connection), clock(clock), shutdown(shutdown) {}
 
 std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::eligible() {
     std::lock_guard lock(database.mutex);
@@ -36,6 +37,12 @@ WITH slots AS MATERIALIZED (
   UNION
   SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
     state IN ('queued','cancelling') OR replanning=1
+  )
+  UNION
+  SELECT task.id FROM tasks task JOIN waits wait ON wait.task_id=task.id AND wait.resolution IS NULL
+  WHERE task.state='waiting' AND (
+    (task.project_id='' AND wait.reason='settings') OR
+    (wait.reason='bot_notes_unavailable' AND task.id IN (SELECT id FROM automation_before_dispatch))
   )
   UNION
   SELECT id FROM tasks WHERE state='queued' AND replanning=1
@@ -87,6 +94,8 @@ std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::nextBatch(std:
 }
 
 bool runtime::TaskScheduler::selectProject(TaskData& task) {
+    const auto now = clock();
+    if (now < task.t3CheckAt.value_or(0)) return false;
     const auto bot = task.botId;
     const auto environment = task.environmentId;
     {
@@ -97,7 +106,9 @@ bool runtime::TaskScheduler::selectProject(TaskData& task) {
     return updates.change(
                task,
                [&](TaskData& current) {
-                   return !shutdown.stop_requested() && taskRouting.applyProjectCatalog(current, std::move(catalog));
+                   if (shutdown.stop_requested() || !taskRouting.applyProjectCatalog(current, std::move(catalog))) return false;
+                   current.t3CheckAt = current.projectId.empty() ? std::optional{now + 5} : std::nullopt;
+                   return true;
                },
                &task) &&
            !task.projectId.empty();

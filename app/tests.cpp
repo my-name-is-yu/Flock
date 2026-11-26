@@ -121,20 +121,26 @@ public:
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
-void retryScheduledTaskWithUpdatedReasoningEffort() {
+void scheduledTaskResumesAfterModelSetupChanges() {
     Sandbox temp;
     const auto folder = temp.path / "bots";
     auto config = botConfig("old-model");
     config["reasoningEffort"] = "high";
     createBot(folder / "release", config, "", "");
     Bots bots(folder);
-    Store store(temp.path / "state.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
     const auto now = utc(2026, 1, 1, 12, 0);
+    Store store(temp.path / "state.db",
+                {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); },
+                 .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
+                                     const Json& catalog) { bots.saveSetup(&target, id, edit, now, [](auto, auto) {}, catalog); }});
     const auto saved = bots.get("release").intake("");
     Automations(store).createAutomation(
         localOwner, saved, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
     Automations(store).fireDueAutomations(now + 1);
     const Id id = TaskList(store).tasks("release").at(0).task.id;
+    bots.updateRunSettings(
+        store, "release", {{"model", "rejected-model"}, {"reasoningEffort", "high"}}, now + 1, [](auto, auto) {},
+        Json::array({{{"slug", "rejected-model"}, {"reasoningEfforts", Json::array({"high"})}}}));
     struct RejectEffort final : Model {
         std::vector<Json> requests;
         ModelTurn decide(const ModelInput& input) override {
@@ -149,12 +155,22 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
     const auto rejected = Tasks(store).task(id);
     const auto* failure = std::get_if<ModelFailureWait>(&rejected.wait.value().details);
-    check(model.requests.size() == 1 && failure && failure->code == WaitFailureCode::unsupported_reasoning_effort,
-          "The rejected effort did not stop repeat attempts or preserve the failure type");
+    check(model.requests.size() == 1 && model.requests.front().at("model") == "rejected-model" && failure &&
+              failure->code == WaitFailureCode::unsupported_reasoning_effort,
+          "The task did not preserve the failure from the model it actually called");
+    for (int tick = 0; tick < 8; ++tick) runtime.tick();
+    const auto conversation = Conversations(store).conversation("release", 0, 20, Conversations::ConversationEvents::incoming);
+    check(model.requests.size() == 1 &&
+              std::ranges::count_if(conversation,
+                                    [](const Json& event) {
+                                        return event.at("kind") == "waiting" &&
+                                               event.at("data").at("text").get<std::string>().find("Model default") != std::string::npos;
+                                    }) == 1,
+          "The rejected effort did not remain visible once while the settings were unchanged");
     bots.updateRunSettings(store, "release",
                            {{"model", "new-model"}, {"reasoningEffort", ""}, {"environmentId", "new-env"}, {"projectId", "new-project"}},
                            now + 1, [](auto, auto) {});
-    TaskControl(store).operate(localOwner, TaskTarget::from(rejected.task, rejected.wait.value().id), "retry");
+    runtime.tick();
     for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
     const auto retried = Tasks(store).task(id);
     check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
@@ -164,7 +180,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
           "Retry did not preserve the original task route and Session settings while correcting its model");
 }
 
-enum class NotesRecovery { Retry, Edit };
+enum class NotesRecovery { Restore, Edit };
 enum class NotesFailurePoint { Planning, Dispatch };
 
 void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesFailurePoint failure) {
@@ -217,8 +233,7 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
         ConversationIntake(store).receive(localOwner, bots.get("release").intake(""), "edit-automation", "Check staging instead");
         runtime.runConversations();
         check(Tasks(store).task(release).task.intent == "Check staging instead", "the conversation did not save the edit");
-    } else
-        TaskControl(store).operate(localOwner, TaskTarget::from(paused.task, paused.wait.value().id), "retry");
+    }
     runtime.tick();
     const auto retried = Tasks(store).task(release);
     check(retried.task.state == TaskState::queued && retried.blockedBy && retried.blockedBy->id == triage && t3.commands.size() == 1,
@@ -1286,9 +1301,9 @@ void pullRequestSettings() {
 int main() {
     try {
         configuredSchedules();
-        retryScheduledTaskWithUpdatedReasoningEffort();
+        scheduledTaskResumesAfterModelSetupChanges();
         for (const auto failure : {NotesFailurePoint::Planning, NotesFailurePoint::Dispatch}) {
-            unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Retry, failure);
+            unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Restore, failure);
             unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit, failure);
         }
         pinnedConversationDestinations();

@@ -31,10 +31,8 @@
 namespace flockv0 {
 namespace {
 using enum InboxKind;
-constexpr std::pair<InboxKind, std::string_view> kinds[] = {{user_question, "user_question"},
-                                                            {unknown_delivery, "unknown_delivery"},
-                                                            {protected_input, "protected_input"},
-                                                            {policy_approval, "policy_approval"}};
+constexpr std::pair<InboxKind, std::string_view> kinds[] = {
+    {user_question, "user_question"}, {protected_input, "protected_input"}, {policy_approval, "policy_approval"}};
 
 Json key(const InboxTarget& item) {
     return {{"botId", item.botId},
@@ -70,7 +68,6 @@ void addAnchor(Json& view, Id anchor) {
 bool validDecision(InboxKind kind, std::string_view decision) {
     switch (kind) {
     case user_question: return decision == "answer";
-    case unknown_delivery: return decision == "reconcile";
     case protected_input: return decision == "supply";
     case policy_approval:
         return decision == "allow_once" || decision == "always_allow" || decision == "deny" || decision == "allow_next_time";
@@ -81,7 +78,6 @@ bool validDecision(InboxKind kind, std::string_view decision) {
 
 std::optional<InboxKind> inboxWaitKind(WaitReason reason) {
     if (reason == WaitReason::user_question) return user_question;
-    if (reason == WaitReason::unknown_delivery) return unknown_delivery;
     return {};
 }
 
@@ -283,13 +279,8 @@ void InboxStorage::decideInbox(const Person& actor, const InboxTarget& item, std
         policy_storage::fulfillSecret(database, policy, secretStorage, *this, actor, item.botId, item.itemId, textInput("value"));
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};
-        auto args = Json::object();
-        if (kind == user_question) args["text"] = textInput("text");
-        if (kind == unknown_delivery)
-            for (const auto* name : {"threadId", "runId", "questionId"})
-                if (data.contains(name)) args[name] = textInput(name);
-        taskOperations.operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision, args, 0,
-                               kind);
+        taskOperations.operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision,
+                               {{"text", textInput("text")}}, 0, kind);
     }
     transaction.commit();
 }

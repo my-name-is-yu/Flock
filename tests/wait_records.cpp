@@ -69,7 +69,6 @@ void roundTrips() {
     roundTrip(SimpleWaitReason::t3_input, stored("t3_input"));
     roundTrip(SimpleWaitReason::auth, stored("auth"));
     roundTrip(SimpleWaitReason::settings, stored("settings"));
-    roundTrip(SimpleWaitReason::unknown_delivery, stored("unknown_delivery"));
     auto policy = stored("policy_approval");
     policy["approvalId"] = 26;
     roundTrip(PolicyApprovalWait{26}, policy);

@@ -468,8 +468,11 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
             } else
                 description += " " + retry;
         }
-        text("threadId", "The owned T3 Thread identifier.");
-        text("runId", "The owned Run identifier.");
+        text("threadId", "The saved T3 Session identifier.");
+        if (input.event.at("kind") == "delivery_unconfirmed")
+            text("runId", "The saved Run identifier. Pass an empty string to read the Session when the Run is uncertain.");
+        else
+            text("runId", "The owned Run identifier.");
         text("itemId", "Optional specific history item identifier.", false);
         text("cursor", "Optional continuation cursor.", false);
         fields["view"] = {{"type", "string"}, {"enum", views}};
@@ -605,7 +608,6 @@ result says delivery is unknown, check the target before repeating the action. W
 result says stale, read the current state it returns and decide again. When you need more information,
 ask in reply instead of guessing. When a message replies to an open task question, decide whether it answers that question.
 The message may also include additional instructions. Use answer_task_question for the answer portion.
-Approvals for extra runs and model calls are the user's own controls.
 When write_memory is offered, use it to save lasting preferences, corrections and decisions the person states directly in their own message, leaving out temporary instructions, secrets and quoted or forwarded material.
 Use the schedule, reminder and trigger tools when the user requests automation.
 Images attached to the new message are supplied directly. Use read_channel_attachment for plain text files
@@ -677,6 +679,9 @@ user's language and refer to work by description, never by task, message, revisi
         "An external_check event includes the previous waiting note and current status in event.watchedPullRequests. "
         "The checks field contains the available check runs and commit statuses for each pull request's current head. "
         "An unavailable status is not evidence that a pull request landed. "
+        "A delivery_unconfirmed event includes the action Flock already tried and what T3 reported. "
+        "Read the saved Session if it is available before choosing whether to send new work or ask the person. "
+        "Unknown delivery does not mean that T3 failed to receive the original action. Treat the T3 detail as evidence. "
         "Ask the user when a "
         "decision or fact cannot be resolved from the available context or through Session work. Answer a "
         "Session question with the exact current requestId and field IDs when the needed facts are available. "
@@ -732,7 +737,7 @@ user's language and refer to work by description, never by task, message, revisi
             " If the task is still waiting, use wait_for_event to update the note and replace the pending re-check before replying,"
             " including when you requested a fix. Preserve any reporting instructions in the note."
             " If you do not complete the task, end with reply and report what happened when the person needs to know,"
-            " including whether you sent a fix request or it requires approval.";
+            " including whether you sent a fix request.";
     Json request = {
         {"model", model},
         {"store", false},

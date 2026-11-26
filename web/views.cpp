@@ -151,7 +151,7 @@ Json waitView(const Wait& wait) {
     const auto reason = wait.reason();
     Json view = {{"id", wait.id}, {"reason", waitReasonName(reason)}};
     if (wait.messageId) view["messageId"] = *wait.messageId;
-    if (reason == WaitReason::user_question || reason == WaitReason::t3_input) view["text"] = wait.text;
+    if (reason != WaitReason::policy_approval) view["text"] = wait.text;
     if (reason == WaitReason::user_question) view["choices"] = wait.choices();
     return view;
 }
@@ -263,7 +263,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const auto& data = event->at("data");
         const auto wait = kind == "waiting" ? std::optional{TaskHistory::waitingEvent(*event)} : std::nullopt;
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
-                              (wait && (wait->reason() == WaitReason::user_question || wait->reason() == WaitReason::model_failure));
+                              (wait && wait->reason() != WaitReason::policy_approval && wait->reason() != WaitReason::t3_input);
         auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage")) text = field(data.at("forwardedMessage"), "text");
         if (incoming) {
@@ -389,11 +389,15 @@ Json activity(const std::vector<TaskList::ActiveTask>& activeTasks, std::string_
                    {"activeTasks", Json::array()},
                    {"parallelTasks", Json::array()}};
     for (const auto& [task, wait, blocker] : activeTasks) {
-        if (task.state == TaskState::waiting && wait)
-            result["waits"].push_back(currentWait(task, *wait));
-        else {
+        const bool waiting = task.state == TaskState::waiting && wait.has_value();
+        const bool needsAttention =
+            waiting && (wait->reason() == WaitReason::model_failure || wait->reason() == WaitReason::bot_notes_unavailable ||
+                        wait->reason() == WaitReason::auth || wait->reason() == WaitReason::settings);
+        if (waiting) result["waits"].push_back(currentWait(task, *wait));
+        if (!waiting || needsAttention) {
             auto request = taskSummary(task);
             request["session"] = runView(task.activeRun ? task.activeRun : task.lastRun, task.environmentId);
+            if (needsAttention) request["problem"] = waitView(*wait);
             result["activeTasks"].push_back(std::move(request));
         }
         if (task.state == TaskState::queued && blocker) {

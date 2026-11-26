@@ -43,7 +43,6 @@
 #include "task_interaction_storage.hpp"
 #include "task_context_storage.hpp"
 #include "outbox_storage.hpp"
-#include "flock/session_settings.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
@@ -219,9 +218,7 @@ GitEvents::GitEvents(Store& store) : git_(StoreAccess::get(store).gitStorage), s
 
 TaskIntake::TaskIntake(Store& store) : database_(Database::of(store)), operations_(StoreAccess::get(store).taskOperations) {}
 
-TaskControl::TaskControl(Store& store)
-    : database_(Database::of(store)), outbox_(StoreAccess::get(store).outboxStorage), operations_(StoreAccess::get(store).taskOperations),
-      records_(StoreAccess::get(store).taskRecords), waits_(StoreAccess::get(store).waitStorage) {}
+TaskControl::TaskControl(Store& store) : database_(Database::of(store)), operations_(StoreAccess::get(store).taskOperations) {}
 
 TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords) {}
 
@@ -403,34 +400,6 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     return id;
 }
 
-Json TaskControl::reconciliationData(Id id, Id waitId, Json target, const IntakeResolver& intake) const {
-    TaskData task;
-    {
-        std::lock_guard lock(database_.mutex);
-        Transaction transaction(database_.db, Transaction::Mode::read);
-        const auto wait = waits_.currentWait(id);
-        if (!wait || wait->id != waitId || wait->reason() != WaitReason::settings) return target;
-        task = records_.load(id);
-        const auto pending = outbox_.outbox(task);
-        if (pending && (pending->phase != OutboxPhase::ready || pending->command.tool == CommandTool::start_in_session)) return target;
-        transaction.commit();
-    }
-
-    const auto current = intake(task.botId, task.request);
-    const auto environment = task.environmentId;
-    const auto destinations = current.config.value("conversationEnvironments", Json::object());
-    const auto project = task.projectId;
-    const bool namedRoute = std::ranges::any_of(destinations, [&](const Json& alias) {
-        return conversationEnvironmentId(alias) == environment &&
-               (environment != current.environmentId || field(alias, "projectId") == project);
-    });
-    const bool settingsMatch =
-        environment == current.environmentId ? (current.projectId.empty() || project == current.projectId) : current.environmentId.empty();
-    if (!settingsMatch && !namedRoute) throw Conflict("The project route changed. Cancel this task and submit a new request.");
-    target["session"] = current.config.value("session", Json::object());
-    return target;
-}
-
 TaskTarget TaskTarget::from(const TaskData& task, Id waitId) {
     return {task.botId, task.id, waitId, task.currentRevision.value_or(0), task.generation};
 }
@@ -497,50 +466,6 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
             taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
             journalStorage.journal(id, entry);
         }
-    } else if (operation == "retry" && (reason == WaitReason::model_failure || taskRouting.isUndispatchedNotesWait(task))) {
-        if (reason == WaitReason::bot_notes_unavailable) next = TaskState::queued;
-        if (const auto* failure = std::get_if<ModelFailureWait>(&wait->details);
-            failure && failure->code == WaitFailureCode::unsupported_reasoning_effort)
-            automationStorage.refreshPlannerModel(bot, task.config);
-        database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task.eventId});
-        task.feedback.reset();
-        database.writeJournal(id, "model_retry", {{"waitId", waitId}});
-    } else if (operation == "reconcile" &&
-               (reason == WaitReason::unknown_delivery || reason == WaitReason::auth || reason == WaitReason::settings)) {
-        if (data.contains("session")) {
-            const auto action = outboxStorage.outbox(task);
-            if (reason != WaitReason::settings || (action && action->phase != OutboxPhase::ready))
-                throw Conflict("Session settings can only be corrected before an unsent action");
-            task.config["session"] = normalizeSessionSettings(data["session"]);
-        }
-        if (task.actionId.empty()) {
-            if (task.activeRun)
-                next = TaskState::running;
-            else if (task.projectId.empty())
-                next = TaskState::queued;
-        } else {
-            auto action = outboxStorage.outbox(task);
-            if (!action) throw Conflict("No delivery to reconcile");
-            auto& command = action->command;
-            if (action->phase == OutboxPhase::ready && command.tool == CommandTool::answer_session_question) {
-                const auto differs = [&](std::string_view key, const std::string& saved) {
-                    const auto hint = field(data, key);
-                    return !hint.empty() && hint != saved;
-                };
-                if (differs("threadId", command.target.threadId) || differs("runId", command.target.runId) ||
-                    differs("questionId", command.questionId))
-                    throw Conflict("The supplied T3 question is outside the saved answer destination");
-            }
-            RunRef hint{field(data, "threadId"), field(data, "runId"), {}, {}};
-            if (!hint.threadId.empty() || !hint.runId.empty())
-                command.candidate = std::move(hint);
-            else
-                command.candidate.reset();
-            command.candidateQuestionId = field(data, "questionId");
-            outboxStorage.saveOutbox(*action);
-            next = TaskState::sending;
-        }
-        database.writeJournal(id, "reconcile_requested", {{"waitId", waitId}});
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
@@ -580,7 +505,7 @@ WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed')
-         OR (kind='waiting' AND wait_reason IN ('user_question','model_failure')))
+         OR (kind='waiting' AND wait_reason IN ('user_question','model_failure','bot_notes_unavailable','auth','settings')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop','bot_setup_undone'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')

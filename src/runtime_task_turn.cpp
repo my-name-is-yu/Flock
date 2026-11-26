@@ -66,6 +66,18 @@ runtime::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCal
 
 std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, const Json& event, const std::optional<PeerExchange>& peer,
                                                       bool canSend, bool canRead) {
+    if (event.at("kind") == "delivery_unconfirmed") {
+        std::vector<std::string> tools{"ask_user"};
+        if (task.activeRun && task.question)
+            tools.push_back("answer_session_question");
+        else {
+            const bool canFollowUp = RunReports::hasSettledRun(task) && !task.newSessionRequired;
+            if (canFollowUp) tools.push_back("follow_up");
+            if (!task.selectedSession || !canFollowUp) tools.push_back("delegate");
+        }
+        if (event.contains("sessionReadViews")) tools.push_back("session_read");
+        return tools;
+    }
     if (!task.runTargets().empty()) return {"delegate", "ask_user"};
     const auto id = task.id;
     if (peer && peer->sender == id && peer->phase == "question") return {"reply_to_bot", "ask_user"};
@@ -98,20 +110,51 @@ std::optional<Json> runtime::TaskTurn::launchDefaults(const TaskData& task) cons
 }
 
 void runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
-    const auto attempts = event["failures"].get<int>() + 1;
-    const auto why = bounded(secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
-    database.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
-                  {attempts, transient ? clock() + (1 << (attempts - 1)) : 0, event["id"]});
-    database.writeJournal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
+    const auto why = bounded(secretStorage.redactor(task.botId).text(detail), 2048);
+    database.writeJournal(task.id, "model_failure", {{"eventId", event["id"]}, {"text", why}});
     task.feedback = why;
-    if (cause == FailureCause::UnsupportedReasoningEffort)
-        waitStorage.wait(task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, why);
-    else if (attempts >= 3) {
-        if (cause == FailureCause::BotNotes && taskRouting.automationBeforeDispatch(task.id))
-            waitStorage.wait(task, SimpleWaitReason::bot_notes_unavailable, why);
-        else
-            waitStorage.wait(task, ModelFailureWait{}, why);
+    if (transient) {
+        database.exec("UPDATE events SET failures=min(failures+1,7),retry_at=?+min(1 << failures,60) WHERE id=?", {clock(), event["id"]});
+    } else if (cause == FailureCause::UnsupportedReasoningEffort)
+        waitStorage.wait(
+            task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort},
+            "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.");
+    else if (cause == FailureCause::Authentication)
+        waitStorage.wait(task, ModelFailureWait{WaitFailureCode::authentication_required}, "Open Flock Settings and sign in to ChatGPT.");
+    else if (cause == FailureCause::BotNotes)
+        waitStorage.wait(task, SimpleWaitReason::bot_notes_unavailable, "Restore access to this Bot’s Role and memory. " + why);
+    else
+        waitStorage.wait(task, ModelFailureWait{}, why);
+}
+
+bool runtime::TaskTurn::resume(const TaskData& task, const Wait& wait) {
+    const auto reason = wait.reason();
+    if (reason != WaitReason::model_failure && reason != WaitReason::bot_notes_unavailable) return false;
+    auto config = task.config;
+    if (const auto* failure = std::get_if<ModelFailureWait>(&wait.details)) {
+        botSetup.refreshPlannerModel(task.botId, config);
+        if (config == task.config && !(failure->code == WaitFailureCode::authentication_required && model.hasAuthentication())) return true;
+    } else {
+        try {
+            memoryStorage.loadNotes(task.botId, soul, clock());
+        } catch (const BotNotesUnavailable&) {
+            return true;
+        }
     }
+    updates.change(task, [&](TaskData& current) {
+        const bool requeue = taskRouting.isUndispatchedNotesWait(current);
+        waitStorage.clearWait(current, "bot_setup_restored");
+        current.config = std::move(config);
+        current.feedback.reset();
+        const auto event = taskEvents.currentEvent(current);
+        const bool hasDecisionEvent = !event.is_null() && event.at("consumed") != true;
+        if (current.eventId) database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {current.eventId});
+        current.state = requeue                                          ? TaskState::queued
+                        : !current.actionId.empty() && !hasDecisionEvent ? TaskState::sending
+                                                                         : TaskState::deciding;
+        return true;
+    });
+    return true;
 }
 
 void runtime::TaskTurn::failure(const TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
@@ -131,6 +174,7 @@ std::optional<TaskDecision> runtime::TaskTurn::persistTaskInference(Id id) {
     if (current.state == TaskState::deciding && current.generation == inference.generation && current.eventId == inference.eventId &&
         current.currentRevision == inference.revisionId) {
         if (const auto* error = std::get_if<InferenceFailure>(&inference.outcome)) {
+            if (error->config) current.config = *error->config;
             recordFailure(current, taskEvents.currentEvent(current), error->detail, error->transient, error->cause);
             updates.saveTask(current);
         } else {
@@ -154,9 +198,11 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                                                              const std::vector<std::string>& tools,
                                                              std::span<const OutboxInstruction> pending, Json choices,
                                                              const std::optional<PeerExchange>& peer) {
-    const auto prefill = sessionHistory.prefillHistory(task, event);
-    if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
-    if (prefill == SessionHistory::PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
+    if (event.at("kind") != "delivery_unconfirmed") {
+        const auto prefill = sessionHistory.prefillHistory(task, event);
+        if (prefill == SessionHistory::PrefillResult::Persisted) return std::nullopt;
+        if (prefill == SessionHistory::PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
+    }
     const auto bot = memoryStorage.loadNotes(task.botId, soul, clock());
     Json summary = {{"id", task.id},
                     {"botId", task.botId},
@@ -207,25 +253,27 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
     auto evidence = std::move(event.at("evidence"));
     event.erase("evidence");
     event.erase("consumed");
+    event.erase("failures");
+    event.erase("retryAt");
     if (gitHost && event.at("kind") == "result") gitStorage.projectTaskGitReads(*gitHost, task, event);
     if (event.at("kind") == "external_check") gitStorage.projectExternalCheck(gitHost, task, event);
     TaskInference inference{task.generation, event.at("id"), attempt, task.currentRevision};
+    auto config = task.config;
+    if (botSetup) botSetup.refreshPlannerModel(task.botId, config);
+    ModelInput input{summary,
+                     event,
+                     history,
+                     bot,
+                     tools,
+                     task.feedback.value_or(""),
+                     std::move(evidence),
+                     std::move(config),
+                     needsDoneWhen(task),
+                     summary.contains("forwardableUserMessage"),
+                     {},
+                     std::move(learningRunId)};
     try {
-        auto config = task.config;
-        botSetup.refreshPlannerModel(task.botId, config);
-        auto turn = modelCalls.callModel(task.botId, model,
-                                         {summary,
-                                          event,
-                                          history,
-                                          bot,
-                                          tools,
-                                          task.feedback.value_or(""),
-                                          std::move(evidence),
-                                          std::move(config),
-                                          needsDoneWhen(task),
-                                          summary.contains("forwardableUserMessage"),
-                                          {},
-                                          std::move(learningRunId)});
+        auto turn = modelCalls.callModel(task.botId, model, input);
         inference.usage = std::move(turn.usage);
         std::optional<Json> setup;
         if (turn.calls.size() == 2) {
@@ -240,13 +288,20 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
             const auto rejection = call.rejection;
             inference.outcome = TaskDecision{std::move(call), {}, 0, rejection, std::move(setup)};
         } else {
-            inference.outcome = InferenceFailure{"Return one task action and optionally one Bot setup change", false};
+            inference.outcome = TaskDecision{Decision{}, {}, 0, "Return one task action and optionally one Bot setup change"};
         }
     } catch (const ModelError& error) {
         inference.usage = error.usage;
-        const auto cause =
-            error.code == ModelErrorCode::unsupported_reasoning_effort ? FailureCause::UnsupportedReasoningEffort : FailureCause::Model;
-        inference.outcome = InferenceFailure{error.what(), error.transient, cause};
+        if (repairableModelOutput(error.code))
+            inference.outcome = TaskDecision{Decision{}, {}, 0, error.what()};
+        else {
+            auto cause = FailureCause::Model;
+            if (error.code == ModelErrorCode::unsupported_reasoning_effort) cause = FailureCause::UnsupportedReasoningEffort;
+            if (error.code == ModelErrorCode::authentication_required) cause = FailureCause::Authentication;
+            const bool transient = error.transient && cause == FailureCause::Model;
+            inference.outcome =
+                InferenceFailure{error.what(), transient, cause, transient ? std::nullopt : std::optional{std::move(input.config)}};
+        }
     }
     const auto id = task.id;
     std::lock_guard lock(database.mutex);
@@ -269,18 +324,20 @@ void runtime::TaskTurn::decide(const TaskData& task) {
         if (event["kind"] != "result" && task.lastRun) {
             if (const auto report = reports.settledSessionReport(task)) event["sessionResult"] = encodeRunReport(report->data);
         }
-        if (RunReports::hasSettledRun(task)) {
+        if (event["kind"] == "delivery_unconfirmed") {
+            if (sessionRead != "off" && event.at("action").contains("session")) event["sessionReadViews"] = {"messages", "activity"};
+        } else if (RunReports::hasSettledRun(task)) {
             auto views = sessionRead == "on_demand" ? Json::array({"messages", "activity"}) : Json::array();
             if (reports.reportRetry(task, event)) views.push_back("report");
             if (!views.empty()) event["sessionReadViews"] = std::move(views);
         }
         auto errors = database.query(R"SQL(
-SELECT id,data FROM journal WHERE task_id=? AND kind='tool_error' AND feedback_event_id=?
-AND id>coalesce((SELECT max(id) FROM journal WHERE task_id=? AND kind='model_retry'),0) ORDER BY id
+SELECT id,data FROM journal WHERE task_id=? AND kind='tool_error' AND feedback_event_id=? ORDER BY id DESC LIMIT 6
 )SQL",
-                                     {task.id, event["id"], task.id});
+                                     {task.id, event["id"]});
         event["decisionFeedback"] = Json::array();
         while (errors.next()) event["decisionFeedback"].push_back(encodeToolError(decodeToolError(errors.number(0), errors.json(1))));
+        std::reverse(event["decisionFeedback"].begin(), event["decisionFeedback"].end());
         if (!decision) {
             auto rows = database.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),

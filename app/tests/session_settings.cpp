@@ -1,4 +1,3 @@
-#include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
 #include "fixtures.hpp"
 #include "../../t3/internal.hpp"
@@ -16,7 +15,7 @@
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 #include "flock/wait.hpp"
-#include "flock/task_target.hpp"
+#include "flock/runtime_options.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -79,7 +78,6 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
         rejects<Conflict>([&] { intake("release", "Verify the fixture"); }, "Bot intake accepted " + session.dump());
     }
 
-    const Person owner{"fixture", true};
     Id id;
     {
         Store store(database);
@@ -90,23 +88,24 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     Store store(database);
     auto adapter = makeT3Mcp(credentials);
     LaunchModel model;
-    Runtime runtime(store, model, *adapter, {});
+    Seconds now = unixTime();
+    RuntimeOptions options;
+    options.clock = [&] { return now; };
+    options.intake = intake;
+    Runtime runtime(store, model, *adapter, {}, options);
     for (int i = 0; i < 3; ++i) runtime.tick();
     const auto waiting = Tasks(store).task(id);
     check(waiting.task.state == TaskState::waiting && waiting.wait && waiting.wait->reason() == WaitReason::settings,
-          "legacy settings did not leave an actionable settings wait");
+          "invalid Session settings did not remain visible");
     check(effects().empty(), "invalid persisted settings reached T3");
 
-    const Id waitId = waiting.wait.value().id;
-    const auto target = TaskTarget::from(waiting.task, waitId);
-    for (const auto& session : malformed) {
-        rejects<Conflict>([&] { TaskControl(store).operate(owner, target, "reconcile", {{"session", session}}); },
-                          "settings correction accepted " + session.dump());
-    }
-    check(taskJson(Tasks(store).task(id)).at("wait") == taskJson(waiting).at("wait"), "invalid corrections cleared the settings wait");
+    now += 5;
+    runtime.tick();
+    check(taskJson(Tasks(store).task(id)).at("wait") == taskJson(waiting).at("wait") && effects().empty(),
+          "Checking unchanged settings repeated the notice or sent work");
 
     createBot(folder / "release", config, "", "");
-    TaskControl(store).operate(owner, target, "reconcile", TaskControl(store).reconciliationData(id, waitId, Json::object(), intake));
+    now += 5;
     for (int i = 0; i < 2; ++i) runtime.tick();
     const auto resumed = Tasks(store).task(id);
     check(resumed.task.state == TaskState::running, "corrected task state was " + std::string(taskStateName(resumed.task.state)));

@@ -520,10 +520,10 @@ async function exerciseLiveRetry() {
   await waitFor(openStop, 'The cancellable wait did not arrive');
   openStop().click();
   const detailTitle = document.getElementById('detail-title');
-  if (detailTitle.textContent !== 'Release $$ $& got stuck') throw new Error('The Bot name was interpreted as a replacement pattern');
+  if (detailTitle.textContent !== 'Release $$ $&’s model needs attention') throw new Error('The Bot name was interpreted as a replacement pattern');
   fixture.bot.name = 'Recovery';
   refreshView();
-  await waitFor(() => detailTitle.textContent === 'Recovery got stuck', 'An open wait dialog kept the old Bot name');
+  await waitFor(() => detailTitle.textContent === 'Recovery’s model needs attention', 'An open request dialog kept the old Bot name');
   stop().click();
   const keep = document.querySelector('#detail .wait-stop-confirm .quiet');
   if (document.activeElement !== keep || fixture.stopRequests.length)

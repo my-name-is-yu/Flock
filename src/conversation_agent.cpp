@@ -153,22 +153,17 @@ std::string_view modelFailureReason(ModelErrorCode code) {
     return "inference_failed";
 }
 
-bool repairableModelOutput(ModelErrorCode code) {
-    return code == ModelErrorCode::invalid_tool_count || code == ModelErrorCode::invalid_tool_output ||
-           code == ModelErrorCode::unavailable_tool || code == ModelErrorCode::invalid_tool_arguments;
-}
-
 std::string modelFailureReply(ModelErrorCode code, bool ja) {
     if (code == ModelErrorCode::authentication_required)
-        return ja ? "ChatGPTへのサインインが必要です。Flockの設定でサインインしてから、もう一度メッセージを送ってください。"
-                  : "This Flock needs a ChatGPT sign-in. Open Flock Settings, sign in to ChatGPT, then send your message again.";
+        return ja ? "ChatGPTへのサインインが必要です。Flockの設定からサインインしてください。"
+                  : "This Flock needs a ChatGPT sign-in. Open Flock Settings and sign in to ChatGPT.";
     if (code == ModelErrorCode::unsupported_reasoning_effort)
         return ja ? "このモデルは選択された推論レベルに対応していません。Botの設定で別のレベルか「Model default」を選んでください。"
                   : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
     if (code == ModelErrorCode::image_rejected)
         return ja ? "添付画像を読み込めませんでした。別の画像に差し替えるか、画像を外して、メッセージを送り直してください。"
                   : "I couldn't read an attached image. Replace it or remove it, then send your message again.";
-    return ja ? "このメッセージを処理できませんでした。もう一度送ってください。" : "I couldn't process this message. Please send it again.";
+    return ja ? "このBotは応答を作成できませんでした。" : "This Bot couldn’t produce a reply.";
 }
 
 Json waitView(const Wait& wait) {
@@ -1056,15 +1051,13 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 hasDecision = true;
             } else {
                 const auto& error = std::get<ConversationModelFailure>(checkpoint.outcome);
-                const bool isRepair =
-                    checkpoint.attempt &&
-                    database.query("SELECT 1 FROM conversation_model_failures WHERE repair_attempt_id=?", {checkpoint.attempt}).next();
                 Id repair = 0;
-                if (checkpoint.attempt && repairableModelOutput(error.code) &&
+                if (checkpoint.attempt && !error.retryFrom && repairableModelOutput(error.code) &&
                     !database.query("SELECT 1 FROM conversation_model_failures WHERE message_id=? AND repair_attempt_id IS NOT NULL", {id})
                          .next()) {
                     repair = modelCalls.recordAttempt(modelCalls.messageModelScope(id), "conversation_turn", id, 0, 0);
                     database.exec("UPDATE conversation_turns SET reserved_attempt=? WHERE message_id=?", {repair, id});
+                    database.exec("DELETE FROM conversation_retries WHERE message_id=?", {id});
                 }
                 if (checkpoint.attempt)
                     database.exec(
@@ -1072,7 +1065,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                         " VALUES(?,?,?,?,?)",
                         {checkpoint.attempt, id, checkpoint.step, modelFailureReason(error.code), repair ? Json(repair) : Json(nullptr)});
                 if (!repair) {
-                    if (error.retryFrom && !isRepair)
+                    if (error.retryFrom)
                         deferConversation(id, *error.retryFrom);
                     else
                         finishTurn(message, modelFailureReply(error.code, ja), nullptr, ConversationReplyRoute::error);
@@ -1131,9 +1124,8 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
             } catch (const std::exception& error) {
                 const auto diagnostic =
                     Json::parse(Json(error.what()).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
-                finishError(ja ? "このBotのノートを読み込めませんでした (" + diagnostic +
-                                     ")。ファイルを修正してから、もう一度送ってください。"
-                               : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.");
+                finishError(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを確認してください。"
+                               : "I couldn't read this Bot's notes (" + diagnostic + "). Check its Role and memory.");
                 return;
             }
             const auto linkedDestinations = taskRouting.discoverLinkedTaskDestinations(t3, message.bot);
@@ -1147,14 +1139,15 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                     return;
                 }
                 auto repair = database.query(R"SQL(
-SELECT f.repair_attempt_id, t.reserved_attempt IS f.repair_attempt_id, f.reason
+SELECT f.repair_attempt_id, t.reserved_attempt IS f.repair_attempt_id, f.reason,
+       EXISTS (SELECT 1 FROM conversation_retries r WHERE r.message_id=f.message_id)
 FROM conversation_model_failures f JOIN conversation_turns t USING(message_id)
 WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
 )SQL",
                                              {id, step});
                 std::string feedback;
                 if (repair.next()) {
-                    if (!repair.number(1)) {
+                    if (!repair.number(1) && !repair.number(3)) {
                         // A previous worker claimed the repair, but no result survived.
                         database.exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
                                       {repair.number(0), id, step, "repair_interrupted"});

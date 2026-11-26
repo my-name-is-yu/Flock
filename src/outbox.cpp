@@ -289,9 +289,7 @@ Json outboxPayload(const OutboxAction& outbox) {
         data["expectedCommit"] = outbox.commit->expected;
         data["markedCommitChecks"] = outbox.commit->markedChecks;
     }
-    if (command.candidate) data["candidate"] = runJson(*command.candidate);
-    if (!command.candidateQuestionId.empty()) data["candidateQuestionId"] = command.candidateQuestionId;
-    if (!command.launchReceiptThreadId.empty()) data["launchReceiptThreadId"] = command.launchReceiptThreadId;
+    if (command.receipt) data["receipt"] = runJson(*command.receipt);
     if (outbox.stop) writeStopPayload(data, *outbox.stop);
     for (const auto& item : outbox.instructions) data["instructions"].push_back(instructionJson(item));
     for (const auto& source : outbox.sourceResultRefs) data["sourceResultRefs"].push_back(sourceJson(source));
@@ -352,10 +350,7 @@ Outbox decodeOutboxRow(const Statement& columns) {
     command.answers = readAnswers(row.require(data, "answers"), row.nested("answers"));
     const auto& target = row.require(data, "target");
     if (!target.is_null()) command.target = decodeRunRef(target, row.nested("target"));
-    if (const auto candidate = data.find("candidate"); candidate != data.end())
-        command.candidate = decodeRunRef(*candidate, row.nested("candidate"));
-    command.candidateQuestionId = row.optional<std::string>(data, "candidateQuestionId").value_or("");
-    command.launchReceiptThreadId = row.optional<std::string>(data, "launchReceiptThreadId").value_or("");
+    if (const auto receipt = data.find("receipt"); receipt != data.end()) command.receipt = decodeRunRef(*receipt, row.nested("receipt"));
 
     outbox.phase = *storedPhase;
     if (!columns.null(6)) outbox.revisionId = columns.number(6);

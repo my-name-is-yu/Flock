@@ -106,7 +106,7 @@ struct TaskData {
     std::optional<std::string> replanningDetail{}, cancellationDetail{};
     std::vector<OutboxInstruction> pendingInstructions{}, cancelledInstructions{};
     std::optional<PendingRunReport> pendingRunReport{};
-    std::optional<std::int64_t> pendingStageReport{}, sessionReconcileAt{}, workflowReconcileAt{};
+    std::optional<std::int64_t> pendingStageReport{}, t3CheckAt{};
     std::optional<WorkSession> selectedSession{};
     std::optional<SessionOrigin> sessionOrigin{};
     bool newSessionRequired = false, freshContextRequested = false;

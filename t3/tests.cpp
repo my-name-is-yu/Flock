@@ -348,21 +348,18 @@ int main(int argc, char** argv) {
               "recovered exact launch after restart");
         const auto run = delivery.run;
         other = launch;
-        other.launchReceiptThreadId = "thread";
+        other.receipt = RunRef{"thread", {}, {}, {}};
         const auto launchLists = effects("t3_thread_list").size();
         fixture({{"duplicate", true}});
         check(restarted->reconcile(other).kind == Delivery::Kind::Accepted && effects("t3_thread_list").size() == launchLists,
               "a launch receipt scopes reconciliation to its Thread even when other Threads match");
-        other.candidate = RunRef{"duplicate", {}, {}, {}};
-        check(restarted->reconcile(other).kind == Delivery::Kind::Unknown && effects("t3_thread_list").size() == launchLists,
-              "a manual hint cannot override the Thread in the launch receipt");
         fixture({{"duplicate", false}});
         other = launch;
         other.instruction += "x";
         check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "marker requires identical instruction");
         other = launch;
-        other.candidate = RunRef{"thread", "wrong", {}, {}};
-        check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "manual candidate does not override identity");
+        other.receipt = RunRef{"thread", "wrong", {}, {}};
+        check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "a mismatched Run receipt does not establish identity");
         fixture({{"duplicate", true}});
         check(adapter->reconcile(launch).kind == Delivery::Kind::Unknown, "multiple matching threads are ambiguous");
         fixture({{"duplicate", false}});

@@ -19,9 +19,7 @@ struct CommandPayload {
     nlohmann::json answers = nlohmann::json::object();
     RunRef target;
     std::string questionId;
-    std::optional<RunRef> candidate;
-    std::string candidateQuestionId;
-    std::string launchReceiptThreadId;
+    std::optional<RunRef> receipt;
     std::string gatewayEnvironmentId;
 };
 }

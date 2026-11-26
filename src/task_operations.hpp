@@ -12,7 +12,6 @@ namespace flockv0 {
 
 class Database;
 class Policy;
-class AutomationStorage;
 class BotLifecycleStorage;
 class InboxStorage;
 class JournalStorage;
@@ -36,14 +35,12 @@ enum class TaskSource { request, handoff, consultation };
 
 class TaskOperations {
 public:
-    TaskOperations(Database& database, AutomationStorage& automationStorage, BotLifecycleStorage& botLifecycle, const Policy& permissions,
-                   JournalStorage& journalStorage, OutboxStorage& outboxStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
-                   TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-                   InboxStorage& inboxStorage)
-        : database(database), automationStorage(automationStorage), botLifecycle(botLifecycle), permissions(permissions),
-          journalStorage(journalStorage), outboxStorage(outboxStorage), peerStorage(peerStorage), secretStorage(secretStorage),
-          taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {
-    }
+    TaskOperations(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, JournalStorage& journalStorage,
+                   OutboxStorage& outboxStorage, PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
+                   TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage, InboxStorage& inboxStorage)
+        : database(database), botLifecycle(botLifecycle), permissions(permissions), journalStorage(journalStorage),
+          outboxStorage(outboxStorage), peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents),
+          taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {}
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
@@ -58,7 +55,6 @@ public:
     void requestCancellation(TaskData&, SessionStop stop = {});
 private:
     Database& database;
-    AutomationStorage& automationStorage;
     BotLifecycleStorage& botLifecycle;
     const Policy& permissions;
     JournalStorage& journalStorage;

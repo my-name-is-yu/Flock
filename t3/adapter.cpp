@@ -665,14 +665,10 @@ void queuedMatches(Client& client, Scan& scan, const std::string& thread, const 
 Delivery reconcileWork(Client& client, const Command& command) {
     const bool launch = command.tool == CommandTool::delegate;
     const bool direct = command.tool == CommandTool::message_session;
-    const auto& destination = launch ? command.launchReceiptThreadId : command.target.threadId;
-    const auto hint = command.candidate ? std::string_view(command.candidate->threadId) : std::string_view{};
-    if (!destination.empty() && !hint.empty() && hint != destination)
-        return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
+    const auto& receipt = command.receipt;
+    const auto destination = launch ? (receipt ? receipt->threadId : std::string{}) : command.target.threadId;
     Scan scan;
     auto threads = destination.empty() ? projectThreads(client, scan, command) : std::vector{destination};
-    if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
-        threads.emplace_back(hint);
     const auto expected = sessionPrompt(command.actionId, command.instruction);
     struct Match {
         RunRef run;
@@ -715,9 +711,8 @@ Delivery reconcileWork(Client& client, const Command& command) {
         return result(Outcome::Unknown, matches.size() > 1 ? "More than one T3 Run matches the saved action"
                                                            : "T3 history did not establish exactly one Run for the saved action");
     const auto& [match, queued] = matches.begin()->second;
-    if ((!hint.empty() && hint != match.threadId) ||
-        (command.candidate && !command.candidate->runId.empty() && command.candidate->runId != match.runId))
-        return result(Outcome::Unknown, "The supplied T3 Run does not match the saved action");
+    if (receipt && (receipt->threadId != match.threadId || (!receipt->runId.empty() && receipt->runId != match.runId)))
+        return result(Outcome::Unknown, "The matching T3 Run differs from the saved receipt");
     auto recovered = result(Outcome::Accepted, {}, match);
     if (direct) recovered.delivery = queued ? "queued" : "started";
     return recovered;
@@ -1157,13 +1152,8 @@ public:
                 useLocalThreadLink(recovered.run, command.environmentId, origin);
                 return recovered;
             }
-            const auto& hint = command.candidate;
-            if ((hint && ((!hint->threadId.empty() && hint->threadId != command.target.threadId) ||
-                          (!hint->runId.empty() && hint->runId != command.target.runId))) ||
-                (!command.candidateQuestionId.empty() && command.candidateQuestionId != command.questionId))
-                return result(Outcome::Unknown, "The supplied T3 question is outside the saved answer destination");
             if (pending(client, command.target.threadId).contains(command.questionId))
-                return result(Outcome::Unknown, "The T3 question is still pending. Confirm it in T3 before proceeding");
+                return result(Outcome::Unknown, "The original question is still open in T3");
             return result(Outcome::QuestionGone);
         } catch (const Failure& failure) {
             return failureDelivery(failure);
@@ -1321,12 +1311,16 @@ public:
     }
 
     Excerpt read(const ReadRequest& request) override {
-        if (request.threadId.empty() || request.runId.empty() || (request.view != "activity" && request.view != "messages") ||
-            (request.itemId.empty() && request.offset != 0) || request.offset > 9007199254740991ULL)
+        if (request.threadId.empty() || (request.runId.empty() && !request.wholeSession) ||
+            (request.view != "activity" && request.view != "messages") || (request.itemId.empty() && request.offset != 0) ||
+            request.offset > 9007199254740991ULL)
             throw Failure(Failure::Kind::Settings, "The T3 history read requires an owned Run and a valid view and offset");
         const auto gateway = gatewayFor(request.environmentId, request.gatewayEnvironmentId);
         Client client(credential(gateway, request.config), {}, targetRoute(request.environmentId, gateway));
         const RunRef run{request.threadId, request.runId, {}, request.gatewayEnvironmentId};
+        const auto belongs = [&](const Json& item) {
+            return request.wholeSession ? localItem(item, request.threadId) : fromRun(item, run);
+        };
         Excerpt excerpt;
         excerpt.threadId = request.threadId;
         excerpt.runId = request.runId;
@@ -1340,14 +1334,14 @@ public:
         };
         if (!request.itemId.empty()) {
             const auto item = readItem(client, request.threadId, request.view, request.itemId, request.offset);
-            if (!fromRun(item, run)) throw Failure(Failure::Kind::Settings, "T3 history item does not belong to the requested Run");
+            if (!belongs(item)) throw Failure(Failure::Kind::Settings, "T3 history item is outside the saved destination");
             copy(item, request.offset);
             return excerpt;
         }
         Scan scan;
         walkThreadHistoryForward(client, scan, request.threadId, request.view, ExcerptChars, readCursor(request.cursor),
                                  [&](const Json& item) {
-                                     if (!fromRun(item, run) || str(item, "text").empty()) return true;
+                                     if (!belongs(item) || str(item, "text").empty()) return true;
                                      if (!excerpt.itemId.empty()) {
                                          excerpt.more = true;
                                          return false;

@@ -21,6 +21,7 @@
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
 #include "flock/session_prompt.hpp"
+#include "flock/session_settings.hpp"
 #include "flock/command.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
@@ -39,6 +40,7 @@
 #include "session_participation_storage.hpp"
 #include "session_read_storage.hpp"
 #include "task_events.hpp"
+#include "task_interaction_storage.hpp"
 #include "task_records.hpp"
 #include "task_routing.hpp"
 #include "task_run_reports.hpp"
@@ -53,6 +55,10 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+namespace {
+constexpr Seconds deliveryCheckInterval = 5;
+}
+
 void runtime::OutboxDispatch::stop(TaskData task) {
     const bool cancel = task.state == TaskState::cancelling;
     const auto intent = cancel ? RunStopIntent::cancel : RunStopIntent::replan;
@@ -104,6 +110,7 @@ void runtime::OutboxDispatch::stop(TaskData task) {
         updates.change(task, [&](TaskData& current) {
             if (!outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::superseded, OutboxPhase::ready)) return false;
             current.actionId.clear();
+            current.t3CheckAt.reset();
             waitStorage.clearWait(current, "superseded_instruction");
             database.writeJournal(current.id, "delivery_superseded",
                                   {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
@@ -156,6 +163,9 @@ void runtime::OutboxDispatch::instructionDelivery(TaskData& task, const Outbox& 
 }
 
 bool runtime::OutboxDispatch::assignedRunMatches(const TaskData& task, const CommandPayload& command, const RunRef& run) {
+    if (command.receipt &&
+        (command.receipt->threadId != run.threadId || (!command.receipt->runId.empty() && command.receipt->runId != run.runId)))
+        return false;
     const auto& environment = command.environmentId;
     auto owner = database.query("SELECT action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
                                 {environment, run.threadId, run.runId});
@@ -208,12 +218,6 @@ AssignedRun runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, c
     return run;
 }
 
-void runtime::OutboxDispatch::rememberRunCandidate(Outbox action, const RunRef& ref) {
-    action.command.candidate = ref;
-    if (action.command.tool == CommandTool::delegate) action.command.launchReceiptThreadId = ref.threadId;
-    outboxStorage.saveOutbox(action);
-}
-
 void runtime::OutboxDispatch::writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed) {
     if (taskRunReports.recordDestinationReport(task, run, observed) && task.state == TaskState::cancelling) runs.cancelDone(task);
 }
@@ -250,13 +254,72 @@ bool runtime::OutboxDispatch::deferDestinationDelivery(TaskData& task, Destinati
         writeDestinationReport(task, run, observed);
         return true;
     }
-    if (phase == OutboxPhase::started && !outcome.run.threadId.empty() && !action.command.candidate) {
-        rememberRunCandidate(action, outcome.run);
-        run.ref.link = outcome.run.link;
-        run.ref.threadId = outcome.run.threadId;
-    }
     setDestinationStatus(run, DestinationRunPhase::confirmation_pending, detail);
     run.retryAt = clock() + 5;
+    return true;
+}
+
+void runtime::OutboxDispatch::reportUnconfirmedDelivery(TaskData& task, const Outbox& action, std::string_view detail) {
+    const auto& cmd = action.command;
+    const auto& session = cmd.receipt ? *cmd.receipt : cmd.target;
+    Json event{{"kind", "delivery_unconfirmed"},
+               {"action",
+                {{"actionId", cmd.actionId},
+                 {"tool", commandToolName(cmd.tool)},
+                 {"environmentId", cmd.environmentId},
+                 {"projectId", cmd.projectId}}},
+               {"detail", detail}};
+    if (!session.threadId.empty()) event["action"]["session"] = runJson(session);
+    if (!cmd.gatewayEnvironmentId.empty()) event["action"]["gatewayEnvironmentId"] = cmd.gatewayEnvironmentId;
+    if (cmd.tool == CommandTool::answer_session_question) {
+        event["action"]["questionId"] = cmd.questionId;
+        event["action"]["answers"] = cmd.answers;
+    } else {
+        event["action"]["instruction"] = bounded(cmd.instruction, 8000);
+    }
+    const auto previous = task.eventId;
+    if (taskEvents.event(task, "delivery/" + cmd.actionId, policy.secretRedactor(task.botId).record(event))) {
+        database.exec("UPDATE events SET consumed=1 WHERE task_id=? AND id=?", {task.id, previous});
+        if (task.question) task.question->target = questionTarget(task);
+    }
+    task.state = TaskState::deciding;
+}
+
+bool runtime::OutboxDispatch::deferSingleDelivery(TaskData& task, const Outbox& action, OutboxPhase attemptedPhase, const Delivery& outcome,
+                                                  DeliveryOutcome delivery) {
+    const bool cancelling = task.state == TaskState::cancelling;
+    const auto& key = action.command.actionId;
+    const bool unsent = attemptedPhase == OutboxPhase::ready && delivery == DeliveryOutcome::DefinitelyUnsent;
+    auto detail = outcome.detail.empty() ? "T3 did not confirm delivery." : bounded(outcome.detail, 2048);
+    if (unsent) {
+        outboxStorage.setOutboxPhase(key, cancelling ? OutboxPhase::closed : OutboxPhase::ready);
+        if (cancelling) {
+            task.actionId.clear();
+            task.t3CheckAt.reset();
+        }
+    }
+    if (cancelling || task.replanning) {
+        auto& savedDetail = cancelling ? task.cancellationDetail : task.replanningDetail;
+        if (savedDetail == detail && !unsent) return false;
+        savedDetail = detail;
+        database.writeJournal(task.id, cancelling ? "cancelling" : "replanning", {{"detail", detail}, {"actionId", key}});
+        return true;
+    }
+    task.t3CheckAt = clock() + deliveryCheckInterval;
+    if (outcome.kind == Delivery::Kind::Auth || outcome.kind == Delivery::Kind::Settings ||
+        (unsent && outcome.kind == Delivery::Kind::NotAccepted)) {
+        const auto reason = outcome.kind == Delivery::Kind::Auth ? SimpleWaitReason::auth : SimpleWaitReason::settings;
+        if (reason == SimpleWaitReason::auth) detail = "Sign in again in T3 Code or reconnect this environment in Flock Settings.";
+        const auto wait = waitStorage.currentWait(task.id);
+        if (!wait || wait->reason() != waitReason(reason) || wait->text != detail) waitStorage.wait(task, reason, std::move(detail));
+        return true;
+    }
+    if (task.state == TaskState::waiting) {
+        waitStorage.clearWait(task, "connection_restored");
+        task.state = TaskState::sending;
+    }
+    if (attemptedPhase == OutboxPhase::started && !task.workflow && task.state != TaskState::deciding)
+        reportUnconfirmedDelivery(task, action, detail);
     return true;
 }
 
@@ -265,10 +328,9 @@ void runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Deliver
         if (terminal(task)) return false;
         const auto& key = action.command.actionId;
         const bool destination = action.destinationAction;
-        auto saved = destination ? outboxStorage.outbox(task, key) : std::nullopt;
-        if (destination ? (!saved || (saved->phase != OutboxPhase::ready && saved->phase != OutboxPhase::started))
-                        : task.actionId != action.command.actionId)
-            return false;
+        if (!destination && task.actionId != key) return false;
+        auto saved = outboxStorage.outbox(task, key);
+        if (!saved || (saved->phase != OutboxPhase::ready && saved->phase != OutboxPhase::started)) return false;
         if (outcome.run.gatewayEnvironmentId.empty()) {
             auto gateway = action.command.gatewayEnvironmentId;
             if (gateway.empty() && !destination) gateway = task.gatewayEnvironmentId.value_or("");
@@ -280,10 +342,22 @@ void runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Deliver
         }
         const bool cancelling = task.state == TaskState::cancelling;
         const bool reply = action.command.tool == CommandTool::answer_session_question;
-        const auto delivery = classifyDelivery(task, action, outcome, reply);
+        const auto delivery = classifyDelivery(task, *saved, outcome, reply);
 
-        const bool accepted = delivery == DeliveryOutcome::Accepted && (!destination || saved->phase == OutboxPhase::started);
+        const bool accepted = delivery == DeliveryOutcome::Accepted && saved->phase == OutboxPhase::started;
         if (accepted) outboxStorage.setOutboxPhase(key, OutboxPhase::accepted);
+        if (delivery == DeliveryOutcome::Unknown && action.phase == OutboxPhase::ready && saved->phase == OutboxPhase::started && !reply &&
+            !outcome.run.threadId.empty() &&
+            (action.command.target.threadId.empty() || action.command.target.threadId == outcome.run.threadId)) {
+            saved->command.receipt = outcome.run;
+            outboxStorage.saveOutbox(*saved, OutboxPhase::started);
+            database.writeJournal(id, "run_id_pending", {{"actionId", key}, {"thread", runJson(outcome.run)}});
+            if (destination) {
+                auto& run = destinationRun(task, key);
+                run.ref.link = outcome.run.link;
+                run.ref.threadId = outcome.run.threadId;
+            }
+        }
         if (destination) {
             auto& run = destinationRun(task, key);
             if (!accepted) return deferDestinationDelivery(task, run, *saved, outcome, delivery);
@@ -328,6 +402,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 database.writeJournal(id, "session_answered",
                                       {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
             task.actionId.clear();
+            task.t3CheckAt.reset();
             if (!cancelling) task.state = TaskState::running;
             return true;
         }
@@ -335,44 +410,48 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             outboxStorage.setOutboxPhase(key, OutboxPhase::closed);
             questions.closeQuestion(task, "question_gone", "resolved_or_expired");
             task.actionId.clear();
+            task.t3CheckAt.reset();
             if (!cancelling) task.state = TaskState::running;
             return true;
         }
-        if (delivery == DeliveryOutcome::Unknown && !outcome.run.threadId.empty() && action.phase == OutboxPhase::ready && !reply &&
-            !cancelling) {
-            rememberRunCandidate(action, outcome.run);
-            database.writeJournal(id, "run_id_pending", {{"actionId", action.command.actionId}, {"thread", runJson(outcome.run)}});
-            return true;
-        }
-        const auto reason = outcome.kind == Delivery::Kind::Auth       ? SimpleWaitReason::auth
-                            : outcome.kind == Delivery::Kind::Settings ? SimpleWaitReason::settings
-                                                                       : SimpleWaitReason::unknown_delivery;
-        auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" : bounded(outcome.detail, 2048);
-        if (reply && delivery == DeliveryOutcome::DefinitelyUnsent) detail = bounded("The Session answer was not sent. " + detail, 2048);
-        if (delivery == DeliveryOutcome::DefinitelyUnsent) {
-            outboxStorage.setOutboxPhase(key, cancelling ? OutboxPhase::closed : OutboxPhase::ready);
-            if (cancelling) task.actionId.clear();
-        }
-        if (cancelling) {
-            if (task.cancellationDetail == detail && delivery == DeliveryOutcome::Unknown) return false;
-            task.cancellationDetail = detail;
-            database.writeJournal(id, "cancelling", {{"detail", detail}, {"actionId", action.command.actionId}});
-        } else {
-            const auto wait = waitStorage.currentWait(id);
-            if (!wait || wait->reason() != waitReason(reason) || wait->text != detail)
-                waitStorage.wait(task, reason, std::move(detail));
-            else if (delivery == DeliveryOutcome::Unknown)
-                return false;
-        }
-        return true;
+        return deferSingleDelivery(task, *saved, action.phase, outcome, delivery);
     });
 }
 
 void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
-    if (shutdown.stop_requested()) return;
+    if (shutdown.stop_requested() || (action.phase != OutboxPhase::ready && action.phase != OutboxPhase::started)) return;
     auto cmd = command(task, action);
     const auto id = task.id;
-    Delivery outcome;
+    const bool destination = action.destinationAction;
+    const auto applyT3Delivery = [&](Delivery observed) {
+        if (!destination && observed.kind == Delivery::Kind::Settings)
+            observed.detail = "Check the Bot’s Session settings and the T3 connection in Flock Settings.";
+        applyDelivery(id, action, std::move(observed));
+    };
+    std::optional<SessionDispatchFileLock> dispatch;
+    if (destination) dispatch.emplace(path, SessionDispatchFileLock::Mode::shared);
+    if (action.phase == OutboxPhase::ready || destination) {
+        std::lock_guard lock(database.mutex);
+        const auto current = taskRecords.load(id);
+        if (action.phase == OutboxPhase::ready &&
+            (botLifecycle.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
+            return;
+        if (destination) {
+            const auto saved = outboxStorage.outbox(current, cmd.actionId);
+            if (saved && saved->stop) return;
+        }
+    }
+    const auto contact = [&](const auto& request) {
+        Delivery outcome;
+        try {
+            outcome = request();
+        } catch (const std::exception&) {
+            outcome.detail = "Flock could not reach T3 to confirm delivery.";
+        }
+        applyT3Delivery(std::move(outcome));
+    };
+    if (action.phase == OutboxPhase::started) return contact([&] { return t3.reconcile(cmd); });
+
     const bool usesExistingSession = cmd.tool == CommandTool::follow_up || cmd.tool == CommandTool::start_in_session;
     const bool sendsToSession = usesExistingSession || cmd.tool == CommandTool::answer_session_question;
     const bool preparesTaskContract = cmd.tool == CommandTool::delegate || cmd.tool == CommandTool::start_in_session;
@@ -410,21 +489,6 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
         resource = Resource{Action::t3_send, Resource::sessionRead(cmd.environmentId, cmd.target.threadId).target,
                             cmd.tool == CommandTool::answer_session_question};
     }
-    const bool destination = action.destinationAction;
-    const bool firstSend = action.phase == OutboxPhase::ready;
-    std::optional<SessionDispatchFileLock> dispatch;
-    if (destination) dispatch.emplace(path, SessionDispatchFileLock::Mode::shared);
-    if (firstSend || destination) {
-        std::lock_guard lock(database.mutex);
-        const auto current = taskRecords.load(id);
-        if (firstSend &&
-            (botLifecycle.botPaused(cmd.ownerBotId) || current.state == TaskState::cancelling || current.generation != task.generation))
-            return;
-        if (destination) {
-            const auto saved = outboxStorage.outbox(current, cmd.actionId);
-            if (saved && saved->stop) return;
-        }
-    }
     const auto operation = std::string(destination ? runOutboxOperation : "outbox/") + cmd.actionId;
     const auto refused = [&](ApprovalGate gate) {
         if (destination) return applyDelivery(id, action, {Delivery::Kind::NotAccepted, {}, std::string(approvalError(gate)), true});
@@ -432,6 +496,8 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
             if (current.actionId != action.command.actionId) return false;
             if (!outboxStorage.setOutboxPhase(action.command.actionId, OutboxPhase::closed, OutboxPhase::ready)) return false;
             current.actionId.clear();
+            current.t3CheckAt.reset();
+            waitStorage.clearWait(current, "action_closed");
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
             current.feedback = approvalError(gate);
             if (current.state == TaskState::deciding)
@@ -447,182 +513,195 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     const auto connectionUnavailable = [&] {
         applyDelivery(id, action, {Delivery::Kind::Auth, {}, "Connect this T3 environment in Flock settings before sending work.", true});
     };
-    if (firstSend) {
-        if (disconnected()) return connectionUnavailable();
-        if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
-        if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId, resource->action, resource->target))
-            return applyDelivery(id, action, {Delivery::Kind::Settings, {}, "Session action denied by installation policy.", true});
-        if (preparesTaskContract) {
-            try {
-                std::lock_guard lock(database.mutex);
-                if (action.instructionBase) {
-                    prompts.prepareDelegation(task, action);
-                    if (!outboxStorage.prepareOutbox(action)) {
-                        auto saved = outboxStorage.outbox(task, cmd.actionId);
-                        if (!saved || saved->phase != OutboxPhase::ready || saved->instructionBase) return;
-                        action = std::move(*saved);
-                    }
+    if (disconnected()) return connectionUnavailable();
+    if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
+    if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId, resource->action, resource->target))
+        return applyDelivery(id, action, {Delivery::Kind::Settings, {}, "Session action denied by installation policy.", true});
+    if (preparesTaskContract) {
+        try {
+            std::lock_guard lock(database.mutex);
+            if (action.instructionBase) {
+                prompts.prepareDelegation(task, action);
+                if (!outboxStorage.prepareOutbox(action)) {
+                    auto saved = outboxStorage.outbox(task, cmd.actionId);
+                    if (!saved || saved->phase != OutboxPhase::ready || saved->instructionBase) return;
+                    action = std::move(*saved);
                 }
-                cmd.instruction = action.command.instruction;
-            } catch (const Conflict& error) {
-                return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
             }
-        }
-        if (sendsWork) {
-            const auto scrub = policy.secretRedactor(cmd.ownerBotId);
-            if (task.workflow && scrub.text(task.workflow->inputArtifactVersion) != task.workflow->inputArtifactVersion)
-                return applyDelivery(
-                    id, action, {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
-            const auto marker = sessionPrompt(cmd.actionId, {});
-            if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size() - marker.size());
-            action.sessionContext = {};
-            action.command.instruction = scrub.text(cmd.instruction);
-            cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
-            if (cmd.instruction.size() > limits::session_prompt::maxBytes)
-                return applyDelivery(id, action, {Delivery::Kind::Settings, {}, SessionPrompts::ContextLimit{}.what(), true});
-        }
-        auto payload = Json{{"tool", commandToolName(cmd.tool)},
-                            {"instruction", cmd.instruction},
-                            {"questionId", cmd.questionId},
-                            {"answers", cmd.answers},
-                            {"run", runJson(cmd.target)},
-                            {"projectId", cmd.projectId},
-                            {"config", cmd.config},
-                            {"environmentId", cmd.environmentId}};
-        if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
-        const auto assess = [&](const TaskData& current, bool claim) {
-            const auto origin = policyApprovals.taskPolicyOrigin(current);
-            if (usesExistingSession) {
-                const Resource launch{Action::environment_launch, cmd.environmentId, true};
-                const auto launchPolicy = policy.check(cmd.ownerBotId, launch);
-                if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
-                if (launchPolicy == PolicyResult::ask && policy.check(cmd.ownerBotId, *resource) == PolicyResult::allow)
-                    return policyApprovals.approveAction(origin, launch, operation, payload, clock(), claim);
-            }
-            return resource ? policyApprovals.approveAction(origin, *resource, operation, payload, clock(), claim) : ApprovalGate::allow;
-        };
-        if (resource) {
-            ApprovalGate gate;
-            {
-                std::lock_guard lock(database.mutex);
-                Transaction tx(database.db);
-                const auto current = destination ? taskRecords.load(id) : task;
-                if (destination && current.state == TaskState::cancelling) return;
-                gate = assess(current, false);
-                tx.commit();
-            }
-            if (gate == ApprovalGate::waiting) {
-                if (destination)
-                    destinationStatus(id, cmd.actionId, DestinationRunPhase::confirmation_pending, "Waiting for launch approval");
-                return;
-            }
-            if (gate != ApprovalGate::allow) return refused(gate);
-        }
-        std::optional<Delivery> stopped;
-        try {
-            stopped = t3.preflight(cmd);
-            if (!stopped)
-                cmd.authGeneration =
-                    t3.authGeneration(cmd.gatewayEnvironmentId.empty() ? cmd.environmentId : cmd.gatewayEnvironmentId, cmd.config);
-        } catch (const std::exception& error) {
-            stopped = Delivery{Delivery::Kind::Settings, {}, error.what()};
-        }
-        if (stopped) {
-            stopped->definitelyUnsent = true;
-            return applyDelivery(id, action, *stopped);
-        }
-        if (!dispatch) dispatch.emplace(path, SessionDispatchFileLock::Mode::shared);
-        if (disconnected()) return connectionUnavailable();
-        auto policyGate = ApprovalGate::allow;
-        const auto startSend = [&](TaskData& current) {
-            if (shutdown.stop_requested() || terminal(current) || current.state == TaskState::cancelling ||
-                botLifecycle.botPaused(cmd.ownerBotId))
-                return false;
-            if (destination) {
-                if (!taskRouting.projectRouteReady(id, cmd.actionId)) return false;
-            } else if (current.actionId != action.command.actionId)
-                return false;
-            if (!sessionActionAllowed(current)) {
-                policyGate = ApprovalGate::denied;
-                return false;
-            }
-            if (resource) {
-                policyGate = assess(current, true);
-                if (policyGate != ApprovalGate::allow) return false;
-            }
-            if (usesExistingSession && current.sourceMessageId) {
-                const auto source = conversationTurns.loadTurnMessage(*current.sourceMessageId);
-                const SessionTarget target{cmd.environmentId, cmd.target.threadId,
-                                           cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
-                auto participant = database.query(R"SQL(
-SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
-)SQL",
-                                                  {cmd.ownerBotId, target.environmentId, target.threadId});
-                if (participant.next() && (participant.string(1) == conversationTurns.turnActor(source).id ||
-                                           sessionReadStorage.connectedSessionAccess(source, target)))
-                    action.sessionParticipationId = participant.number(0);
-            }
-            if (sendsWork) cmd.instruction = prompts.prepareStandingContext(action, current, clock());
-            if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
-            journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
-            return true;
-        };
-        try {
-            if (!(destination ? updates.changeTask(id, startSend) : updates.change(task, startSend))) {
-                if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
-                return;
-            }
-        } catch (const BotNotesUnavailable& error) {
-            if (!destination && updates.change(task, [&](TaskData& current) {
-                    if (current.actionId != cmd.actionId || !taskRouting.automationBeforeDispatch(id)) return false;
-                    waitStorage.wait(current, SimpleWaitReason::bot_notes_unavailable,
-                                     bounded(policy.secretRedactor(current.botId).text(error.what()), 2048));
-                    return true;
-                }))
-                return;
-            return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
+            cmd.instruction = action.command.instruction;
         } catch (const Conflict& error) {
             return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
         }
-    } else if (action.phase != OutboxPhase::started)
-        return;
-    try {
-        if (firstSend)
-            outcome = !sessionActionAllowed(task) || (resource && policy.forbidden(cmd.ownerBotId, resource->action, resource->target)) ||
-                              (usesExistingSession && policy.forbidden(cmd.ownerBotId, Action::environment_launch, cmd.environmentId))
-                          ? Delivery{Delivery::Kind::NotAccepted, {}, "Session action denied by installation policy.", true}
-                          : t3.send(cmd);
-        else
-            outcome = t3.reconcile(cmd);
-    } catch (const std::exception&) {
-        outcome.detail = "T3 communication failed; check the saved action before retrying";
     }
-    applyDelivery(id, action, std::move(outcome));
+    if (sendsWork) {
+        const auto scrub = policy.secretRedactor(cmd.ownerBotId);
+        if (task.workflow && scrub.text(task.workflow->inputArtifactVersion) != task.workflow->inputArtifactVersion)
+            return applyDelivery(id, action,
+                                 {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
+        const auto marker = sessionPrompt(cmd.actionId, {});
+        if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size() - marker.size());
+        action.sessionContext = {};
+        action.command.instruction = scrub.text(cmd.instruction);
+        cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
+        if (cmd.instruction.size() > limits::session_prompt::maxBytes)
+            return applyDelivery(id, action, {Delivery::Kind::Settings, {}, SessionPrompts::ContextLimit{}.what(), true});
+    }
+    auto payload = Json{{"tool", commandToolName(cmd.tool)},
+                        {"instruction", cmd.instruction},
+                        {"questionId", cmd.questionId},
+                        {"answers", cmd.answers},
+                        {"run", runJson(cmd.target)},
+                        {"projectId", cmd.projectId},
+                        {"config", cmd.config},
+                        {"environmentId", cmd.environmentId}};
+    if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
+    const auto assess = [&](const TaskData& current, bool claim) {
+        const auto origin = policyApprovals.taskPolicyOrigin(current);
+        if (usesExistingSession) {
+            const Resource launch{Action::environment_launch, cmd.environmentId, true};
+            const auto launchPolicy = policy.check(cmd.ownerBotId, launch);
+            if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
+            if (launchPolicy == PolicyResult::ask && policy.check(cmd.ownerBotId, *resource) == PolicyResult::allow)
+                return policyApprovals.approveAction(origin, launch, operation, payload, clock(), claim);
+        }
+        return resource ? policyApprovals.approveAction(origin, *resource, operation, payload, clock(), claim) : ApprovalGate::allow;
+    };
+    if (resource) {
+        ApprovalGate gate;
+        {
+            std::lock_guard lock(database.mutex);
+            Transaction tx(database.db);
+            const auto current = destination ? taskRecords.load(id) : task;
+            if (destination && current.state == TaskState::cancelling) return;
+            gate = assess(current, false);
+            tx.commit();
+        }
+        if (gate == ApprovalGate::waiting) {
+            if (destination) destinationStatus(id, cmd.actionId, DestinationRunPhase::confirmation_pending, "Waiting for launch approval");
+            return;
+        }
+        if (gate != ApprovalGate::allow) return refused(gate);
+    }
+    std::optional<Delivery> stopped;
+    try {
+        stopped = t3.preflight(cmd);
+        if (!stopped)
+            cmd.authGeneration =
+                t3.authGeneration(cmd.gatewayEnvironmentId.empty() ? cmd.environmentId : cmd.gatewayEnvironmentId, cmd.config);
+    } catch (const std::exception& error) {
+        stopped = Delivery{Delivery::Kind::Settings, {}, error.what()};
+    }
+    if (stopped) {
+        stopped->definitelyUnsent = true;
+        return applyT3Delivery(std::move(*stopped));
+    }
+    if (!dispatch) dispatch.emplace(path, SessionDispatchFileLock::Mode::shared);
+    if (disconnected()) return connectionUnavailable();
+    auto policyGate = ApprovalGate::allow;
+    const auto startSend = [&](TaskData& current) {
+        if (shutdown.stop_requested() || terminal(current) || current.state == TaskState::cancelling ||
+            botLifecycle.botPaused(cmd.ownerBotId))
+            return false;
+        if (destination) {
+            if (!taskRouting.projectRouteReady(id, cmd.actionId)) return false;
+        } else if (current.actionId != action.command.actionId)
+            return false;
+        if (!sessionActionAllowed(current)) {
+            policyGate = ApprovalGate::denied;
+            return false;
+        }
+        if (resource) {
+            policyGate = assess(current, true);
+            if (policyGate != ApprovalGate::allow) return false;
+        }
+        if (usesExistingSession && current.sourceMessageId) {
+            const auto source = conversationTurns.loadTurnMessage(*current.sourceMessageId);
+            const SessionTarget target{cmd.environmentId, cmd.target.threadId,
+                                       cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
+            auto participant = database.query(R"SQL(
+SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
+)SQL",
+                                              {cmd.ownerBotId, target.environmentId, target.threadId});
+            if (participant.next() && (participant.string(1) == conversationTurns.turnActor(source).id ||
+                                       sessionReadStorage.connectedSessionAccess(source, target)))
+                action.sessionParticipationId = participant.number(0);
+        }
+        if (sendsWork) cmd.instruction = prompts.prepareStandingContext(action, current, clock());
+        if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
+        journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
+        return true;
+    };
+    try {
+        if (!(destination ? updates.changeTask(id, startSend) : updates.change(task, startSend))) {
+            if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
+            return;
+        }
+    } catch (const BotNotesUnavailable& error) {
+        if (!destination && updates.change(task, [&](TaskData& current) {
+                if (current.actionId != cmd.actionId) return false;
+                waitStorage.wait(current, SimpleWaitReason::bot_notes_unavailable,
+                                 "Restore access to this Bot’s Role and memory. " +
+                                     bounded(policy.secretRedactor(current.botId).text(error.what()), 2048));
+                return true;
+            }))
+            return;
+        return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
+    } catch (const Conflict& error) {
+        return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
+    }
+    contact([&] {
+        if (!sessionActionAllowed(task) || (resource && policy.forbidden(cmd.ownerBotId, resource->action, resource->target)) ||
+            (usesExistingSession && policy.forbidden(cmd.ownerBotId, Action::environment_launch, cmd.environmentId)))
+            return Delivery{Delivery::Kind::NotAccepted, {}, "Session action denied by installation policy.", true};
+        return t3.send(cmd);
+    });
 }
 
-void runtime::OutboxDispatch::step(const TaskData& task) {
+bool runtime::OutboxDispatch::refreshSessionSettings(TaskData& task, const Outbox& action) {
+    if (!intake || action.command.tool == CommandTool::start_in_session) return true;
+    Json session;
+    try {
+        const auto current = intake(task.botId, task.request);
+        const auto& environment = task.environmentId;
+        const auto& project = task.projectId;
+        const auto destinations = current.config.value("conversationEnvironments", Json::object());
+        const bool namedRoute = std::ranges::any_of(destinations, [&](const Json& alias) {
+            return conversationEnvironmentId(alias) == environment &&
+                   (environment != current.environmentId || field(alias, "projectId") == project);
+        });
+        const bool sameRoute = environment == current.environmentId ? (current.projectId.empty() || project == current.projectId)
+                                                                    : current.environmentId.empty();
+        if (!sameRoute && !namedRoute) return true;
+        session = normalizeSessionSettings(current.config.value("session", Json::object()));
+    } catch (const std::exception&) {
+        return true;
+    }
+    if (session == task.config.value("session", Json::object())) return true;
+    return updates.change(
+        task,
+        [&](TaskData& current) {
+            current.config["session"] = std::move(session);
+            return true;
+        },
+        &task);
+}
+
+bool runtime::OutboxDispatch::step(TaskData& task, const Wait* wait) {
     const auto state = task.state;
-    const bool reconcile = state == TaskState::waiting && (task.workflow || task.selectedSession) && !task.actionId.empty();
-    if (state != TaskState::sending && !reconcile) return;
+    if (task.actionId.empty() || clock() < task.t3CheckAt.value_or(0)) return false;
+    if (state != TaskState::sending && state != TaskState::deciding &&
+        !(state == TaskState::waiting && wait && (wait->reason() == WaitReason::auth || wait->reason() == WaitReason::settings)))
+        return false;
     std::optional<Outbox> action;
     {
         std::lock_guard lock(database.mutex);
         action = outboxStorage.outbox(task);
     }
-    if (!action) return;
-    if (reconcile) {
-        const auto now = clock();
-        const bool selectedStart = action->command.tool == CommandTool::start_in_session;
-        if (!selectedStart && !task.workflow) return;
-        const auto reconcileAt = selectedStart ? &TaskData::sessionReconcileAt : &TaskData::workflowReconcileAt;
-        if (action->phase != OutboxPhase::started || now < (task.*reconcileAt).value_or(0)) return;
-        if (!updates.change(task, [&](TaskData& current) {
-                current.*reconcileAt = now + 5;
-                return true;
-            }))
-            return;
-    }
+    if (!action) return false;
+    if (action->phase == OutboxPhase::ready && wait && wait->reason() == WaitReason::settings && !refreshSessionSettings(task, *action))
+        return false;
     deliver(task, std::move(*action));
+    return true;
 }
 
 void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction,
@@ -674,7 +753,9 @@ void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
         cmd.instruction = std::move(instruction);
     outboxStorage.insertOutbox(taskId, action);
     if (destination) return;
+    if (!task.actionId.empty()) outboxStorage.setOutboxPhase(task.actionId, OutboxPhase::closed, OutboxPhase::started);
     task.actionId = id;
+    task.t3CheckAt.reset();
     task.state = TaskState::sending;
 }
 

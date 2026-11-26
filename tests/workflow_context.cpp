@@ -182,7 +182,7 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     const auto input = secretRequests.requestSecret("bot", {"workflow-credential"});
     secretRequests.submitSecret(owner, "bot", input, secret);
     policyRules.changeNeverRule(owner, Action::environment_launch, "env", false);
-    TaskControl(*f.store).operate(owner, TaskTarget::from(Tasks(*f.store).task(task).task, wait.at("id")), "reconcile");
+    f.now += 5;
     f.t3.loseReceipt = true;
     f.ticks(1);
     require(f.t3.commands.size() == 1 && f.t3.commands[0].instruction.find(secret) == std::string::npos &&
@@ -552,6 +552,7 @@ void uncertainLaunchAndStageStop() {
     f.ticks(2);
     require(f.status()["stages"][0]["status"] == "unreachable", "unknown delivery reported as confirmed");
     f.restart();
+    f.now += 5;
     f.ticks(1);
     require(f.status()["stages"][0]["runRef"]["runId"] == "run-1" && f.t3.commands.size() == 1, "ambiguous launch was duplicated or lost");
     f.call("stop_workflow_stage", {{"workflowId", id}, {"stageId", "implement"}});
@@ -780,7 +781,7 @@ void observeAfterUnsentAnswer() {
     f.ticks(3);
     const Id task = f.status()["stages"][0]["taskId"];
     const auto pending = Tasks(*f.store).task(task);
-    require(pending.wait && pending.wait->reason() == WaitReason::unknown_delivery && pending.pendingAction &&
+    require(pending.wait && pending.wait->reason() == WaitReason::settings && pending.pendingAction &&
                 pending.pendingAction->phase == OutboxPhase::ready,
             "unsent answer fixture did not reach its safe retry point");
     f.restart();

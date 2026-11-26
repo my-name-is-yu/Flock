@@ -148,8 +148,7 @@ Json storedExecution() {
           Json::array({{{"messageId", 60}, {"step", 1}, {"text", "Check output"}, {"revisionId", nullptr}, {"conflicting", false}}})},
          {"pendingRunReport", {{"report", report}, {"retryAt", 90}, {"attempts", 1}}},
          {"pendingStageReport", 71},
-         {"sessionReconcileAt", 95},
-         {"workflowReconcileAt", 96},
+         {"t3CheckAt", 95},
          {"newSessionRequired", true},
          {"freshContextRequested", true},
          {"launchWarning", "Session lineage unavailable"}});
@@ -177,7 +176,7 @@ UPDATE tasks SET state='cancelling',data=?,action_id='action',last_run=?,replann
     const auto& pending = task.pendingRunReport.value();
     check(pending.report.run == run && pending.report.resultRunId == "continuation" &&
               pending.report.evidence.availability == RunEvidence::Availability::ReportUnavailable && pending.attempts == 1 &&
-              pending.retryAt == 90 && task.pendingStageReport == 71 && task.sessionReconcileAt == 95 && task.workflowReconcileAt == 96,
+              pending.retryAt == 90 && task.pendingStageReport == 71 && task.t3CheckAt == 95,
           "Report or delivery recovery did not decode");
     check(task.cancelledInstructions.size() == 1 && task.cancelledInstructions.front().messageId == 60 && task.replanning &&
               task.queuedInT3 && task.cancelledByBotPause && task.cancellationDetail == "Waiting for delivery" &&

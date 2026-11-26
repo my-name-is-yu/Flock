@@ -40,7 +40,6 @@
 
 namespace flockv0 {
 namespace {
-constexpr int maxToolErrors = 6;
 
 std::string gitInvocation(const TaskDecision& decision) {
     return "attempt/" + std::to_string(decision.attemptId);
@@ -96,7 +95,6 @@ void runtime::TaskDecisions::rejectDecision(const TaskData& task, const Json& ev
         journalStorage.journal(current.id, entry);
         database.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {event["id"]});
         current.feedback.reset();
-        if (event.at("decisionFeedback").size() + 1 >= maxToolErrors) waitStorage.wait(current, ModelFailureWait{}, why);
         return true;
     });
 }
@@ -186,7 +184,8 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         throw Conflict("Only first work without saved criteria requires doneWhen");
     if (tool == "session_read") {
         if (field(args, "view") == "report") return reports.retryRunReport(snapshot, event, decision);
-        if (sessionRead != "on_demand") throw Conflict("Only the terminal report can be read for this event");
+        if (sessionRead != "on_demand" && !(sessionRead != "off" && event.at("kind") == "delivery_unconfirmed"))
+            throw Conflict("Only the terminal report can be read for this event");
         history.readEvidence(snapshot, event, args, decision.usage);
         return;
     }

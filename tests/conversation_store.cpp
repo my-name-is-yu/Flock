@@ -683,6 +683,44 @@ void repairSurvivesRestart(bool alreadyClaimed) {
               "The interrupted repair lost its diagnostic");
 }
 
+void transientFailureDuringRepairResumesTheTurn() {
+    Fixture fixture;
+    Id message;
+    {
+        Store store(fixture.database());
+        RuntimeFixture execution(store);
+        execution.model.conversation = [&](const ModelInput& input) -> Decision {
+            if (turn(input).empty()) return {"start_task", {{"request", "Write a release note"}}, "Start the requested task"};
+            if (input.feedback.empty()) throw ModelError("Invalid model response", ModelErrorCode::invalid_tool_count);
+            throw ModelError("The model connection dropped during correction", true);
+        };
+        message = receive(store, "transient-repair", "Write a release note");
+        execution.runtime.runConversations();
+        check(execution.model.turns.size() == 3 && reply(store, message).is_null() && TaskList(store).tasks("alpha").size() == 1,
+              "A transient repair error ended the conversation or repeated a finished action");
+    }
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        check(turn(input).size() == 1 && input.feedback.find("invalid_tool_count") != std::string::npos,
+              "Restart lost the repair feedback or the result of the finished action");
+        if (execution.model.turns.size() == 1) throw ModelError("The model is still offline", true);
+        return say("The task is queued.");
+    };
+    execution.runtime.runConversations();
+    check(execution.model.turns.empty(), "Restart skipped the repair backoff");
+    ++execution.now;
+    execution.runtime.runConversations();
+    ++execution.now;
+    execution.runtime.runConversations();
+    check(execution.model.turns.size() == 1 && reply(store, message).is_null(), "The second failure did not back off");
+    ++execution.now;
+    execution.runtime.runConversations();
+    check(execution.model.turns.size() == 2 && TaskList(store).tasks("alpha").size() == 1 &&
+              reply(store, message).at("text") == "The task is queued.",
+          "The original conversation turn did not finish automatically after recovery");
+}
+
 void shutdownLeavesAnUnsentRunReadyForRestart() {
     using namespace std::chrono_literals;
     Fixture fixture;
@@ -968,6 +1006,7 @@ int main() {
         concurrentWorkerRecoversFromWriterContention(true);
         repairSurvivesRestart(false);
         repairSurvivesRestart(true);
+        transientFailureDuringRepairResumesTheTurn();
         concurrentWorkerSurfacesStructuralStorageFailure();
         shutdownLeavesAnUnsentRunReadyForRestart();
         modelFailureReportsWhatWasAlreadyDone();
