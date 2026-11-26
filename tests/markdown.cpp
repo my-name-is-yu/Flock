@@ -342,6 +342,15 @@ More details\
 Thanks)") == "<p><a href=\"https://example.com/__init__.py\">https://example.com/__init__.py</a><br>\n"
              "More details<br>\nThanks</p>",
           "A later backslash line break truncated an earlier bare URL");
+    for (const std::string_view suffix : {"3", "?view=full"}) {
+        const std::string firstUrl = "https://example.com/__init__.py";
+        const auto secondUrl = firstUrl + std::string(suffix);
+        const auto message = firstUrl + R"( details\
+)" + secondUrl;
+        check(markdown::toHtml(message) == "<p><a href=\"" + firstUrl + "\">" + firstUrl + "</a> details<br>\n<a href=\"" + secondUrl +
+                                               "\">" + secondUrl + "</a></p>",
+              "A backslash break made a second bare link reuse the previous line's destination");
+    }
     const auto containsCredential = [](std::string_view text) { return text.find("A&B") != text.npos; };
     check(markdown::toHtml("Open https://example.com/__init__.py?key=A%26B", containsCredential) == "<p>[redacted]</p>",
           "A bare URL exposed an encoded protected value");
