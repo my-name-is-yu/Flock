@@ -1730,11 +1730,6 @@ function eventCard(event, context, place, report) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Answer this question', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
-    reply.disabled = decisions.busy(taskWaitDecision(view.id, pendingWait));
-    actions.append(reply);
-  }
 
   if (context.canDecide && replyTarget) {
     const [label, target] = replyTarget;
