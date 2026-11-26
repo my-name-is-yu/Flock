@@ -311,7 +311,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
         secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
         return destinations;
     }
-    if (!sessionRef.empty() && (!selectedSession || !remaining.permitsWorkSession(message, *selectedSession)))
+    if (!sessionRef.empty() && (!selectedSession || !sessionReadStorage.permitsWorkSession(message, *selectedSession)))
         throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
     if (selectedSession) {
         if (!environment.empty() || resume) throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");

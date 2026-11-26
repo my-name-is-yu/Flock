@@ -85,10 +85,11 @@ Store::Impl::CallOutcome Store::Impl::executeConversationStep(const Message& mes
     }
 
     if (tool == "invite_bot") {
-        return inviteSessionBot(message, step, decision, ctx.t3, ctx.intake, ctx.peers, ctx.shutdown) ? advance : stop;
+        return sessionParticipationStorage.inviteSessionBot(message, step, decision, ctx.t3, ctx.intake, ctx.peers, ctx.shutdown) ? advance
+                                                                                                                                  : stop;
     }
     if (tool == "leave_session") {
-        return leaveSession(message, step, decision, ctx.t3, ctx.shutdown) ? advance : stop;
+        return sessionParticipationStorage.leaveSession(sessionReadStorage, message, step, decision, ctx.t3, ctx.shutdown) ? advance : stop;
     }
 
     if (tool == "reply") return executeConversationReply(message, step, decision, key, ctx.clock);
@@ -267,7 +268,7 @@ Store::Impl::CallOutcome Store::Impl::executeLocalConversationCall(const Message
     LinkedTaskDestinations linked;
     if (decision.tool == "start_task" && decision.args.is_object() && !field(decision.args, "sessionRef").empty()) {
         try {
-            selectedSession = resolveWorkSession(message, field(decision.args, "sessionRef"), ctx.t3);
+            selectedSession = sessionReadStorage.resolveWorkSession(message, field(decision.args, "sessionRef"), ctx.t3);
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception&) {

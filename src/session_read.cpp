@@ -1,3 +1,5 @@
+#include "session_read_storage.hpp"
+#include "session_participation_storage.hpp"
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/session_read.hpp"
@@ -101,9 +103,9 @@ std::set<std::string> configuredSessionEnvironments(const Json& routing) {
 }
 }
 
-class Store::Impl::SessionEvidence {
+class SessionReadStorage::SessionEvidence {
 public:
-    SessionEvidence(Store::Impl& store, Policy& policy, const conversation::Message& message, T3& t3)
+    SessionEvidence(SessionReadStorage& store, Policy& policy, const conversation::Message& message, T3& t3)
         : store_(store), policy_(policy), message_(message), bot_(message.bot), channelScope_(message.channelScope), t3_(t3) {}
 
     Json search(const Json& args) {
@@ -179,8 +181,8 @@ public:
             }
 
             if (timedOut && scanned == 0) return scopedResult(failure(searchTimedOut));
-            std::lock_guard lock(store_.mutex);
-            Transaction transaction(store_.db);
+            std::lock_guard lock(store_.database.mutex);
+            Transaction transaction(store_.database.db);
             if ((connected && environments != store_.connectedSessionEnvironments(message_)) ||
                 (anchor && !permitted(anchor->target, false, connected)))
                 return scopedResult(failure(unavailable));
@@ -243,8 +245,8 @@ public:
     }
 
     std::optional<ApprovalGate> authorizeEventTool(const Decision& call, std::string_view key) {
-        std::lock_guard lock(store_.mutex);
-        Transaction tx(store_.db);
+        std::lock_guard lock(store_.database.mutex);
+        Transaction tx(store_.database.db);
         const auto session = eventSession(call.args);
         if (!session || !inSessionScope(session->target, session->payload == connectedScope)) return std::nullopt;
         const auto resource = Resource::sessionRead(session->target.environmentId, session->target.threadId);
@@ -301,10 +303,10 @@ public:
         if (!session) return {};
         const auto& target = session->target;
         {
-            std::lock_guard lock(store_.mutex);
-            if (!permitted(*session) || !policy_.allows(store_.turnActor(message_), Action::bot_decide, bot_) ||
+            std::lock_guard lock(store_.database.mutex);
+            if (!permitted(*session) || !policy_.allows(store_.remaining.turnActor(message_), Action::bot_decide, bot_) ||
                 !policy_.allows(bot_, Action::environment_inspect, target.environmentId) ||
-                !store_.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {target.environmentId}).next())
+                !store_.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {target.environmentId}).next())
                 return {};
         }
         std::optional<SessionMetadata> metadata;
@@ -315,7 +317,7 @@ public:
         }
         if (!metadata) return {};
         WorkSession result{{target.environmentId, target.threadId, {}}, std::move(metadata->projectId)};
-        std::lock_guard lock(store_.mutex);
+        std::lock_guard lock(store_.database.mutex);
         if (!permitted(*session) || !store_.permitsWorkSession(message_, result)) return {};
         return result;
     }
@@ -348,8 +350,8 @@ public:
             evidence.push_back({&step.at("result"), allowed, dispatched});
         }
         if (evidence.empty()) return;
-        std::lock_guard lock(store_.mutex);
-        Transaction transaction(store_.db, Transaction::Mode::read);
+        std::lock_guard lock(store_.database.mutex);
+        Transaction transaction(store_.database.db, Transaction::Mode::read);
         const auto scrub = store_.secretStorage.sharedRedactor();
         for (const auto& [result, resourceAllowed, dispatched] : evidence) {
             auto saved = std::move(*result);
@@ -371,7 +373,7 @@ private:
         SessionMetadata metadata;
         TextMatch match;
     };
-    Store::Impl& store_;
+    SessionReadStorage& store_;
     Policy& policy_;
     const conversation::Message& message_;
     std::string_view bot_;
@@ -381,8 +383,8 @@ private:
 
     bool inSessionScope(const SessionTarget& target, bool connected) const {
         if (!channelScope_.empty()) {
-            std::lock_guard lock(store_.mutex);
-            return store_
+            std::lock_guard lock(store_.database.mutex);
+            return store_.database
                 .query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN channel_tasks c ON c.task_id=t.id
 JOIN channel_messages m ON m.message_id=c.message_id AND m.person_id=?
@@ -430,8 +432,8 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         std::vector<SessionTarget> result;
         auto& recorded = progress.at("recorded");
         if (!recorded.is_null()) {
-            std::lock_guard lock(store_.mutex);
-            auto rows = store_.query(R"SQL(
+            std::lock_guard lock(store_.database.mutex);
+            auto rows = store_.database.query(R"SQL(
 SELECT DISTINCT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
 LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE ((?5='' AND (?8 OR (?6<>'' AND t.project_id=?6)) AND r.environment_id IN (SELECT value FROM json_each(?7)))
@@ -439,8 +441,8 @@ WHERE ((?5='' AND (?8 OR (?6<>'' AND t.project_id=?6)) AND r.environment_id IN (
   AND (r.environment_id,r.thread_id) > (?2,?3)
 ORDER BY r.environment_id,r.thread_id LIMIT ?4
 )SQL",
-                                     {bot_, recorded.at(0), recorded.at(1), searchCandidateLimit + 1, channelScope_, project,
-                                      Json(environments).dump(), connected});
+                                              {bot_, recorded.at(0), recorded.at(1), searchCandidateLimit + 1, channelScope_, project,
+                                               Json(environments).dump(), connected});
             while (rows.next()) result.push_back({rows.string(0), rows.string(1)});
             recorded = nullptr;
             if (result.size() > searchCandidateLimit) {
@@ -480,9 +482,9 @@ ORDER BY r.environment_id,r.thread_id LIMIT ?4
         auto targets = Json::array();
         for (const auto& target : batch) targets.push_back(Json::array({target.environmentId, target.threadId}));
         std::set<std::pair<std::string, std::string>> emitted;
-        std::lock_guard lock(store_.mutex);
+        std::lock_guard lock(store_.database.mutex);
         // Each cursor stores only its own page so lineage survives restarts without copying prior pages.
-        auto rows = store_.query(R"SQL(
+        auto rows = store_.database.query(R"SQL(
 WITH RECURSIVE pages(payload) AS (
     SELECT payload FROM session_read_refs WHERE ref=?1 AND bot=?2
     UNION ALL
@@ -493,16 +495,16 @@ SELECT DISTINCT json_extract(target.value,'$[0]'),json_extract(target.value,'$[1
 FROM pages, json_each(pages.payload,'$.emitted') entry
 JOIN json_each(?3) target ON target.value=entry.value
 )SQL",
-                                 {cursor, bot_, targets.dump()});
+                                          {cursor, bot_, targets.dump()});
         while (rows.next()) emitted.emplace(rows.string(0), rows.string(1));
         std::erase_if(batch, [&](const SessionTarget& target) { return emitted.contains({target.environmentId, target.threadId}); });
     }
 
     std::optional<Reference> resolve(std::string_view ref, RefKind kind) const {
         if (ref.empty()) return {};
-        std::lock_guard lock(store_.mutex);
-        auto row = store_.query("SELECT environment,thread,payload FROM session_read_refs WHERE ref=? AND bot=? AND kind=?",
-                                {ref, bot_, static_cast<int>(kind)});
+        std::lock_guard lock(store_.database.mutex);
+        auto row = store_.database.query("SELECT environment,thread,payload FROM session_read_refs WHERE ref=? AND bot=? AND kind=?",
+                                         {ref, bot_, static_cast<int>(kind)});
         if (!row.next()) return {};
         return Reference{{row.string(0), row.string(1)}, row.json(2)};
     }
@@ -529,13 +531,13 @@ JOIN json_each(?3) target ON target.value=entry.value
 
     std::string issue(RefKind kind, const SessionTarget& target, const Json& payload) const {
         const auto key = Json::array({bot_, static_cast<int>(kind), target.environmentId, target.threadId, payload.dump()});
-        auto row =
-            store_.query("SELECT ref FROM session_read_refs WHERE bot=? AND kind=? AND environment=? AND thread=? AND payload=?", key);
+        auto row = store_.database.query(
+            "SELECT ref FROM session_read_refs WHERE bot=? AND kind=? AND environment=? AND thread=? AND payload=?", key);
         if (row.next()) return row.string(0);
         auto values = key;
         const auto ref = actionId();
         values.push_back(ref);
-        store_.exec("INSERT INTO session_read_refs(bot,kind,environment,thread,payload,ref) VALUES(?,?,?,?,?,?)", values);
+        store_.database.exec("INSERT INTO session_read_refs(bot,kind,environment,thread,payload,ref) VALUES(?,?,?,?,?,?)", values);
         return ref;
     }
 
@@ -600,8 +602,8 @@ JOIN json_each(?3) target ON target.value=entry.value
             return scopedResult(failure(unavailable));
         }
         if (!value) return scopedResult(failure(unavailable));
-        std::lock_guard lock(store_.mutex);
-        Transaction transaction(store_.db);
+        std::lock_guard lock(store_.database.mutex);
+        Transaction transaction(store_.database.db);
         if (!permitted(session)) return scopedResult(failure(unavailable));
         Json result{{"ok", true}, {"truncated", false}, {"nextCursor", nullptr}};
         format(*value, store_.secretStorage.sharedRedactor(), result);
@@ -649,9 +651,9 @@ JOIN json_each(?3) target ON target.value=entry.value
     }
 };
 
-Store::Impl::ToolCallResult Store::Impl::sessionReadTool(const conversation::Message& message, const Decision& decision, T3& t3,
-                                                         std::string_view key) {
-    Policy policy(*this);
+ToolCallResult SessionReadStorage::sessionReadTool(const conversation::Message& message, const Decision& decision, T3& t3,
+                                                   std::string_view key) {
+    Policy policy(remaining);
     SessionEvidence evidence(*this, policy, message, t3);
     bool consumeApproval = false;
     try {
@@ -674,47 +676,48 @@ Store::Impl::ToolCallResult Store::Impl::sessionReadTool(const conversation::Mes
     }
 }
 
-void Store::Impl::authorizeSessionHistory(const conversation::Message& message, Json& steps, T3& t3) {
-    Policy policy(*this);
+void SessionReadStorage::authorizeSessionHistory(const conversation::Message& message, Json& steps, T3& t3) {
+    Policy policy(remaining);
     SessionEvidence(*this, policy, message, t3).authorizeHistory(steps);
 }
 
-std::set<std::string> Store::Impl::connectedSessionEnvironments(const conversation::Message& message) {
-    std::lock_guard lock(mutex);
+std::set<std::string> SessionReadStorage::connectedSessionEnvironments(const conversation::Message& message) {
+    std::lock_guard lock(database.mutex);
     if (!humanSessionRequest(message) &&
         (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
          !channelStorage.channelMessageAuthorized(message.id, message.bot)))
         return {};
-    const auto actor = turnActor(message);
-    if (!Policy(*this).allows(actor, Action::bot_settings, message.bot)) return {};
-    auto rows = query(R"SQL(
+    const auto actor = remaining.turnActor(message);
+    if (!Policy(remaining).allows(actor, Action::bot_settings, message.bot)) return {};
+    auto rows = database.query(R"SQL(
 SELECT environment_id FROM t3_connector CROSS JOIN t3_connected_environments
 WHERE (? OR person_id=?) AND NOT EXISTS (SELECT 1 FROM bot_members WHERE bot=?)
 )SQL",
-                      {actor.adminRoot ? 1 : 0, actor.id, message.bot});
+                               {actor.adminRoot ? 1 : 0, actor.id, message.bot});
     std::set<std::string> result;
     while (rows.next()) result.insert(rows.string(0));
     return result;
 }
 
-bool Store::Impl::connectedSessionAccess(const conversation::Message& message, const SessionTarget& target) {
-    std::lock_guard lock(mutex);
-    Policy policy(*this);
+bool SessionReadStorage::connectedSessionAccess(const conversation::Message& message, const SessionTarget& target) {
+    std::lock_guard lock(database.mutex);
+    Policy policy(remaining);
     if (!policy.allows(message.bot, Action::environment_inspect, target.environmentId)) return false;
     if (const auto origin = message.routing.find("sessionOrigin"); origin != message.routing.end()) {
         const SessionTarget parent{origin->at("environmentId"), origin->at("threadId")};
         const auto authorized = [&] {
-            const auto actor = turnActor(message);
-            return activeSessionOrigin(message.bot, actor.id, parent, target.environmentId, message.id) &&
+            const auto actor = remaining.turnActor(message);
+            return sessionParticipationStorage.activeSessionOrigin(message.bot, actor.id, parent, target.environmentId, message.id) &&
                    policy.allows(actor, Action::bot_decide, message.bot);
         };
         if (target == parent) return authorized();
-        if (query(R"SQL(
+        if (database
+                .query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
 WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND o.tool='delegate'
   AND t.origin_environment_id=? AND t.origin_thread_id=?
 )SQL",
-                  {message.bot, target.environmentId, target.threadId, parent.environmentId, parent.threadId})
+                       {message.bot, target.environmentId, target.threadId, parent.environmentId, parent.threadId})
                 .next())
             return authorized();
     }
@@ -722,30 +725,31 @@ WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND o.tool='delegate'
     return connectedSessionEnvironments(message).contains(connectionEnvironment);
 }
 
-std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message, std::string_view sessionRef, T3& t3) {
-    Policy policy(*this);
+std::optional<WorkSession> SessionReadStorage::resolveWorkSession(const conversation::Message& message, std::string_view sessionRef,
+                                                                  T3& t3) {
+    Policy policy(remaining);
     return SessionEvidence(*this, policy, message, t3).work(sessionRef);
 }
 
-bool Store::Impl::permitsWorkSession(const conversation::Message& message, const WorkSession& session) {
+bool SessionReadStorage::permitsWorkSession(const conversation::Message& message, const WorkSession& session) {
     const auto& environment = session.target.environmentId;
     const auto& thread = session.target.threadId;
     if (!humanSessionRequest(message) || session.projectId.empty() || thread.empty()) return false;
-    std::lock_guard lock(mutex);
-    Policy policy(*this);
-    if (!policy.allows(turnActor(message), Action::bot_decide, message.bot) ||
+    std::lock_guard lock(database.mutex);
+    Policy policy(remaining);
+    if (!policy.allows(remaining.turnActor(message), Action::bot_decide, message.bot) ||
         !policy.allows(message.bot, Action::environment_inspect, environment) ||
         !policy.allows(message.bot, Resource::sessionRead(environment, thread)) ||
-        !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next())
+        !database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next())
         return false;
     if (connectedSessionAccess(message, {environment, thread, {}})) return true;
     return field(message.routing, "projectId") == session.projectId && configuredSessionEnvironments(message.routing).contains(environment);
 }
 
-bool Store::Impl::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {
-    std::lock_guard lock(mutex);
+bool SessionReadStorage::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {
+    std::lock_guard lock(database.mutex);
     try {
-        return permitsWorkSession(loadTurnMessage(sourceMessageId), session);
+        return permitsWorkSession(remaining.loadTurnMessage(sourceMessageId), session);
     } catch (const Conflict&) {
         return false;
     }

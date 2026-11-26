@@ -11,6 +11,9 @@
 #include "policy_origin.hpp"
 #include "conversation_context_storage.hpp"
 #include "workflow_storage.hpp"
+#include "session_participation_storage.hpp"
+#include "session_read_storage.hpp"
+#include "tool_call_result.hpp"
 #include "json_fields.hpp"
 #include "wait_storage.hpp"
 #include "task_records.hpp"
@@ -118,7 +121,6 @@ struct ConversationInvitationEntry;
 struct ConversationMessageEntry;
 struct ConversationReplyEntry;
 enum class ConversationReplyRoute;
-struct SessionStopResult;
 struct TaskRevisionEntry;
 struct DeliveredInstructionEntry;
 struct UserAnswerEntry;
@@ -129,22 +131,12 @@ struct BotMessageEntry;
 struct PeerEvidenceEntry;
 struct PrReviewRequestedEntry;
 struct GitPrFollowupEntry;
-class SessionDispatchFileLock {
-public:
-    enum class Mode { shared, exclusive };
-    SessionDispatchFileLock(const std::filesystem::path& database, Mode);
-    ~SessionDispatchFileLock();
-    SessionDispatchFileLock(const SessionDispatchFileLock&) = delete;
-    SessionDispatchFileLock& operator=(const SessionDispatchFileLock&) = delete;
-private:
-    int fd_;
-};
 
 struct Store::Impl : Database {
     ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
     TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls,  outboxStorage,
                                   peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
-    TaskRouting taskRouting{*this, *this, peerStorage, secretStorage, waitStorage};
+    TaskRouting taskRouting{*this, *this, peerStorage, secretStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
     TaskRunReports taskRunReports{*this, policyApprovals, journalStorage, outboxStorage, waitStorage};
     OutboxStorage outboxStorage{*this};
     PeerStorage peerStorage{*this};
@@ -160,45 +152,24 @@ struct Store::Impl : Database {
     AttachmentStorage attachments{*this};
     ConversationContextStorage conversationContextStorage{*this, secretStorage, attachments};
     WorkflowStorage workflowStorage{*this, taskRecords, taskEvents, journalStorage, secretStorage, *this, taskOperations, taskRouting};
-    class SessionEvidence;
     WebIdentityState webIdentity;
     InboxStorage inboxStorage{*this, secretStorage, taskRecords,    waitStorage,    journalStorage,
                               *this, modelCalls,    taskOperations, policyApprovals};
-    GitStorage gitStorage{*this,       secretStorage, inboxStorage, taskRecords,    journalStorage,
-                          webIdentity, *this,         botLifecycle, policyApprovals};
+    GitStorage gitStorage{*this,       secretStorage, inboxStorage, taskRecords,     journalStorage,
+                          webIdentity, *this,         botLifecycle, policyApprovals, sessionParticipationStorage};
     Policy permissions{*this};
     ChannelStorage channelStorage{*this, path, permissions, secretStorage, webIdentity, journalStorage, *this, policyApprovals};
     LocalMachineStorage localMachineStorage{*this, permissions, secretStorage, webIdentity, taskRecords};
-    std::mutex sessionQueueCancellationMutex;
     PolicyApprovals policyApprovals{*this,          secretStorage, webIdentity,  taskRecords,    waitStorage,
                                     journalStorage, *this,         botLifecycle, channelStorage, inboxStorage};
+    SessionParticipationStorage sessionParticipationStorage{*this, path,         secretStorage,  taskRecords,    webIdentity,
+                                                            *this, botLifecycle, taskOperations, policyApprovals};
+    SessionReadStorage sessionReadStorage{*this, secretStorage, sessionParticipationStorage, *this, channelStorage, policyApprovals};
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
                            Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
-    Person sessionActor(std::string_view person);
-    bool activeSessionOrigin(const conversation::Message&) const;
-    bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                             std::string_view destinationEnvironment, Id message) const;
-    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&, Id message) const;
-    SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
-    void stopPausedBotParticipation(std::string_view bot);
-    void interruptPausedSessionRuns(T3&, std::stop_token);
-    SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
-    bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
-    bool t3EnvironmentConnected(std::string_view environment);
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    struct CompletedToolCall {
-        Json value;
-        bool consumeApproval = false;
-    };
-    using ToolCallResult = std::optional<CompletedToolCall>;
-    ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
-    void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
-    std::set<std::string> connectedSessionEnvironments(const conversation::Message&);
-    std::optional<WorkSession> resolveWorkSession(const conversation::Message&, std::string_view sessionRef, T3&);
-    bool permitsWorkSession(const conversation::Message&, const WorkSession&);
-    bool permitsWorkSession(Id sourceMessageId, const WorkSession&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
@@ -262,9 +233,6 @@ struct Store::Impl : Database {
                                    const ConversationCallContext&);
     CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
                                      bool hasWebEvidence, std::stop_token);
-    bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, const PeerResolver&,
-                          std::stop_token);
-    bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
     CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
                                  bool hasWebEvidence, T3&, std::stop_token);

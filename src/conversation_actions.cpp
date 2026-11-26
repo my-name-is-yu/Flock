@@ -7,6 +7,7 @@
 #include "peer_storage.hpp"
 #include "model_calls.hpp"
 #include "journal_storage.hpp"
+#include "session_dispatch_lock.hpp"
 #include "storage.hpp"
 #include "journal.hpp"
 #include "journal_conversation.hpp"
@@ -262,8 +263,8 @@ bool Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& rec
     exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
          "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
          {message, receipt.bot, target.environmentId, target.threadId, delivery.run.runId, receipt.title,
-          interruptAt || !receipt.notify || sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0, target.gatewayEnvironmentId,
-          receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
+          interruptAt || !receipt.notify || sessionParticipationStorage.sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0,
+          target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
           secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
     auto task = taskRecords.load(receipt.taskId);
@@ -317,14 +318,15 @@ UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
     saveSessionSendResult(receipt.bot, message, receipt.step, std::move(result));
 }
 
-void Store::Impl::stopPausedBotParticipation(std::string_view bot) {
+void SessionParticipationStorage::stopPausedBotParticipation(std::string_view bot) {
     const auto now = policyApprovals.now();
-    exec("UPDATE session_message_waits SET notified=1,interrupt_at=coalesce(interrupt_at,?) WHERE bot=? AND run_finished=0", {now, bot});
-    exec(R"SQL(
+    database.exec("UPDATE session_message_waits SET notified=1,interrupt_at=coalesce(interrupt_at,?) WHERE bot=? AND run_finished=0",
+                  {now, bot});
+    database.exec(R"SQL(
 UPDATE session_message_sends SET interrupt_at=? WHERE interrupt_at IS NULL
 AND message_id IN (SELECT id FROM messages WHERE bot_id=?)
 )SQL",
-         {now, bot});
+                  {now, bot});
 }
 
 void Store::Impl::reconcilePausedSessionSends(T3& t3, std::stop_token shutdown) {
@@ -391,8 +393,8 @@ WHERE s.action=? AND s.message_id=? AND s.interrupt_at<=?
     }
 }
 
-void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
-    reconcilePausedSessionSends(t3, shutdown);
+void SessionParticipationStorage::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
+    remaining.reconcilePausedSessionSends(t3, shutdown);
     struct Pending {
         Id key;
         std::string environment;
@@ -400,10 +402,10 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
     };
     std::vector<Pending> pending;
     {
-        std::lock_guard lock(mutex);
-        auto rows = query("SELECT rowid,environment,thread,run,gateway_environment FROM session_message_waits "
-                          "WHERE interrupt_at<=? ORDER BY interrupt_at,rowid",
-                          {policyApprovals.now()});
+        std::lock_guard lock(database.mutex);
+        auto rows = database.query("SELECT rowid,environment,thread,run,gateway_environment FROM session_message_waits "
+                                   "WHERE interrupt_at<=? ORDER BY interrupt_at,rowid",
+                                   {policyApprovals.now()});
         while (rows.next()) pending.push_back({rows.number(0), rows.string(1), {rows.string(2), rows.string(3), {}, rows.string(4)}});
     }
     for (const auto& item : pending) {
@@ -415,14 +417,14 @@ void Store::Impl::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
         }
         const bool missing = outcome == InterruptOutcome::TargetGone;
         const bool finished = outcome == InterruptOutcome::AlreadyTerminal || missing;
-        std::lock_guard lock(mutex);
-        exec(R"SQL(
+        std::lock_guard lock(database.mutex);
+        database.exec(R"SQL(
 UPDATE session_message_waits
 SET interrupt_at=?,run_finished=?,session_missing=max(session_missing,?)
 WHERE rowid=? AND interrupt_at IS NOT NULL AND environment=? AND gateway_environment=? AND thread=? AND run=?
 )SQL",
-             {finished ? Json(nullptr) : Json(policyApprovals.now() + 5), finished ? 1 : 0, missing ? 1 : 0, item.key, item.environment,
-              item.run.gatewayEnvironmentId, item.run.threadId, item.run.runId});
+                      {finished ? Json(nullptr) : Json(policyApprovals.now() + 5), finished ? 1 : 0, missing ? 1 : 0, item.key,
+                       item.environment, item.run.gatewayEnvironmentId, item.run.threadId, item.run.runId});
     }
 }
 
@@ -528,10 +530,10 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 throw ToolError("Use the Session identifiers");
             target = {command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
             resource = {Action::t3_send, Resource::sessionRead(target.environmentId, target.threadId).target};
-            if (sessionParticipationStopped(message.bot, target, id)) throw ToolError(stopped);
+            if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) throw ToolError(stopped);
             if (Policy(*this).forbidden(message.bot, resource.action, resource.target))
                 throw ToolError(std::string(approvalError(ApprovalGate::denied)));
-            if (!fixesPullRequest && !savedTaskTarget && !connectedSessionAccess(message, target))
+            if (!fixesPullRequest && !savedTaskTarget && !sessionReadStorage.connectedSessionAccess(message, target))
                 throw ToolError("This Session is unavailable through your T3 connection");
         } catch (const ToolError& failure) {
             save(toolFailure(failure.what()));
@@ -573,12 +575,12 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
             transaction.commit();
             return stop;
         }
-        if (sessionParticipationStopped(message.bot, target, id)) {
+        if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) {
             save(toolFailure(stopped));
             transaction.commit();
             return advance;
         }
-        if (!error.empty() || (!fixesPullRequest && !savedTaskTarget && !connectedSessionAccess(message, target))) {
+        if (!error.empty() || (!fixesPullRequest && !savedTaskTarget && !sessionReadStorage.connectedSessionAccess(message, target))) {
             save(toolFailure(error.empty() ? "This Session is unavailable through your T3 connection" : error));
             transaction.commit();
             return advance;
@@ -872,9 +874,10 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
                 !query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
                 return false;
             const auto message = loadTurnMessage(wait.message);
-            return !sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
-                   (message.principalSource != conversation::PrincipalSource::session || activeSessionOrigin(message)) &&
-                   connectedSessionAccess(message, wait.target);
+            return !sessionParticipationStorage.sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
+                   (message.principalSource != conversation::PrincipalSource::session ||
+                    sessionParticipationStorage.activeSessionOrigin(message)) &&
+                   sessionReadStorage.connectedSessionAccess(message, wait.target);
         };
         // A revoked connection settles the wait silently, including on restart.
         const auto settle = [&](bool finished = false) {

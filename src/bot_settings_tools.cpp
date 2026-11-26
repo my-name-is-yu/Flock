@@ -60,7 +60,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     command.instruction = "Check environment readiness";
     try {
         if (command.projectId.empty()) {
-            if (!policy.allows(bot, Action::environment_inspect, id) || !t3EnvironmentConnected(id))
+            if (!policy.allows(bot, Action::environment_inspect, id) || !sessionParticipationStorage.t3EnvironmentConnected(id))
                 return failure("Check the T3 connection and environment permissions");
             if (t3.projects(id).empty()) return failure("Add or unarchive a project in the T3 environment");
             return {{"ready", true}};

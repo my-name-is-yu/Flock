@@ -1,3 +1,4 @@
+#include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
 #include "memory_storage.hpp"
@@ -373,23 +374,24 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             const auto source = db.loadTurnMessage(current.sourceMessageId.value());
             const auto actor = db.turnActor(source);
             const auto& parent = origin->target;
-            if (!db.activeSessionOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
+            if (!db.sessionParticipationStorage.activeSessionOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
                 !policy.allows(actor, Action::bot_decide, cmd.ownerBotId) ||
                 !policy.allows(cmd.ownerBotId, Action::environment_inspect, parent.environmentId))
                 return false;
             if (!sendsToSession) return true;
         }
-        if (db.sessionParticipationStopped(cmd.ownerBotId,
-                                           {cmd.environmentId, cmd.target.threadId,
-                                            cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId},
-                                           current.sourceMessageId.value_or(0)))
+        if (db.sessionParticipationStorage.sessionParticipationStopped(
+                cmd.ownerBotId,
+                {cmd.environmentId, cmd.target.threadId,
+                 cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId},
+                current.sourceMessageId.value_or(0)))
             return false;
         if (!usesExistingSession || !current.selectedSession) return cmd.tool != CommandTool::start_in_session;
         const auto& selected = *current.selectedSession;
         if (selected.target.environmentId != cmd.environmentId || selected.target.threadId != cmd.target.threadId ||
             selected.projectId != cmd.projectId)
             return false;
-        return db.permitsWorkSession(current.sourceMessageId.value_or(0), selected);
+        return db.sessionReadStorage.permitsWorkSession(current.sourceMessageId.value_or(0), selected);
     };
     std::optional<Resource> resource;
     if (cmd.tool == CommandTool::delegate)
@@ -431,7 +433,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
     };
     const auto disconnected = [&] {
         const auto& connectionEnvironment = cmd.gatewayEnvironmentId.empty() ? cmd.environmentId : cmd.gatewayEnvironmentId;
-        return requireT3Connection && !db.t3EnvironmentConnected(connectionEnvironment);
+        return requireT3Connection && !db.sessionParticipationStorage.t3EnvironmentConnected(connectionEnvironment);
     };
     const auto connectionUnavailable = [&] {
         applyDelivery(id, action, {Delivery::Kind::Auth, {}, "Connect this T3 environment in Flock settings before sending work.", true});
@@ -556,7 +558,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
 SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
 )SQL",
                                             {cmd.ownerBotId, target.environmentId, target.threadId});
-                if (participant.next() && (participant.string(1) == db.turnActor(source).id || db.connectedSessionAccess(source, target)))
+                if (participant.next() &&
+                    (participant.string(1) == db.turnActor(source).id || db.sessionReadStorage.connectedSessionAccess(source, target)))
                     action.sessionParticipationId = participant.number(0);
             }
             if (includeMemory) {

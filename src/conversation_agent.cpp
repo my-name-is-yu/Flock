@@ -870,7 +870,7 @@ Person Store::Impl::turnActor(const Message& message) {
     case PrincipalSource::gitWebhook: return {};
     case PrincipalSource::session: {
         try {
-            return sessionActor(admitted.id);
+            return sessionParticipationStorage.sessionActor(admitted.id);
         } catch (const std::exception&) {
             return {};
         }
@@ -899,12 +899,12 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     }
     const auto wake = message.routing.find("sessionWake");
     const bool isWake = wake != message.routing.end();
-    const bool stoppedWake =
-        isWake && sessionParticipationStopped(message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
+    const bool stoppedWake = isWake && sessionParticipationStorage.sessionParticipationStopped(
+                                           message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
     const bool usesSessionOrigin =
         message.principalSource == PrincipalSource::session || (isWake && message.routing.contains("sessionOrigin"));
     // A wake can be queued before a stop commits and reach this turn after it commits.
-    if (stoppedWake || (usesSessionOrigin && !activeSessionOrigin(message))) {
+    if (stoppedWake || (usesSessionOrigin && !sessionParticipationStorage.activeSessionOrigin(message))) {
         finishTurn(message, "The T3 Session participation has ended.", nullptr, ConversationReplyRoute::session_access);
         return false;
     }
@@ -1191,7 +1191,7 @@ SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM model_budgets WHERE id=? AND attempts=ca
             ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{}};
             try {
                 if (!reviewPreference) {
-                    authorizeSessionHistory(message, input.event.at("turn"), t3);
+                    sessionReadStorage.authorizeSessionHistory(message, input.event.at("turn"), t3);
                     authorizeBotToolHistory(message.bot, id, input);
                 }
                 {

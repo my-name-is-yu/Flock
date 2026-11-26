@@ -1,3 +1,4 @@
+#include "session_dispatch_lock.hpp"
 #include "storage.hpp"
 #include "web_identity_state.hpp"
 #include "secret_storage.hpp"

@@ -43,11 +43,14 @@ struct TaskChange {
 };
 using ProjectCatalog = std::variant<std::vector<T3Project>, std::string>;
 
+class SessionReadStorage;
+class SessionParticipationStorage;
 class TaskRouting {
 public:
     TaskRouting(Database& database, Store::Impl& remaining, PeerStorage& peerStorage, SecretStorage& secretStorage,
-                WaitStorage& waitStorage)
-        : database(database), remaining(remaining), peerStorage(peerStorage), secretStorage(secretStorage), waitStorage(waitStorage) {}
+                WaitStorage& waitStorage, SessionReadStorage& sessionReadStorage, SessionParticipationStorage& sessionParticipationStorage)
+        : database(database), remaining(remaining), peerStorage(peerStorage), secretStorage(secretStorage), waitStorage(waitStorage),
+          sessionReadStorage(sessionReadStorage), sessionParticipationStorage(sessionParticipationStorage) {}
 
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
@@ -69,6 +72,8 @@ public:
 private:
     Database& database;
     Store::Impl& remaining;
+    SessionReadStorage& sessionReadStorage;
+    SessionParticipationStorage& sessionParticipationStorage;
     PeerStorage& peerStorage;
     SecretStorage& secretStorage;
     WaitStorage& waitStorage;

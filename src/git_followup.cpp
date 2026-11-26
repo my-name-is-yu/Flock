@@ -60,8 +60,8 @@ LIMIT 2
     }
     const auto& connectionEnvironment =
         destination.gatewayEnvironmentId.empty() ? destination.environmentId : destination.gatewayEnvironmentId;
-    if (pr.next() || !remaining.t3EnvironmentConnected(connectionEnvironment) ||
-        remaining.sessionParticipationStopped(message.bot, destination, message.id))
+    if (pr.next() || !sessionParticipationStorage.t3EnvironmentConnected(connectionEnvironment) ||
+        sessionParticipationStorage.sessionParticipationStopped(message.bot, destination, message.id))
         return std::nullopt;
 
     std::string requester;
@@ -72,7 +72,7 @@ LIMIT 2
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
             const auto actor = remaining.turnActor(source);
             if (Policy(remaining).allows(actor, Action::bot_talk, source.bot) &&
-                (source.principalSource != session || remaining.activeSessionOrigin(source)))
+                (source.principalSource != session || sessionParticipationStorage.activeSessionOrigin(source)))
                 requester = policyApprovals.policyOrigin(source).requester;
         }
     } else if (const auto& requesterId = task.requester) {

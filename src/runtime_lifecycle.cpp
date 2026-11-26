@@ -87,7 +87,7 @@ void Runtime::Components::Workers::startChannels() {
 }
 
 void Runtime::Components::Workers::wakeSessions() {
-    db.settleSessionQueueCancellations(t3, stopToken());
+    db.sessionParticipationStorage.settleSessionQueueCancellations(t3, stopToken());
     db.wakeSessionMessages(t3, stopToken());
 }
 

@@ -45,7 +45,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    const auto actor = db.sessionActor(person);
+    const auto actor = db.sessionParticipationStorage.sessionActor(person);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
     db.secretStorage.sharedRedactor().requirePublic({person, bots});
     ExternalMcpCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
@@ -71,7 +71,7 @@ std::optional<ExternalMcpConnection> ExternalMcp::authenticate(std::string_view 
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     auto row = db.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?", {connector_credentials::digest(token)});
-    if (!row.next() || db.sessionActor(row.string(1)).id.empty()) return std::nullopt;
+    if (!row.next() || db.sessionParticipationStorage.sessionActor(row.string(1)).id.empty()) return std::nullopt;
     return ExternalMcpConnection{row.string(0)};
 }
 
@@ -92,7 +92,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
 )SQL",
                           {connection.id, bot});
     if (!grant.next()) throw Conflict(std::string(botUnavailable));
-    const auto actor = db.sessionActor(grant.string(0));
+    const auto actor = db.sessionParticipationStorage.sessionActor(grant.string(0));
     if (!store_.policy().allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
 
     const auto fingerprint = connector_credentials::digest(Json::array({bot, text}).dump());
@@ -134,7 +134,7 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
 )SQL",
                         {connection.id, taskId});
     if (!row.next()) throw Conflict(std::string(taskUnavailable));
-    auto actor = db.sessionActor(row.string(0));
+    auto actor = db.sessionParticipationStorage.sessionActor(row.string(0));
     auto bot = row.string(1);
     if (!store_.policy().allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(taskUnavailable));
     return {std::move(actor), std::move(bot)};

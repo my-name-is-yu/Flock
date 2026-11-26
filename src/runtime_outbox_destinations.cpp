@@ -1,3 +1,4 @@
+#include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 #include "outbox_storage.hpp"
 #include "runtime_run_observer.hpp"
