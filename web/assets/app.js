@@ -438,6 +438,7 @@ const sidebarIcons = {
   inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
   open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
 const activePresence = new Set(['working', 'thinking', 'waiting', 'paused']);
 const busyPresence = new Set(['working', 'thinking']);
@@ -1040,18 +1041,48 @@ function requestRow(task, sessions, renderRow, renderSession = renderRow) {
   item.append(renderRow(task.request, taskStatus), links);
   return item;
 }
-function requestGroups(history, activeTasks, parallelTasks) {
+function requestGroups(history, activeTasks, parallelTasks, canStop = false) {
   const runsByTask = new Map(parallelTasks.map(task => [task.id, task.runs.filter(run => run.threadId)]));
   const groups = { working: [], waiting: [], done: [] };
+  const withStopAction = (item, task) => {
+    if (!canStop || task.state === 'stopping') return item;
+    const stop = button(null, 'icon-button request-stop', () => {
+      openNavigation(false);
+      openDetail({ kind: 'stop-task', taskId: task.id });
+    });
+    stop.innerHTML = sidebarIcons.stop;
+    stop.setAttribute('aria-label', 'Stop request');
+    stop.dataset.tooltip = 'Stop request';
+    if (item.classList.contains('request-task')) {
+      item.classList.add('has-stop');
+      item.append(stop);
+      return item;
+    }
+    const entry = node('div', 'request-entry');
+    entry.append(item, stop);
+    return entry;
+  };
   for (const task of [...activeTasks].sort((a, b) => b.id - a.id)) {
     const sessions = runsByTask.get(task.id) ?? (task.session ? [{ ...task.session, state: task.state }] : []);
     if (task.problem) {
       const renderProblem = (request, session) => {
-        const row = sessionRow(request, session, waitLabel(task.problem.reason), 'waiting');
-        row.dataset.tooltip = [task.problem.text, row.dataset.tooltip].join(' · ');
+        const label = waitLabel(task.problem.reason);
+        if (runHref(session)) {
+          const row = sessionRow(request, session, label, 'waiting');
+          row.dataset.tooltip = [task.problem.text, row.dataset.tooltip].join(' · ');
+          return row;
+        }
+        const title = [session.name, request].filter(Boolean).join(' · ');
+        const row = activityRow('button', 'session-row', title, label, 'waiting');
+        row.type = 'button';
+        row.dataset.tooltip = [task.problem.text, title].filter(Boolean).join(' · ');
+        row.addEventListener('click', () => {
+          openNavigation(false);
+          openDetail({ kind: 'wait', taskId: task.id, waitId: task.problem.id });
+        });
         return row;
       };
-      groups.waiting.push(requestRow(task, sessions, renderProblem, finishedSessionRow));
+      groups.waiting.push(withStopAction(requestRow(task, sessions, renderProblem, finishedSessionRow), task));
       continue;
     }
     if (task.state === 'external_waiting') {
@@ -1060,13 +1091,13 @@ function requestGroups(history, activeTasks, parallelTasks) {
         row.dataset.tooltip = [task.waitingNote, row.dataset.tooltip].join(' · ');
         return row;
       };
-      groups.waiting.push(requestRow(task, sessions, renderWaiting, finishedSessionRow));
+      groups.waiting.push(withStopAction(requestRow(task, sessions, renderWaiting, finishedSessionRow), task));
       continue;
     }
-    groups.working.push(requestRow(task, sessions, (request, session) => sessionRow(request, session,
+    groups.working.push(withStopAction(requestRow(task, sessions, (request, session) => sessionRow(request, session,
       stateLabels[session.state] ?? session.state, session.state === 'confirmation_pending' ? 'waiting' :
         !Object.hasOwn(sessionEndLabels, session.state) ? 'live' : '',
-      task.createdAt ? task.createdAt * 1000 : undefined)));
+      task.createdAt ? task.createdAt * 1000 : undefined)), task));
   }
   const finished = [...history].sort((a, b) => b.id - a.id);
   for (const task of finished) {
@@ -1095,11 +1126,15 @@ function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
   const pending = view?.id ? decisions.pendingItemsFor(view.id) : [];
-  if (changed('waits', view?.id, loading, pending)) {
+  const inboxWaitIds = new Set(pending.filter((item) => item.waitId > 0).map((item) => item.waitId));
+  const problemWaitIds = new Set((data?.activeTasks ?? []).filter((task) => task.problem?.id > 0).map((task) => task.problem.id));
+  const extraWaits = (data?.waits ?? []).filter((task) => !inboxWaitIds.has(task.wait.id) && !problemWaitIds.has(task.wait.id));
+  if (changed('waits', view?.id, loading, pending, extraWaits)) {
     const revealedWaits = previousWaitsLoading && !loading;
     previousWaitsLoading = loading;
-    elements['wait-count'].textContent = pending.length;
-    elements['wait-count'].hidden = !pending.length;
+    const waitCount = pending.length + extraWaits.length;
+    elements['wait-count'].textContent = waitCount;
+    elements['wait-count'].hidden = !waitCount;
     elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = pending.map((item) => {
       const status = pendingKindLabels[item.itemKind] ?? 'Needs you';
@@ -1114,6 +1149,16 @@ function renderActivity() {
       });
       return row;
     });
+    for (const task of extraWaits) {
+      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
+      row.type = 'button';
+      row.setAttribute('aria-description', waitText(task.wait) || task.request);
+      row.addEventListener('click', () => {
+        openNavigation(false);
+        openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
+      });
+      rows.push(row);
+    }
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
     else if (revealedWaits && rows.length) triggerRowReveal(elements['wait-list']);
@@ -1122,14 +1167,15 @@ function renderActivity() {
   const history = [...(view?.loadedSessions.values() ?? [])];
   const activeTasks = data?.activeTasks ?? [];
   const parallelTasks = data?.parallelTasks ?? [];
+  const canStop = !!view?.composer;
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (changed('sessions', view?.id, loading, history, activeTasks, parallelTasks,
+  if (changed('sessions', view?.id, loading, canStop, history, activeTasks, parallelTasks,
     data?.workflows, data?.compactions, dayFormat.format(Date.now()))) {
     const revealedSessions = previousSessionsLoading && !loading;
     previousSessionsLoading = loading;
-    const rows = requestGroups(history, activeTasks, parallelTasks);
+    const rows = requestGroups(history, activeTasks, parallelTasks, canStop);
     const list = elements['session-list'];
     const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
     rows.push(...workflowInspectors(data, open));
@@ -3012,6 +3058,48 @@ function showDetailError(text) {
   const output = byId('detail-feedback');
   if (output) output.textContent = text;
 }
+async function cancelActiveTask(context, task) {
+  const controls = [...elements['detail-body'].querySelectorAll('button, input')];
+  for (const control of controls) control.disabled = true;
+  showDetailError('');
+  try {
+    const response = await api('operations', {
+      botId: context.id,
+      taskId: task.id,
+      waitId: task.problem?.id ?? 0,
+      targetRevision: task.currentRevision ?? 0,
+      targetGeneration: task.generation,
+      operation: 'cancel',
+    });
+    if (response?.accepted !== true) throw new Error('decision_unconfirmed');
+    if (view === context && detail?.kind === 'stop-task' && detail.taskId === task.id) closeDetail();
+    setNotice(context, 'Stop requested.');
+    if (view?.id === context.id) await Promise.all([view.refresh(), !liveUpdates.live && refreshBots()]);
+  } catch (error) {
+    if (view === context && detail?.kind === 'stop-task' && detail.taskId === task.id) {
+      for (const control of controls) control.disabled = false;
+      showDetailError(errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.');
+    }
+  }
+}
+function stopTaskContent(context, task) {
+  elements['detail-title'].textContent = 'Stop this request?';
+  const request = node('blockquote', 'wait-request');
+  request.append(node('p', 'wait-request-text', task.request));
+  if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
+  const botName = context.data.bot?.name ?? 'The Bot';
+  const explanation = node('p', 'wait-why',
+    `This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
+  const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', closeDetail);
+  keep.autofocus = true;
+  const confirmStop = button('Stop request', 'dialog-button danger', () => void cancelActiveTask(context, task));
+  const choices = node('div', 'wait-primary');
+  choices.append(keep, confirmStop);
+  const feedback = node('p', 'dialog-feedback');
+  feedback.id = 'detail-feedback';
+  feedback.setAttribute('role', 'status');
+  return [request, explanation, choices, feedback];
+}
 function labelDetail(label) {
   if (label) {
     elements.detail.setAttribute('aria-label', label);
@@ -3064,6 +3152,18 @@ function renderDetail() {
       replaceDetail(() => peers.length ? [list] : [node('p', 'prose', `${botName} hasn’t talked with other Bots yet.`)]);
       if (active) [...list.querySelectorAll('a')].find((link) => link.dataset.peerChoice === active)?.focus();
     }
+    return;
+  }
+  if (detail.kind === 'stop-task') {
+    const task = view.data.activeTasks.find((item) => item.id === detail.taskId);
+    if (!task || task.state === 'stopping') {
+      if (changed('detail', detail, task?.state ?? null)) {
+        elements['detail-title'].textContent = task?.state === 'stopping' ? 'Stopping request' : 'Request closed';
+        replaceDetail(() => [node('p', 'wait-why', 'Check the conversation for the latest update.')]);
+      }
+      return;
+    }
+    if (changed('detail', detail, task)) replaceDetail(() => stopTaskContent(view, task));
     return;
   }
   const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);

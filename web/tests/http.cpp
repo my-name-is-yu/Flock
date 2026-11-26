@@ -2191,12 +2191,38 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", 1}, {"value", privateValue}}, 403);
 }
 
+void cancelWithoutWaitOperation(const std::filesystem::path& path) {
+    Store store(path);
+    const auto id = TaskIntake(store).submit({"release", "Cancelable request", "local-env", "release"});
+    const auto task = Tasks(store).task(id).task;
+    const auto server = startWeb(store, 0, callbacks());
+    Browser browser(*server);
+    browser.post("/api/operations",
+                 {{"botId", "release"},
+                  {"taskId", id},
+                  {"waitId", 0},
+                  {"operation", "answer"},
+                  {"text", "no"},
+                  {"targetRevision", task.currentRevision.value_or(0)},
+                  {"targetGeneration", task.generation}},
+                 400);
+    const auto accepted = browser.post("/api/operations", {{"botId", "release"},
+                                                           {"taskId", id},
+                                                           {"waitId", 0},
+                                                           {"operation", "cancel"},
+                                                           {"targetRevision", task.currentRevision.value_or(0)},
+                                                           {"targetGeneration", task.generation}});
+    check(accepted == Json{{"accepted", true}} && Tasks(store).task(id).task.state == TaskState::cancelled,
+          "cancel with waitId 0 did not request task cancellation");
+}
+
 } // namespace
 
 int main() {
     try {
         TestDirectory directory;
         conversationRequestApproval(directory.path / "conversation-approval.db");
+        cancelWithoutWaitOperation(directory.path / "cancel-no-wait.db");
         exercise(directory.path / "state.db");
         messageAttachmentLimits(directory.path / "message-attachments.db");
         messageReceipts(directory.path / "message-receipts.db");
