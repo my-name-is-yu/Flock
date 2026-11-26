@@ -245,6 +245,7 @@ a.settings-row svg { margin-left: auto; }
 .wait-request-text { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .wait-request-meta { color: var(--text-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .wait-reason { display: grid; gap: .5rem; min-width: 0; }
+.wait-reason:empty { display: none; }
 .wait-text { font-size: var(--text-lg); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .wait-why { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; overflow-wrap: anywhere; }
 .wait-form { display: grid; gap: .6rem; }
