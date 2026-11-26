@@ -1,13 +1,14 @@
 #pragma once
 
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <string>
 #include <string_view>
 
 namespace flockv0 {
+class ConversationStorage;
+
 class Database;
 class JournalStorage;
 class SecretStorage;
@@ -20,7 +21,7 @@ struct TaskData;
 
 class WorkflowStorage {
 public:
-    WorkflowStorage(Database&, TaskRecords&, TaskEvents&, JournalStorage&, const SecretStorage&, Store::Impl&, TaskOperations&,
+    WorkflowStorage(Database&, TaskRecords&, TaskEvents&, JournalStorage&, const SecretStorage&, ConversationStorage&, TaskOperations&,
                     TaskRouting&);
 
     Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
@@ -38,7 +39,7 @@ private:
     TaskEvents& taskEvents_;
     JournalStorage& journalStorage_;
     const SecretStorage& secretStorage_;
-    Store::Impl& remaining_;
+    ConversationStorage& conversationTurns;
     TaskOperations& operations_;
     TaskRouting& routing_;
 };

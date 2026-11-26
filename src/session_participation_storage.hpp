@@ -2,7 +2,6 @@
 
 #include "session_stop.hpp"
 #include "flock/intake.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <filesystem>
@@ -11,6 +10,11 @@
 #include <string_view>
 
 namespace flockv0 {
+class Policy;
+class ConversationStorage;
+class ConversationTools;
+class SessionMessageStorage;
+
 class Database;
 class SecretStorage;
 class SessionReadStorage;
@@ -32,10 +36,14 @@ class PolicyApprovals;
 class SessionParticipationStorage {
 public:
     SessionParticipationStorage(Database& database, const std::filesystem::path& path, SecretStorage& secretStorage,
-                                TaskRecords& taskRecords, const WebIdentityState& webIdentity, Store::Impl& remaining,
-                                BotLifecycleStorage& botLifecycle, TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
+                                TaskRecords& taskRecords, const WebIdentityState& webIdentity, Policy& permissions,
+                                ConversationStorage& conversationTurns, ConversationTools& conversationTools,
+                                SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
+                                TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
-          remaining(remaining), botLifecycle(botLifecycle), taskOperations(taskOperations), policyApprovals(policyApprovals) {}
+          permissions(permissions), conversationTurns(conversationTurns), conversationTools(conversationTools),
+          sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle), taskOperations(taskOperations),
+          policyApprovals(policyApprovals) {}
 
     Person sessionActor(std::string_view person);
     bool activeSessionOrigin(const conversation::Message&) const;
@@ -58,7 +66,10 @@ private:
     SecretStorage& secretStorage;
     TaskRecords& taskRecords;
     const WebIdentityState& webIdentity;
-    Store::Impl& remaining;
+    Policy& permissions;
+    ConversationStorage& conversationTurns;
+    ConversationTools& conversationTools;
+    SessionMessageStorage& sessionMessageStorage;
     BotLifecycleStorage& botLifecycle;
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;

@@ -1,3 +1,13 @@
+#include "conversation_call.hpp"
+#include "task_run_reports.hpp"
+#include "session_read_storage.hpp"
+#include "session_participation_storage.hpp"
+#include "session_message_storage.hpp"
+#include "policy_approvals.hpp"
+#include "git_storage.hpp"
+#include "conversation_tools.hpp"
+#include "conversation_turns.hpp"
+#include "bot_lifecycle_storage.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
 #include "task_records.hpp"
@@ -115,60 +125,62 @@ struct SessionEffect {
 };
 }
 
-Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Message& message, int step, const Decision& decision,
-                                                       std::string_view key, bool offered, bool hasWebEvidence, T3& t3,
-                                                       std::stop_token shutdown) {
+CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message& message, int step, const Decision& decision,
+                                                    std::string_view key, bool offered, bool hasWebEvidence, T3& t3,
+                                                    std::stop_token shutdown) {
     using enum CallOutcome;
     const auto id = message.id;
     const auto fail = [&](const ToolError& error) {
         auto failure = error.details;
         failure["ok"] = false;
         failure["error"] = error.what();
-        saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(failure))}));
+        conversationTools.saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(failure))}));
     };
     const auto& args = decision.args;
     const auto admit = [&](Id taskId, Id expected, const AssignedRun* expectedRun) {
-        const auto task = ownTask(taskId, message);
+        const auto task = conversationTurns.ownTask(taskId, message);
         const auto& run = task.activeRun;
         if (expected != task.generation || (expectedRun && run != *expectedRun))
-            throw ToolError(
-                "stale",
-                {{"applied", 0}, {"taskId", taskId}, {"expected", {{"generation", expected}}}, {"current", taskState(task, message)}});
+            throw ToolError("stale", {{"applied", 0},
+                                      {"taskId", taskId},
+                                      {"expected", {{"generation", expected}}},
+                                      {"current", conversationTurns.taskState(task, message)}});
         if (terminal(task) || task.state == TaskState::cancelling)
             throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", taskId}});
         if (task.replanning || task.runStop)
-            throw ToolError("The task is stopping or replanning", {{"taskId", taskId}, {"current", taskState(task, message)}});
+            throw ToolError("The task is stopping or replanning",
+                            {{"taskId", taskId}, {"current", conversationTurns.taskState(task, message)}});
         if (task.hasDestinations())
             throw ToolError("Session actions are not available for tasks with destination Runs; use cancel_task to stop the whole task",
                             {{"taskId", taskId}});
         if (!run || run->ref.threadId.empty() || run->ref.runId.empty())
             throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
-                            {{"taskId", taskId}, {"current", taskState(task, message)}});
+                            {{"taskId", taskId}, {"current", conversationTurns.taskState(task, message)}});
         return task;
     };
     std::optional<SessionEffect> effect;
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (shutdown.stop_requested()) return stop;
-        if (!authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
-        auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? "
-                           "AND result IS NULL AND effect IS NOT NULL",
-                           {id, step});
+        auto saved = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? "
+                                    "AND result IS NULL AND effect IS NOT NULL",
+                                    {id, step});
         if (saved.next()) {
-            saveTurnResults(id, step,
-                            Json::array({Json{{"ok", false},
-                                              {"taskId", saved.json(0).at("taskId")},
-                                              {"delivery", "unknown"},
-                                              {"error", "Flock restarted while sending this, so T3 may have received it. "
-                                                        "Check the Session before sending it again"}}}));
+            conversationTools.saveTurnResults(id, step,
+                                              Json::array({Json{{"ok", false},
+                                                                {"taskId", saved.json(0).at("taskId")},
+                                                                {"delivery", "unknown"},
+                                                                {"error", "Flock restarted while sending this, so T3 may have received it. "
+                                                                          "Check the Session before sending it again"}}}));
         } else if (!offered) {
-            saveTurnResults(id, step, Json::array({toolFailure("Session control was not offered for this turn")}));
+            conversationTools.saveTurnResults(id, step, Json::array({toolFailure("Session control was not offered for this turn")}));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
-            saveTurnResults(id, step, Json::array({webEvidenceActionDenied()}));
+            conversationTools.saveTurnResults(id, step, Json::array({webEvidenceActionDenied()}));
         } else {
             try {
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
@@ -195,10 +207,10 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
     const auto& run = checkpoint.at("run");
 
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (shutdown.stop_requested()) return stop;
-        if (!authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
@@ -214,7 +226,7 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
         auto origin = policyApprovals.policyOrigin(message);
         origin.task = effect->taskId;
         origin.generation = effect->generation;
-        origin.revision = ownTask(effect->taskId, message).currentRevision.value_or(0);
+        origin.revision = conversationTurns.ownTask(effect->taskId, message).currentRevision.value_or(0);
         const auto gate =
             policyApprovals.approveAction(origin, resource, key, Json::array({decision.tool, args, run}), policyApprovals.now());
         if (gate != ApprovalGate::allow) {
@@ -222,10 +234,10 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
             transaction.commit();
             return gate == ApprovalGate::waiting ? waiting : advance;
         }
-        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
-             "AND result IS NULL AND effect IS NULL",
-             {checkpoint, id, step});
-        if (!sqlite3_changes(db)) return stop;
+        database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
+                      "AND result IS NULL AND effect IS NULL",
+                      {checkpoint, id, step});
+        if (!sqlite3_changes(database.db)) return stop;
         transaction.commit();
     }
 
@@ -233,18 +245,19 @@ Store::Impl::CallOutcome Store::Impl::runSessionEffect(const conversation::Messa
     try {
         const auto& cmd = effect->command;
         const auto target = Resource::sessionRead(cmd.environmentId, cmd.target.threadId).target;
-        outcome = Policy(*this).forbidden(message.bot, Action::t3_send, target) ? toolFailure(approvalError(ApprovalGate::denied))
-                                                                                : effect->dispatch(t3);
+        outcome = permissions.forbidden(message.bot, Action::t3_send, target) ? toolFailure(approvalError(ApprovalGate::denied))
+                                                                              : effect->dispatch(t3);
     } catch (const std::exception& error) {
         const std::string detail = "T3 may have received the interrupt: ";
         outcome = {{"ok", false}, {"taskId", effect->taskId}, {"delivery", "unknown"}, {"error", detail + error.what()}};
     }
     outcome = secretStorage.redactor(message.bot).record(std::move(outcome));
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
-    if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next()) return stop;
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (!database.query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next())
+        return stop;
     if (outcome.value("ok", false)) journalStorage.journalInterrupt(effect->taskId, {id, step, effect->run});
-    saveTurnResults(id, step, Json::array({outcome}));
+    conversationTools.saveTurnResults(id, step, Json::array({outcome}));
     transaction.commit();
     return advance;
 }
@@ -256,54 +269,71 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 }
 
-bool Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
+bool SessionMessageStorage::persistPendingReceipt(Id message) {
+    const auto receipt = sessionSendReceipts.find(message);
+    if (receipt == sessionSendReceipts.end()) return false;
+    persistSessionSendReceipt(message, receipt->second);
+    return true;
+}
+
+void SessionMessageStorage::forgetPendingReceipt(Id message) {
+    sessionSendReceipts.erase(message);
+}
+
+void SessionMessageStorage::recordPendingRuns(const SessionTarget& target) {
+    for (const auto& [source, receipt] : sessionSendReceipts)
+        if (receipt.target == target) recordSessionSendRun(source, receipt);
+}
+
+bool SessionMessageStorage::recordSessionSendRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
     const auto& delivery = receipt.delivery;
     if (!acceptedSessionSend(target, delivery)) return false;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
-         "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
-         {message, receipt.bot, target.environmentId, target.threadId, delivery.run.runId, receipt.title,
-          interruptAt || !receipt.notify || sessionParticipationStorage.sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0,
-          target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
-          secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
+    database.exec(
+        "INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
+        "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
+        {message, receipt.bot, target.environmentId, target.threadId, delivery.run.runId, receipt.title,
+         interruptAt || !receipt.notify || sessionParticipationStorage.sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0,
+         target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, delivery.delivery == "queued" ? "queued" : "started",
+         secretStorage.redactor(receipt.bot).text(delivery.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
     auto task = taskRecords.load(receipt.taskId);
     if (terminal(task)) return true;
     auto& run = destinationRun(task, receipt.actionId);
-    auto report = query(R"SQL(
+    auto report = database.query(R"SQL(
 SELECT 1 FROM journal WHERE task_id=? AND kind='report'
 AND run_environment_id=? AND run_id=? AND run_thread_id=? LIMIT 1)SQL",
-                        {receipt.taskId, run.environmentId, run.ref.runId, run.ref.threadId});
+                                 {receipt.taskId, run.environmentId, run.ref.runId, run.ref.threadId});
     if ((!run.outstanding() || report.next()) && taskRunReports.advanceDestinationSessionMessageRun(task, run)) taskRecords.save(task);
     return true;
 }
 
-void Store::Impl::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
+void SessionMessageStorage::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
     const bool unknown = field(result, "delivery") == "unknown";
     const auto results = Json::array({secretStorage.redactor(bot).record(std::move(result))});
-    exec(R"SQL(
+    database.exec(R"SQL(
 UPDATE conversation_steps
 SET result=?,effect=CASE WHEN ? AND json_extract(effect,'$.taskId') IS NOT NULL THEN effect END
 WHERE message_id=? AND step=? AND result IS NULL
 )SQL",
-         {results, unknown ? 1 : 0, message, step});
+                  {results, unknown ? 1 : 0, message, step});
 }
 
-void Store::Impl::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
+void SessionMessageStorage::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
     const auto& delivery = receipt.delivery;
     const bool accepted = recordSessionSendRun(message, receipt, interruptAt);
     const bool settled = accepted || delivery.definitelyUnsent || (interruptAt && delivery.kind == Delivery::Kind::NotAccepted);
     if (settled) {
-        exec("DELETE FROM session_message_sends WHERE action=? AND message_id=? AND coalesce(step,-1)=?",
-             {receipt.requestId, message, receipt.step});
-        if (sqlite3_changes(db) && receipt.step >= 0) {
-            exec(R"SQL(
+        database.exec("DELETE FROM session_message_sends WHERE action=? AND message_id=? AND coalesce(step,-1)=?",
+                      {receipt.requestId, message, receipt.step});
+        if (sqlite3_changes(database.db) && receipt.step >= 0) {
+            database.exec(R"SQL(
 UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
   AND json_extract(effect,'$.kind')='message_session'
   AND json_extract(effect,'$.sendState')='sending' AND json_extract(effect,'$.requestId')=?
 )SQL",
-                 {message, receipt.step, receipt.requestId});
+                          {message, receipt.step, receipt.requestId});
         }
     }
     if (receipt.step < 0 || interruptAt) return;
@@ -329,16 +359,16 @@ AND message_id IN (SELECT id FROM messages WHERE bot_id=?)
                   {now, bot});
 }
 
-void Store::Impl::reconcilePausedSessionSends(T3& t3, std::stop_token shutdown) {
+void SessionMessageStorage::reconcilePausedSessionSends(T3& t3, std::stop_token shutdown) {
     std::vector<std::pair<Id, Command>> pending;
     {
-        std::lock_guard lock(mutex);
-        auto rows = query(R"SQL(
+        std::lock_guard lock(database.mutex);
+        auto rows = database.query(R"SQL(
 SELECT s.message_id,m.bot_id,s.environment,s.thread,s.gateway_environment,s.action,s.instruction
 FROM session_message_sends s JOIN messages m ON m.id=s.message_id
 WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
 )SQL",
-                          {policyApprovals.now()});
+                                   {policyApprovals.now()});
         while (rows.next()) {
             Command command;
             command.tool = CommandTool::message_session;
@@ -359,10 +389,10 @@ WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
             delivery = t3.reconcile(command);
         } catch (const std::exception&) {
         }
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         const auto now = policyApprovals.now();
-        auto row = query(R"SQL(
+        auto row = database.query(R"SQL(
 SELECT coalesce(s.step,-1),json_extract(step.effect,'$.taskId'),json_extract(step.effect,'$.actionId')
 FROM session_message_sends s LEFT JOIN conversation_steps step
   ON step.message_id=s.message_id AND step.step=s.step
@@ -371,7 +401,7 @@ FROM session_message_sends s LEFT JOIN conversation_steps step
   AND json_extract(step.effect,'$.requestId')=s.action
 WHERE s.action=? AND s.message_id=? AND s.interrupt_at<=?
 )SQL",
-                         {command.actionId, message, now});
+                                  {command.actionId, message, now});
         if (!row.next()) {
             transaction.commit();
             continue;
@@ -388,13 +418,13 @@ WHERE s.action=? AND s.message_id=? AND s.interrupt_at<=?
                                    command.actionId,
                                    false},
                                   now);
-        exec("UPDATE session_message_sends SET interrupt_at=? WHERE action=?", {now + 5, command.actionId});
+        database.exec("UPDATE session_message_sends SET interrupt_at=? WHERE action=?", {now + 5, command.actionId});
         transaction.commit();
     }
 }
 
 void SessionParticipationStorage::interruptPausedSessionRuns(T3& t3, std::stop_token shutdown) {
-    remaining.reconcilePausedSessionSends(t3, shutdown);
+    sessionMessageStorage.reconcilePausedSessionSends(t3, shutdown);
     struct Pending {
         Id key;
         std::string environment;
@@ -428,13 +458,13 @@ WHERE rowid=? AND interrupt_at IS NOT NULL AND environment=? AND gateway_environ
     }
 }
 
-Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
-                                                         std::string_view key, const ConversationCallContext& ctx) {
+CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
+                                                      std::string_view key, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto id = message.id;
     const bool fixesPullRequest = decision.tool == "fix_pull_request";
     const auto save = [&](Json result) {
-        saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+        conversationTools.saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
     };
     Command command;
     command.tool = CommandTool::message_session;
@@ -449,13 +479,13 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
     Resource resource{Action::t3_send, {}};
     constexpr auto stopped = "This Bot's participation in the Session has stopped";
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
-        if (!authorizeTurn(message)) {
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
-        auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
+        auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
         if (!row.next()) return stop;
         if (!row.string(0).empty()) {
             if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
@@ -490,14 +520,14 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                 command.target.gatewayEnvironmentId = followup->session.gatewayEnvironmentId;
                 command.instruction = gitStorage.gitPrFollowupInstruction(message, *followup, decision);
             } else if (savedTaskTarget) {
-                const auto task = ownTask(conversation_storage::identifier(decision.args, "taskId", true), message);
+                const auto task = conversationTurns.ownTask(conversation_storage::identifier(decision.args, "taskId", true), message);
                 if (conversation_storage::identifier(decision.args, "generation", true, 0) != task.generation)
-                    throw ToolError("stale", {{"taskId", task.id}, {"current", taskState(task, message)}});
+                    throw ToolError("stale", {{"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}});
                 if (terminal(task) || task.state == TaskState::cancelling)
                     throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", task.id}});
                 const auto& selected = selectSavedDestination(task, decision.args, true);
                 if (const auto sourceId = conversation_storage::identifier(decision.args, "sourceResultMessageId", false); sourceId) {
-                    source = resultReference(sourceId, message);
+                    source = conversationTurns.resultReference(sourceId, message);
                     if (source.at("taskId") != task.id || source.at("revisionId") != task.currentRevision.value_or(0))
                         throw ToolError("sourceResultMessageId must be a result of this task's current revision");
                 }
@@ -531,7 +561,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
             target = {command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
             resource = {Action::t3_send, Resource::sessionRead(target.environmentId, target.threadId).target};
             if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) throw ToolError(stopped);
-            if (Policy(*this).forbidden(message.bot, resource.action, resource.target))
+            if (permissions.forbidden(message.bot, resource.action, resource.target))
                 throw ToolError(std::string(approvalError(ApprovalGate::denied)));
             if (!fixesPullRequest && !savedTaskTarget && !sessionReadStorage.connectedSessionAccess(message, target))
                 throw ToolError("This Session is unavailable through your T3 connection");
@@ -568,10 +598,10 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
         error = "Could not confirm that the failing check belongs to this pull request's current head";
     const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (ctx.shutdown.stop_requested()) return stop;
-        if (!authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
@@ -601,9 +631,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                              {"arguments", Json::array({command.instruction, command.authGeneration, target.gatewayEnvironmentId})}};
         } else if (savedTaskTarget) {
             try {
-                const auto task = ownTask(savedTaskId, message);
+                const auto task = conversationTurns.ownTask(savedTaskId, message);
                 if (task.generation != savedGeneration)
-                    throw ToolError("stale", {{"taskId", savedTaskId}, {"current", taskState(task, message)}});
+                    throw ToolError("stale", {{"taskId", savedTaskId}, {"current", conversationTurns.taskState(task, message)}});
                 if (terminal(task) || task.state == TaskState::cancelling)
                     throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", savedTaskId}});
                 const auto& selected = selectSavedDestination(task, decision.args, true);
@@ -615,8 +645,9 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
                     action->command.environmentId != selected.environmentId || action->command.projectId != selected.assignment.projectId ||
                     action->command.gatewayEnvironmentId != selected.ref.gatewayEnvironmentId)
                     throw ToolError("The destination Session is unavailable");
-                if (!query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
-                           {selected.actionId, savedTaskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
+                if (!database
+                         .query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                                {selected.actionId, savedTaskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
                          .next())
                     throw ToolError("The destination Session is unavailable");
                 origin.task = savedTaskId;
@@ -644,31 +675,31 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(const conversation::Mes
             effect["taskId"] = savedTaskId;
             effect["actionId"] = savedActionId;
         }
-        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
-             "AND result IS NULL AND effect IS NULL",
-             {effect, id, step});
-        if (!sqlite3_changes(db)) return stop;
+        database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
+                      "AND result IS NULL AND effect IS NULL",
+                      {effect, id, step});
+        if (!sqlite3_changes(database.db)) return stop;
         const auto read = Resource::sessionRead(target.environmentId, target.threadId);
-        if (!message.channelScope.empty() || !Policy(*this).allows(message.bot, read)) title.clear();
+        if (!message.channelScope.empty() || !permissions.allows(message.bot, read)) title.clear();
         title = bounded(redactT3Tokens(secretStorage.redactor(message.bot).text(title)), 512);
-        exec(R"SQL(
+        database.exec(R"SQL(
 INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
 SELECT ?,?,?,person_id,'active' FROM t3_connector WHERE singleton=1
 ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
 )SQL",
-             {message.bot, target.environmentId, target.threadId});
+                      {message.bot, target.environmentId, target.threadId});
         transaction.commit();
     }
 
     {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (ctx.shutdown.stop_requested()) return stop;
-        if (!authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
-        auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
+        auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step});
         if (!row.next()) {
             transaction.commit();
             return stop;
@@ -689,59 +720,60 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
         }
         effect["sendState"] = "sending";
         effect["requestId"] = command.actionId;
-        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL", {effect, id, step});
-        exec(R"SQL(
+        database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL", {effect, id, step});
+        database.exec(
+            R"SQL(
 INSERT INTO session_message_sends(action,message_id,environment,thread,gateway_environment,instruction,step)
 VALUES(?,?,?,?,?,?,?)
 )SQL",
-             {command.actionId, id, target.environmentId, target.threadId, target.gatewayEnvironmentId, command.instruction, step});
+            {command.actionId, id, target.environmentId, target.threadId, target.gatewayEnvironmentId, command.instruction, step});
         transaction.commit();
     }
 
     Delivery receipt;
     try {
-        receipt = Policy(*this).forbidden(message.bot, resource.action, resource.target)
+        receipt = permissions.forbidden(message.bot, resource.action, resource.target)
                       ? Delivery{Delivery::Kind::NotAccepted, {}, std::string(approvalError(ApprovalGate::denied)), true}
                       : ctx.t3.send(command);
     } catch (const std::exception&) {
         receipt.detail = "Could not confirm delivery to T3";
     }
-    std::lock_guard lock(mutex);
+    std::lock_guard lock(database.mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts
                                 .insert_or_assign(id, SessionSendReceipt{message.bot, target, std::move(title), std::move(receipt), step,
                                                                          savedTaskId, savedActionId, command.actionId, !fixesPullRequest})
                                 .first;
-    Transaction transaction(db);
+    Transaction transaction(database.db);
     persistSessionSendReceipt(id, checkpoint->second);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
     return advance;
 }
 
-Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::Message& message, int step, const Decision& decision,
-                                                           std::string_view key, bool offered, bool hasWebEvidence,
-                                                           std::stop_token shutdown) {
+CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Message& message, int step, const Decision& decision,
+                                                        std::string_view key, bool offered, bool hasWebEvidence, std::stop_token shutdown) {
     using enum CallOutcome;
     if (shutdown.stop_requested()) return stop;
     std::optional<SessionDispatchFileLock> dispatch;
     try {
         dispatch.emplace(path, SessionDispatchFileLock::Mode::exclusive);
     } catch (const std::exception& error) {
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
-        if (authorizeTurn(message)) saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
+        if (conversationTurns.authorizeTurn(message))
+            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
         transaction.commit();
         return advance;
     }
-    std::lock_guard lock(mutex);
-    Transaction transaction(db);
-    if (!authorizeTurn(message)) {
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
     const auto save = [&](Json result) {
-        saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+        conversationTools.saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
     };
     const auto fail = [&](const ToolError& error) {
         auto result = error.details;
@@ -749,7 +781,8 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
         result["error"] = error.what();
         save(std::move(result));
     };
-    auto existing = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {message.id, step});
+    auto existing =
+        database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {message.id, step});
     if (!existing.next()) {
         transaction.commit();
         return stop;
@@ -771,8 +804,9 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
             if (!decision.args.is_object()) throw ToolError("Tool arguments must be an object");
             const auto taskId = identifier(decision.args, "taskId", true);
             const auto generation = identifier(decision.args, "generation", true, 0);
-            const auto task = ownTask(taskId, message);
-            if (generation != task.generation) throw ToolError("stale", {{"taskId", taskId}, {"current", taskState(task, message)}});
+            const auto task = conversationTurns.ownTask(taskId, message);
+            if (generation != task.generation)
+                throw ToolError("stale", {{"taskId", taskId}, {"current", conversationTurns.taskState(task, message)}});
             const auto& selected = selectSavedDestination(task, decision.args, false);
             auto action = outboxStorage.outbox(task, selected.actionId);
             if (!action || !action->destinationAction || action->command.environmentId != selected.environmentId ||
@@ -793,8 +827,9 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                 const bool hasRun = !selected.ref.threadId.empty() && !selected.ref.runId.empty();
                 const bool exactRun =
                     phase == OutboxPhase::accepted && hasRun &&
-                    query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
-                          {selected.actionId, taskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
+                    database
+                        .query("SELECT 1 FROM runs WHERE action_id=? AND task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                               {selected.actionId, taskId, selected.environmentId, selected.ref.threadId, selected.ref.runId})
                         .next();
                 if (phase == OutboxPhase::accepted && !exactRun) throw ToolError("The destination Session is unavailable");
                 const bool recoveredRun = phase == OutboxPhase::started && hasRun;
@@ -827,16 +862,16 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
                 }
                 action->stop = std::move(stop);
                 if (!outboxStorage.saveOutbox(*action, phase)) throw ToolError("The destination changed before its stop request was saved");
-                exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
-                     {Json{{"kind", "destination_cancel"},
-                           {"taskId", taskId},
-                           {"generation", generation},
-                           {"actionId", selected.actionId},
-                           {"environmentId", selected.environmentId},
-                           {"projectId", selected.assignment.projectId},
-                           {"run", runJson(selected.ref)}},
-                      message.id, step});
-                if (!sqlite3_changes(db)) throw ToolError("The stop request could not be saved");
+                database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL AND effect IS NULL",
+                              {Json{{"kind", "destination_cancel"},
+                                    {"taskId", taskId},
+                                    {"generation", generation},
+                                    {"actionId", selected.actionId},
+                                    {"environmentId", selected.environmentId},
+                                    {"projectId", selected.assignment.projectId},
+                                    {"run", runJson(selected.ref)}},
+                               message.id, step});
+                if (!sqlite3_changes(database.db)) throw ToolError("The stop request could not be saved");
                 save({{"ok", true}, {"effect", "stop_requested"}, {"taskId", taskId}, {"destination", selected.name}});
             }
         } catch (const ToolError& error) {
@@ -846,7 +881,7 @@ Store::Impl::CallOutcome Store::Impl::cancelDestinationRun(const conversation::M
     return advance;
 }
 
-void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
+void SessionMessageStorage::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     struct Wait {
         Id key, message;
         std::string bot;
@@ -855,9 +890,9 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
     };
     std::vector<Wait> waits;
     {
-        std::lock_guard lock(mutex);
-        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title,gateway_environment "
-                          "FROM session_message_waits WHERE notified=0 ORDER BY rowid");
+        std::lock_guard lock(database.mutex);
+        auto rows = database.query("SELECT rowid,message_id,bot,environment,thread,run,title,gateway_environment "
+                                   "FROM session_message_waits WHERE notified=0 ORDER BY rowid");
         while (rows.next())
             waits.push_back({rows.number(0),
                              rows.number(1),
@@ -871,9 +906,9 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         const SessionDispatchFileLock dispatch(path, SessionDispatchFileLock::Mode::shared);
         const auto authorized = [&] {
             if (botLifecycle.botPaused(wait.bot) ||
-                !query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
+                !database.query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
                 return false;
-            const auto message = loadTurnMessage(wait.message);
+            const auto message = conversationTurns.loadTurnMessage(wait.message);
             return !sessionParticipationStorage.sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
                    (message.principalSource != conversation::PrincipalSource::session ||
                     sessionParticipationStorage.activeSessionOrigin(message)) &&
@@ -881,10 +916,11 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         };
         // A revoked connection settles the wait silently, including on restart.
         const auto settle = [&](bool finished = false) {
-            exec("UPDATE session_message_waits SET notified=1,run_finished=? WHERE rowid=? AND notified=0", {finished ? 1 : 0, wait.key});
+            database.exec("UPDATE session_message_waits SET notified=1,run_finished=? WHERE rowid=? AND notified=0",
+                          {finished ? 1 : 0, wait.key});
         };
         {
-            std::lock_guard lock(mutex);
+            std::lock_guard lock(database.mutex);
             if (!authorized()) {
                 settle();
                 continue;
@@ -892,19 +928,19 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         }
         const auto reason = t3.sessionMessageWake(wait.target, {wait.target.threadId, wait.run, {}, wait.target.gatewayEnvironmentId});
         if (reason.empty() || shutdown.stop_requested()) continue;
-        std::lock_guard lock(mutex);
-        Transaction transaction(db);
+        std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
         if (!authorized()) {
             settle();
             transaction.commit();
             continue;
         }
         settle(reason == "finished" || reason == "failed");
-        if (!sqlite3_changes(db)) continue;
-        const auto source = loadTurnMessage(wait.message);
+        if (!sqlite3_changes(database.db)) continue;
+        const auto source = conversationTurns.loadTurnMessage(wait.message);
         auto routing = source.routing;
         routing.erase("sessionInvitation");
-        Policy policy(*this);
+        Policy policy = permissions;
         auto title = wait.title;
         if (!policy.allows(wait.bot, Resource::sessionRead(wait.target.environmentId, wait.target.threadId))) title.clear();
         if (auto origin = routing.find("sessionOrigin");
@@ -914,18 +950,18 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         const ConversationWakeEntry wake{wait.target.environmentId, wait.target.threadId, std::move(title), reason, wait.message};
         routing["sessionWake"] = encodeConversationWake(wake);
         const auto id = journalStorage.journalConversationMessage(wait.bot, {wake});
-        exec(R"SQL(
+        database.exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
 )SQL",
-             {id, wait.bot, "session-wake:" + std::to_string(wait.key), wait.message, routing, source.admittedActor.id,
-              source.admittedActor.adminRoot ? 1 : 0, static_cast<int>(source.principalSource), wait.bot});
-        exec(R"SQL(
+                      {id, wait.bot, "session-wake:" + std::to_string(wait.key), wait.message, routing, source.admittedActor.id,
+                       source.admittedActor.adminRoot ? 1 : 0, static_cast<int>(source.principalSource), wait.bot});
+        database.exec(R"SQL(
 INSERT INTO channel_messages(message_id,event_key,scope_key,origin,sender_id,person_id)
 SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE message_id=?
 )SQL",
-             {id, "session-wake:" + std::to_string(wait.key), wait.message});
-        exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
+                      {id, "session-wake:" + std::to_string(wait.key), wait.message});
+        database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
         transaction.commit();
     }
 }

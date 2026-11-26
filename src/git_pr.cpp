@@ -98,8 +98,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                                         {base.host, base.repo, baseRef, head.repo, headRef, context.taskId, intent, int{newIntent}});
         create = !operation.next();
         if (create) {
-            if (Policy(remaining).forbidden(context.botId, Action::repository_pr, base.resource()))
-                throw Conflict("Repository access denied");
+            if (permissions.forbidden(context.botId, Action::repository_pr, base.resource())) throw Conflict("Repository access denied");
             request.operationId = actionId();
             database.exec("INSERT INTO git_pr_operations VALUES(?,?,?,?,?,?,?,?,?,?,"
                           "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
@@ -209,7 +208,7 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     std::string url;
     const bool link = decision == "link_pr";
     if (link) {
-        const Policy policy(remaining);
+        const auto& policy = permissions;
         if (policy.forbidden(item.botId, Action::repository_pr, base.resource()) ||
             (head != base && !policy.allows(item.botId, Action::repository_read, head.resource())))
             throw DecisionDenied{};

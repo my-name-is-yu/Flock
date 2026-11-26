@@ -1,3 +1,7 @@
+#include "flock/secrets.hpp"
+#include "flock/policy.hpp"
+#include "secret_storage.hpp"
+#include "conversation_tools.hpp"
 #include "storage.hpp"
 #include "workspace_internal.hpp"
 #include "flock/types.hpp"
@@ -226,7 +230,7 @@ Json readToolFile(const fs::path& root, const fs::path& relative, const SecretRe
     return readToolFile(fd.get(), relative, scrub);
 }
 
-Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
+Json ConversationTools::workspaceTool(const ToolContext& ctx, const Decision& call) {
     const auto& args = call.args;
     const auto workspace = openWorkspace(path, ctx.bot);
     const auto root = workspace.get();

@@ -1,3 +1,7 @@
+#include "storage.hpp"
+#include "session_message_storage.hpp"
+#include "conversation_tools.hpp"
+#include "conversation_turns.hpp"
 #include "session_dispatch_lock.hpp"
 #include "session_participation_storage.hpp"
 #include "session_read_storage.hpp"
@@ -147,7 +151,8 @@ SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE
     std::vector<Id> wakes;
     while (rows.next()) wakes.push_back(rows.number(0));
     for (const auto wake : wakes)
-        db.finishTurn(db.loadTurnMessage(wake), "The T3 connection was disconnected.", nullptr, ConversationReplyRoute::session_access);
+        db.conversationTurns.finishTurn(db.conversationTurns.loadTurnMessage(wake), "The T3 connection was disconnected.", nullptr,
+                                        ConversationReplyRoute::session_access);
     db.exec(R"SQL(
 UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
  SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
@@ -219,7 +224,7 @@ bool SessionParticipationStorage::t3EnvironmentConnected(std::string_view enviro
 Person SessionParticipationStorage::sessionActor(std::string_view person) {
     if (webIdentity.resolve) {
         if (const auto root = webIdentity.resolve(person)) return {std::string(person), *root};
-    } else if (person == localOwner.id && !Policy(remaining).requiresIdentity())
+    } else if (person == localOwner.id && !permissions.requiresIdentity())
         return localOwner;
     return {};
 }
@@ -324,8 +329,8 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     const auto safeText = redactT3Tokens(scrub.text(text));
     const auto routing = intake(bot, safeText);
     if (routing.botId != bot) throw Conflict("The Bot is unavailable");
-    const auto message =
-        db.enqueueConversation(actor, routing, conversation::PrincipalSource::session, "session-ask:" + requestId, safeText, 0, &*origin);
+    const auto message = db.conversationTurns.enqueueConversation(actor, routing, conversation::PrincipalSource::session,
+                                                                  "session-ask:" + requestId, safeText, 0, &*origin);
     db.exec("INSERT INTO session_asks VALUES(?,?,?,?,?)", {actor.id, requestId, participation, fingerprint, message});
     transaction.commit();
     return message;
@@ -346,7 +351,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         if (shutdown.stop_requested()) return false;
-        if (!remaining.authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return false;
         }
@@ -354,7 +359,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 .next()) {
             auto result = replay();
             if (result.is_null()) result = apply();
-            remaining.saveTurnResults(message.id, step, Json::array({result}));
+            conversationTools.saveTurnResults(message.id, step, Json::array({result}));
         }
         transaction.commit();
         return true;
@@ -381,8 +386,8 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 {id, target.environmentId, target.threadId});
         };
         const auto authorize = [&]() -> Sender {
-            const auto actor = remaining.turnActor(message);
-            Policy policy(remaining);
+            const auto actor = conversationTurns.turnActor(message);
+            Policy policy = permissions;
             if (!policy.allows(actor, Action::bot_decide, message.bot) || !policy.allows(actor, Action::bot_decide, bot))
                 throw Conflict("Bot access is required");
             if (!peers || std::ranges::none_of(peers(message.bot), [&](const PeerBot& peer) { return peer.intake.botId == bot; }))
@@ -493,8 +498,8 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO UPDATE SET state='active' WHERE 
             const SessionOrigin origin{target, title};
             const ConversationInvitationEntry invitation{target.environmentId, target.threadId, title,       message.bot,
                                                          inviterName,          safeNote,        sender.depth};
-            const auto invited = remaining.enqueueConversation(sender.actor, routing, conversation::PrincipalSource::session, key,
-                                                               description, 0, &origin, &invitation);
+            const auto invited = conversationTurns.enqueueConversation(sender.actor, routing, conversation::PrincipalSource::session, key,
+                                                                       description, 0, &origin, &invitation);
             database.exec("INSERT INTO session_invitations VALUES(?,?,?,?,?,?)",
                           {message.id, step, inviter, invitee, sender.depth, invited});
             return Json{{"ok", true}, {"messageId", invited}, {"depth", sender.depth}};
@@ -548,10 +553,10 @@ SessionStopResult SessionParticipation::stop(const T3Connection& connection, std
 SessionStop SessionParticipationStorage::stopSessionParticipation(SessionReadStorage& sessionReadStorage, const Person& actor,
                                                                   std::string_view bot, const SessionTarget& target, SessionExit exit,
                                                                   Id message) {
-    Policy policy(remaining);
+    Policy policy = permissions;
     if (!policy.allows(actor, Action::bot_decide, bot)) throw Conflict("Bot access is required");
     const bool throughConnector = exit == SessionExit::left && actor.adminRoot && message &&
-                                  sessionReadStorage.connectedSessionAccess(remaining.loadTurnMessage(message), target);
+                                  sessionReadStorage.connectedSessionAccess(conversationTurns.loadTurnMessage(message), target);
     auto row = database.query(R"SQL(
 SELECT p.id,p.environment_id,p.state,p.stopped_through FROM session_participations p
 JOIN t3_connector c ON c.person_id=p.person_id
@@ -574,8 +579,7 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
     // A send may have returned a receipt before its transaction hit SQLite contention.
     // Include that Run in the same stop transaction even if the conversation step is retried later.
     const SessionTarget stoppedTarget{environment, target.threadId};
-    for (const auto& [source, receipt] : remaining.sessionSendReceipts)
-        if (receipt.target == stoppedTarget) remaining.recordSessionSendRun(source, receipt);
+    sessionMessageStorage.recordPendingRuns(stoppedTarget);
 
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";
@@ -625,8 +629,8 @@ WHERE t.status IN ('paused','policy_waiting') AND (
     std::vector<Id> closedTurns;
     while (turns.next()) closedTurns.push_back(turns.number(0));
     for (const auto turn : closedTurns)
-        remaining.finishTurn(remaining.loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr,
-                             ConversationReplyRoute::session_access);
+        conversationTurns.finishTurn(conversationTurns.loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr,
+                                     ConversationReplyRoute::session_access);
     // Persist each cancellation intent with the stop. Runtime recovers in-flight launches and
     // interrupts their own assigned Runs through the ordinary task cancellation path.
     auto children = database.query((stopCascade + R"SQL(
@@ -661,7 +665,7 @@ WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thre
                                    {id, cutoff});
     std::vector<Id> unassigned;
     while (selected.next()) {
-        const auto source = remaining.loadTurnMessage(selected.number(1));
+        const auto source = conversationTurns.loadTurnMessage(selected.number(1));
         if (source.admittedActor.id == selected.string(2) ||
             sessionReadStorage.connectedSessionAccess(source, {selected.string(3), selected.string(4)}))
             unassigned.push_back(selected.number(0));
@@ -803,7 +807,7 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         if (shutdown.stop_requested()) return false;
-        if (!remaining.authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return false;
         }
@@ -815,12 +819,12 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
             if (!args.is_object() || args.size() != 2) throw Conflict("Invalid leave_session arguments");
             const SessionTarget target{text(args, "environmentId", 256, true), text(args, "threadId", 256, true)};
             if (!validId(target.environmentId, 256) || !validId(target.threadId, 256)) throw Conflict("Invalid leave_session arguments");
-            stop = stopSessionParticipation(sessionReadStorage, remaining.turnActor(message), message.bot, target, SessionExit::left,
-                                            message.id);
+            stop = stopSessionParticipation(sessionReadStorage, conversationTurns.turnActor(message), message.bot, target,
+                                            SessionExit::left, message.id);
         } catch (const Conflict& error) {
-            remaining.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
         } catch (const conversation_storage::ToolError& error) {
-            remaining.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
         }
         transaction.commit();
     }
@@ -830,11 +834,11 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     Transaction transaction(database.db);
     auto result = stopped.data();
     result["ok"] = true;
-    remaining.saveTurnResults(message.id, step, Json::array({result}));
+    conversationTools.saveTurnResults(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
     if (message.principalSource == conversation::PrincipalSource::session && !activeSessionOrigin(message) &&
-        remaining.isNextTurn(message.id)) {
-        remaining.finishTurn(message, stopped.summary(), nullptr, ConversationReplyRoute::session_left);
+        conversationTurns.isNextTurn(message.id)) {
+        conversationTurns.finishTurn(message, stopped.summary(), nullptr, ConversationReplyRoute::session_left);
         transaction.commit();
         return false;
     }

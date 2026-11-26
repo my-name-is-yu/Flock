@@ -1,8 +1,8 @@
 #pragma once
 
 #include "policy_origin.hpp"
+#include "policy_approval_types.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <functional>
@@ -10,6 +10,9 @@
 #include <string_view>
 
 namespace flockv0 {
+class Policy;
+class ConversationStorage;
+
 class Database;
 class JournalStorage;
 class SecretStorage;
@@ -25,21 +28,17 @@ namespace conversation {
 struct Message;
 }
 
-enum class ApprovalGate { allow, waiting, denied, expired, stale };
-enum class ApprovalWait { pause, defer };
-std::string_view approvalError(ApprovalGate);
-
 class BotLifecycleStorage;
 class ChannelStorage;
 class InboxStorage;
 class PolicyApprovals {
 public:
     PolicyApprovals(Database& database, const SecretStorage& secretStorage, const WebIdentityState& webIdentity, TaskRecords& taskRecords,
-                    WaitStorage& waitStorage, JournalStorage& journalStorage, Store::Impl& remaining, BotLifecycleStorage& botLifecycle,
-                    ChannelStorage& channelStorage, InboxStorage& inboxStorage)
+                    WaitStorage& waitStorage, JournalStorage& journalStorage, Policy& permissions, ConversationStorage& conversationTurns,
+                    BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage)
         : database(database), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), remaining(remaining), botLifecycle(botLifecycle), channelStorage(channelStorage),
-          inboxStorage(inboxStorage) {}
+          journalStorage(journalStorage), permissions(permissions), conversationTurns(conversationTurns), botLifecycle(botLifecycle),
+          channelStorage(channelStorage), inboxStorage(inboxStorage) {}
 
     Seconds now() const { return clock(); }
     void setClock(const std::function<Seconds()>& value) { clock = value; }
@@ -62,7 +61,8 @@ private:
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
     JournalStorage& journalStorage;
-    Store::Impl& remaining;
+    Policy& permissions;
+    ConversationStorage& conversationTurns;
     BotLifecycleStorage& botLifecycle;
     ChannelStorage& channelStorage;
     InboxStorage& inboxStorage;

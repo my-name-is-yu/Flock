@@ -1,3 +1,4 @@
+#include "conversation_turns.hpp"
 #include "workflow_storage.hpp"
 #include "task_operations.hpp"
 #include "task_routing.hpp"
@@ -106,10 +107,10 @@ bool closed(std::string_view status) {
 }
 
 WorkflowStorage::WorkflowStorage(Database& database, TaskRecords& taskRecords, TaskEvents& taskEvents, JournalStorage& journalStorage,
-                                 const SecretStorage& secretStorage, Store::Impl& remaining, TaskOperations& operations,
+                                 const SecretStorage& secretStorage, ConversationStorage& conversationTurns, TaskOperations& operations,
                                  TaskRouting& routing)
     : database_(database), taskRecords_(taskRecords), taskEvents_(taskEvents), journalStorage_(journalStorage),
-      secretStorage_(secretStorage), remaining_(remaining), operations_(operations), routing_(routing) {}
+      secretStorage_(secretStorage), conversationTurns(conversationTurns), operations_(operations), routing_(routing) {}
 
 Json WorkflowStorage::workflowStatus(Id id, std::string_view bot, Seconds now) const {
     auto owner = database_.query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?", {id, bot});
@@ -416,7 +417,7 @@ void WorkflowStorage::stageObservation(const TaskData& task, const Observation& 
 }
 
 bool WorkflowStorage::settleStageReport(TaskData& task) {
-    if (task.state != TaskState::cancelling && remaining_.conversationPending(task.botId)) return false;
+    if (task.state != TaskState::cancelling && conversationTurns.conversationPending(task.botId)) return false;
     const Id reportId = task.pendingStageReport.value();
     task.pendingStageReport.reset();
     const auto& workflow = task.workflow.value();

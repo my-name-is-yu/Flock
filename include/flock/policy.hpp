@@ -125,6 +125,10 @@ private:
     friend class ModelCalls;
     friend class TaskOperations;
     friend class TaskRouting;
+    friend class ConversationStorage;
+    friend class BotSettingsStorage;
+    friend class ConversationTools;
+    friend class SessionMessageStorage;
     friend struct Store::Impl;
     friend class PolicyApprovals;
 };

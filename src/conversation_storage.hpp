@@ -1,6 +1,5 @@
 #pragma once
 
-#include "storage.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"

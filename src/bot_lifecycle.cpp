@@ -53,7 +53,8 @@ SELECT id FROM messages WHERE bot_id=? AND id IN (
         std::vector<Id> openTurns;
         while (turns.next()) openTurns.push_back(turns.number(0));
         for (const auto id : openTurns)
-            p_->finishTurn(p_->loadTurnMessage(id), botPausedMessage, nullptr, ConversationReplyRoute::bot_paused);
+            p_->conversationTurns.finishTurn(p_->conversationTurns.loadTurnMessage(id), botPausedMessage, nullptr,
+                                             ConversationReplyRoute::bot_paused);
         p_->exec(R"SQL(
 UPDATE workflows SET stop_requested=1 WHERE bot_id=? AND stop_requested=0 AND EXISTS (
     SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id

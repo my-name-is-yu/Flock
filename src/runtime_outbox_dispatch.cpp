@@ -1,3 +1,4 @@
+#include "storage.hpp"
 #include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
@@ -371,8 +372,8 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
         if (!cmd.sessionOrigin && !sendsToSession) return true;
         std::lock_guard lock(db.mutex);
         if (const auto& origin = current.sessionOrigin) {
-            const auto source = db.loadTurnMessage(current.sourceMessageId.value());
-            const auto actor = db.turnActor(source);
+            const auto source = db.conversationTurns.loadTurnMessage(current.sourceMessageId.value());
+            const auto actor = db.conversationTurns.turnActor(source);
             const auto& parent = origin->target;
             if (!db.sessionParticipationStorage.activeSessionOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
                 !policy.allows(actor, Action::bot_decide, cmd.ownerBotId) ||
@@ -551,15 +552,15 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
                 if (policyGate != ApprovalGate::allow) return false;
             }
             if (usesExistingSession && current.sourceMessageId) {
-                const auto source = db.loadTurnMessage(*current.sourceMessageId);
+                const auto source = db.conversationTurns.loadTurnMessage(*current.sourceMessageId);
                 const SessionTarget target{cmd.environmentId, cmd.target.threadId,
                                            cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
                 auto participant = db.query(R"SQL(
 SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
 )SQL",
                                             {cmd.ownerBotId, target.environmentId, target.threadId});
-                if (participant.next() &&
-                    (participant.string(1) == db.turnActor(source).id || db.sessionReadStorage.connectedSessionAccess(source, target)))
+                if (participant.next() && (participant.string(1) == db.conversationTurns.turnActor(source).id ||
+                                           db.sessionReadStorage.connectedSessionAccess(source, target)))
                     action.sessionParticipationId = participant.number(0);
             }
             if (includeMemory) {
@@ -572,7 +573,8 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
             if (cmd.tool != CommandTool::answer_session_question) {
                 auto* run = destination ? &destinationRun(current, cmd.actionId) : nullptr;
                 if (!(run ? run->deadline.value_or(0) : current.deadline)) {
-                    const auto deadline = clock() + db.environmentTimeout(cmd.ownerBotId, cmd.environmentId, current.config);
+                    const auto deadline =
+                        clock() + db.botSettingsStorage.environmentTimeout(cmd.ownerBotId, cmd.environmentId, current.config);
                     if (run)
                         run->deadline = deadline;
                     else

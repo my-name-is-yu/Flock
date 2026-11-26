@@ -1,6 +1,14 @@
 #pragma once
 #include "task_interaction_storage.hpp"
 #include "database.hpp"
+#include "session_message_storage.hpp"
+#include "conversation_tools.hpp"
+#include "conversation_turns.hpp"
+#include "bot_settings_storage.hpp"
+#include "policy_approval_types.hpp"
+#include "session_send_receipt.hpp"
+#include "conversation_checkpoint.hpp"
+#include "conversation_call.hpp"
 #include "session_stop.hpp"
 #include "task_run_reports.hpp"
 #include "task_routing.hpp"
@@ -99,18 +107,6 @@ inline constexpr std::string_view runOutboxOperation = "run-outbox/";
 inline constexpr std::string_view runStopOperation = "run-stop/";
 std::string effectiveDoneWhen(const TaskData& task);
 
-struct ConversationModelFailure {
-    std::optional<Seconds> retryFrom;
-    ModelErrorCode code = ModelErrorCode::inference_failed;
-};
-
-struct ConversationModelCheckpoint {
-    Id attempt;
-    int step;
-    Json usage;
-    std::variant<std::vector<ModelCall>, ConversationModelFailure> outcome;
-};
-
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 std::string redactT3Tokens(std::string);
 
@@ -133,6 +129,50 @@ struct PrReviewRequestedEntry;
 struct GitPrFollowupEntry;
 
 struct Store::Impl : Database {
+    BotSettingsStorage botSettingsStorage{*this, permissions, sessionParticipationStorage, taskRouting};
+    ConversationStorage conversationTurns{*this,
+                                          attachments,
+                                          automationStorage,
+                                          botLifecycle,
+                                          botSettingsStorage,
+                                          channelStorage,
+                                          conversationContextStorage,
+                                          conversationTools,
+                                          gitStorage,
+                                          permissions,
+                                          journalStorage,
+                                          localMachineStorage,
+                                          memoryStorage,
+                                          modelCalls,
+                                          peerStorage,
+                                          policyApprovals,
+                                          secretStorage,
+                                          sessionMessageStorage,
+                                          sessionParticipationStorage,
+                                          sessionReadStorage,
+                                          taskOperations,
+                                          taskRecords,
+                                          taskRouting,
+                                          waitStorage,
+                                          webIdentity,
+                                          workflowStorage};
+    ConversationTools conversationTools{*this,      attachments,     conversationTurns,  permissions,  path, botSettingsStorage,
+                                        modelCalls, policyApprovals, sessionReadStorage, secretStorage};
+    SessionMessageStorage sessionMessageStorage{*this,
+                                                botLifecycle,
+                                                conversationTurns,
+                                                conversationTools,
+                                                gitStorage,
+                                                permissions,
+                                                path,
+                                                journalStorage,
+                                                outboxStorage,
+                                                policyApprovals,
+                                                secretStorage,
+                                                sessionParticipationStorage,
+                                                sessionReadStorage,
+                                                taskRecords,
+                                                taskRunReports};
     ModelCalls modelCalls{*this, botLifecycle, *this, journalStorage, secretStorage, taskRecords, waitStorage, channelStorage};
     TaskOperations taskOperations{*this,       automationStorage, botLifecycle, *this,       journalStorage, modelCalls,  outboxStorage,
                                   peerStorage, secretStorage,     taskEvents,   taskRecords, taskRouting,    waitStorage, inboxStorage};
@@ -151,107 +191,42 @@ struct Store::Impl : Database {
     AutomationStorage automationStorage;
     AttachmentStorage attachments{*this};
     ConversationContextStorage conversationContextStorage{*this, secretStorage, attachments};
-    WorkflowStorage workflowStorage{*this, taskRecords, taskEvents, journalStorage, secretStorage, *this, taskOperations, taskRouting};
+    WorkflowStorage workflowStorage{*this,         taskRecords,       taskEvents,     journalStorage,
+                                    secretStorage, conversationTurns, taskOperations, taskRouting};
     WebIdentityState webIdentity;
     InboxStorage inboxStorage{*this, secretStorage, taskRecords,    waitStorage,    journalStorage,
                               *this, modelCalls,    taskOperations, policyApprovals};
-    GitStorage gitStorage{*this,       secretStorage, inboxStorage, taskRecords,     journalStorage,
-                          webIdentity, *this,         botLifecycle, policyApprovals, sessionParticipationStorage};
+    GitStorage gitStorage{*this,
+                          secretStorage,
+                          inboxStorage,
+                          taskRecords,
+                          journalStorage,
+                          webIdentity,
+                          permissions,
+                          conversationTurns,
+                          botLifecycle,
+                          policyApprovals,
+                          sessionParticipationStorage};
     Policy permissions{*this};
-    ChannelStorage channelStorage{*this, path, permissions, secretStorage, webIdentity, journalStorage, *this, policyApprovals};
+    ChannelStorage channelStorage{*this, path, permissions, secretStorage, webIdentity, journalStorage, conversationTurns, policyApprovals};
     LocalMachineStorage localMachineStorage{*this, permissions, secretStorage, webIdentity, taskRecords};
-    PolicyApprovals policyApprovals{*this,          secretStorage, webIdentity,  taskRecords,    waitStorage,
-                                    journalStorage, *this,         botLifecycle, channelStorage, inboxStorage};
-    SessionParticipationStorage sessionParticipationStorage{*this, path,         secretStorage,  taskRecords,    webIdentity,
-                                                            *this, botLifecycle, taskOperations, policyApprovals};
-    SessionReadStorage sessionReadStorage{*this, secretStorage, sessionParticipationStorage, *this, channelStorage, policyApprovals};
-    Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
-                           Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
-    std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                                       const Json& attachments) const;
-    Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
-    Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
+    PolicyApprovals policyApprovals{*this,       secretStorage,     webIdentity,  taskRecords,    waitStorage, journalStorage,
+                                    permissions, conversationTurns, botLifecycle, channelStorage, inboxStorage};
+    SessionParticipationStorage sessionParticipationStorage{*this,
+                                                            path,
+                                                            secretStorage,
+                                                            taskRecords,
+                                                            webIdentity,
+                                                            permissions,
+                                                            conversationTurns,
+                                                            conversationTools,
+                                                            sessionMessageStorage,
+                                                            botLifecycle,
+                                                            taskOperations,
+                                                            policyApprovals};
+    SessionReadStorage sessionReadStorage{*this,          secretStorage,  sessionParticipationStorage, permissions, conversationTurns,
+                                          channelStorage, policyApprovals};
     explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
-    void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
-    Json workspaceTool(const ToolContext&, const Decision&);
-    std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
-    void validateBotTool(const ToolContext&, const Decision&);
-    Json executeBotTool(const ToolContext&, const Decision&);
-    void saveTurnResults(Id, int step, const Json& results);
-    class ToolBatch;
-    std::map<std::pair<Id, int>, std::map<std::size_t, ToolCallResult>> unpersistedToolResults;
-    std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
-    void deferConversation(Id, Seconds now);
-    std::map<Id, ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt {
-        std::string bot;
-        SessionTarget target;
-        std::string title;
-        Delivery delivery;
-        int step = -1;
-        Id taskId = 0;
-        std::string actionId, requestId;
-        bool notify = true;
-    };
-    std::map<Id, SessionSendReceipt> sessionSendReceipts;
-    bool recordSessionSendRun(Id, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
-    void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
-    void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
-    void reconcilePausedSessionSends(T3&, std::stop_token);
-    void runTurn(Id messageId, Model&, T3&, const std::function<std::string(std::string_view)>&, const std::function<Seconds()>&,
-                 const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&,
-                 std::stop_token);
-    enum class CallOutcome { advance, waiting, stop, finished };
-    struct ConversationCallContext {
-        T3& t3;
-        const std::function<Seconds()>& clock;
-        GitHost* gitHost;
-        const ApplyBotChange& applyBotChange;
-        const ReconcileBotCreation& reconcileBotCreation;
-        const IntakeResolver& intake;
-        const PeerResolver& peers;
-        std::stop_token shutdown;
-        bool hasWebEvidence;
-    };
-    bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
-                      const ConversationCallContext&);
-    CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&, std::string_view effectType,
-                                        const BotTools&, const ConversationCallContext&);
-    CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                             const ConversationCallContext&);
-    CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                         const std::function<Seconds()>&);
-    CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                             const ConversationCallContext&);
-    std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                                   Seconds now, ApprovalWait, const WorkSession* selectedSession,
-                                                   const LinkedTaskDestinations& linked);
-    std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
-    void saveConversationCallResult(const conversation::Message&, int step, Json result);
-    CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                   const ConversationCallContext&);
-    CallOutcome cancelDestinationRun(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
-                                     bool hasWebEvidence, std::stop_token);
-    void wakeSessionMessages(T3&, std::stop_token);
-    CallOutcome runSessionEffect(const conversation::Message&, int step, const Decision&, std::string_view key, bool offered,
-                                 bool hasWebEvidence, T3&, std::stop_token);
-    bool isNextTurn(Id messageId) const;
-    bool authorizeTurn(const conversation::Message&);
-    Person turnActor(const conversation::Message&);
-    conversation::Message loadTurnMessage(Id messageId) const;
-    const char* questionAnswerError(const TaskData& task, const conversation::Message&, const std::optional<Wait>&) const;
-    Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
-    Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
-    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
-                   const LinkedTaskDestinations& linked);
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const WorkSession* selectedSession,
-                       const LinkedTaskDestinations& linked);
-    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
-                    const conversation::QuestionAnchor* question = nullptr);
-    TaskData ownTask(Id taskId, const conversation::Message&) const;
-    Json resultReference(Id messageId, const conversation::Message&) const;
-    bool conversationPending(std::string_view bot) const;
 };
 
 }
