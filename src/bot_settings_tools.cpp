@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/memory_automation.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
 #include "flock/json.hpp"

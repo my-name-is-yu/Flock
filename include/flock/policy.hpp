@@ -115,6 +115,8 @@ private:
     void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& details);
     Store::Impl& db_;
+    friend class AutomationStorage;
+    friend class MemoryStorage;
     friend class Store;
     friend struct Store::Impl;
 };

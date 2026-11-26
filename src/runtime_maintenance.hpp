@@ -13,10 +13,12 @@
 #include <utility>
 
 namespace flockv0 {
+class AutomationStorage;
+
 class Runtime::Components::Maintenance {
     using ErrorReporter = std::function<void(std::string_view)>;
 public:
-    Maintenance(Store::Impl&, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
+    Maintenance(Store::Impl&, AutomationStorage&, const std::function<Seconds()>& clock, const ErrorReporter& automationError,
                 const ErrorReporter& storageContention);
 
     Seconds settleApprovals();
@@ -44,6 +46,7 @@ private:
     void scanIfChanged(std::optional<ScanStamp>& completed, std::string_view operation, const auto& work);
 
     Store::Impl& db;
+    AutomationStorage& automationStorage;
     const std::function<Seconds()>& clock;
     const ErrorReporter& automationError;
     const ErrorReporter& storageContention;

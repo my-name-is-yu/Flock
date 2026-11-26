@@ -81,7 +81,7 @@ SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','c
         p_->stopPausedBotParticipation(bot);
         p_->dropPausedBotDeliveries(bot);
     } else {
-        p_->skipDueAutomations(bot, clock());
+        p_->automationStorage.skipDueAutomations(bot, clock());
         p_->skipPendingGitWebhooks(bot);
         p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
     }
@@ -114,7 +114,7 @@ SELECT 1 WHERE
         throw BotBusy{};
     p_->exec("INSERT INTO deleted_bots VALUES(?)", {bot});
     p_->exec("DELETE FROM bot_pauses WHERE bot=?", {bot});
-    p_->retireAutomations(Json::array({bot}));
+    p_->automationStorage.retireAutomations(Json::array({bot}));
     permissions.audit(actor, bot, "delete_bot", Json::object());
     tx.commit();
 }

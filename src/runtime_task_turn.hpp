@@ -24,10 +24,12 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+class MemoryStorage;
+
 class Runtime::Components::TaskTurn {
 public:
-    TaskTurn(Store::Impl& db, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
-             const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
+    TaskTurn(Store::Impl& db, MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul, const std::function<Seconds()>& clock,
+             GitHost* gitHost, const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
              SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts,
              TaskDecisions& decisions);
 
@@ -53,6 +55,7 @@ private:
                                               const std::optional<PeerExchange>& peer);
 
     Store::Impl& db;
+    MemoryStorage& memoryStorage;
     Model& model;
     const SoulLoader& soul;
     const std::function<Seconds()>& clock;

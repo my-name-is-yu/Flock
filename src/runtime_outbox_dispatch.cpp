@@ -1,4 +1,6 @@
 #include "runtime_outbox_dispatch.hpp"
+
+#include "memory_storage.hpp"
 #include "commit_check.hpp"
 #include "conversation_storage.hpp"
 #include "flock/limits.hpp"
@@ -558,7 +560,7 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                     action.sessionParticipationId = participant.number(0);
             }
             if (includeMemory) {
-                if (const auto memory = db.sessionMemory(cmd, clock())) {
+                if (const auto memory = memoryStorage.sessionMemory(cmd, clock())) {
                     action.sessionMemory = *memory;
                     cmd.instruction = SessionPrompts::dispatchedWorkPrompt(action);
                 }
