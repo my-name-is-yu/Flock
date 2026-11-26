@@ -484,20 +484,14 @@ void savedCallsAreCheckedBeforeExecution() {
           "An unavailable or protected saved call executed");
 }
 
-void sessionNoteIsNotResentAfterARestart(bool webEvidence, bool started) {
+void sessionNoteIsNotResentAfterARestart(bool started) {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const auto message = receive(store, "note", "Use the staging database");
     const auto mid = std::to_string(message);
-    const std::string step = webEvidence ? "2" : "1";
     const Json effect = {{"kind", "message_session"}};
-    if (webEvidence)
-        fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(" + mid +
-                    ",1,"
-                    "'[{\"tool\":\"web_fetch\",\"args\":{\"url\":\"https://example.com/source\"},\"reason\":\"Read a source\"}]',"
-                    "'[{\"ok\":true,\"untrustedData\":true}]')");
-    fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + "," + step + ",'" +
+    fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
                 Json::array({{{"tool", "message_session"},
                               {"args", {{"environmentId", "env"}, {"threadId", "thread"}, {"text", "x"}}},
                               {"reason", "Saved"}}})
@@ -509,8 +503,7 @@ void sessionNoteIsNotResentAfterARestart(bool webEvidence, bool started) {
         return say("I may have sent that already.");
     };
     execution.runtime.runConversations();
-    check(seen.size() == (webEvidence ? 2 : 1) && execution.t3.sessionSends == 0,
-          "an uncertain or unauthorized Session send was dispatched");
+    check(seen.size() == 1 && execution.t3.sessionSends == 0, "an uncertain or unauthorized Session send was dispatched");
     const auto result = seen.back().at("result");
     check(result.at("ok") == false &&
               (started ? result.value("delivery", "") == "unknown"
@@ -969,9 +962,8 @@ int main() {
         rejectedSessionReadStillAllowsAnOrdinaryReply();
         savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
-        sessionNoteIsNotResentAfterARestart(false, true);
-        sessionNoteIsNotResentAfterARestart(true, true);
-        sessionNoteIsNotResentAfterARestart(false, false);
+        sessionNoteIsNotResentAfterARestart(true);
+        sessionNoteIsNotResentAfterARestart(false);
         concurrentWorkerRecoversFromWriterContention(false);
         concurrentWorkerRecoversFromWriterContention(true);
         repairSurvivesRestart(false);

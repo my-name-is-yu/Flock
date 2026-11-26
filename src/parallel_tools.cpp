@@ -16,7 +16,6 @@
 #include "policy_origin.hpp"
 #include "workspace_internal.hpp"
 #include "secret_storage.hpp"
-#include "flock/git_host.hpp"
 #include "conversation_turns.hpp"
 #include "task_routing.hpp"
 
@@ -33,19 +32,6 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-bool allowedAfterWebEvidence(const Decision& call) {
-    if (tool_batch::conversationRead(call.tool) != tool_batch::ConversationRead::none || gitOperation(call) == "read") return true;
-    constexpr std::string_view readOnly[]{"reply",         "web_search",        "web_fetch",  "workspace_read_file", "workspace_search",
-                                          "mcp_discover",  "mcp_read_resource", "skill_list", "skill_read",          "inspect_attachment",
-                                          "expand_context"};
-    return std::ranges::find(readOnly, call.tool) != std::end(readOnly);
-}
-
-Json webEvidenceActionDenied() {
-    return toolFailure("After reading web evidence, this turn can only read and reply. "
-                       "Ask the user to request the action in a new message.");
-}
-
 void ConversationTools::saveTurnResults(Id message, int step, const Json& results) {
     database.exec("UPDATE conversation_steps SET result=?,effect=NULL WHERE message_id=? AND step=? AND result IS NULL",
                   {results, message, step});
@@ -140,7 +126,6 @@ private:
 
     Json admissionFailure(const ModelCall& call) {
         if (!call.rejection.empty()) return toolFailure(call.rejection);
-        if (tools_.hasWebEvidence && !allowedAfterWebEvidence(call)) return webEvidenceActionDenied();
         const bool standaloneBotCall = calls_.size() == 1 && isBotTool(call.tool);
         if (!standaloneBotCall && !tool_batch::batchable(call.tool)) {
             auto result = toolFailure(tool_batch::classify(call) == tool_batch::CallClass::terminal
