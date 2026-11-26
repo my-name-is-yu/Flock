@@ -1,3 +1,4 @@
+#include "flock/automations.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
@@ -392,12 +393,12 @@ void selectedWorkRechecksConnectionAfterApproval() {
     const auto task = seedSelectedTask(f);
     f.store->policy().setMode(localOwner, "supervised");
     f.wait(task, "policy_approval");
-    const auto item = f.store->inbox(localOwner).at(0);
+    const auto item = Inbox(*f.store).inbox(localOwner).at(0);
     check(item.at("requestTitle").get<std::string>().starts_with("t3.send"), "Selected work used the new-Thread policy");
-    f.store->decideInbox(localOwner,
-                         {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
-                          item.at("targetRevision"), item.at("targetGeneration")},
-                         "allow_once");
+    Inbox(*f.store).decideInbox(localOwner,
+                                {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
+                                 item.at("targetRevision"), item.at("targetGeneration")},
+                                "allow_once");
     f.t3.onPreflight = [&] { T3Connections(*f.store).disconnect("e"); };
     f.wait(task, "user_question");
     check(f.t3.seen.empty() && f.logs(task, "policy_action_closed") == 1,
@@ -514,8 +515,9 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
     Fixture f;
     Store settings(f.directory / "state.db");
     const auto fireAt = f.now + 1;
-    settings.createAutomation(localOwner, {"alpha", "Check staging", "e", "p", Json::object()},
-                              {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", fireAt}, {"request", "Check staging"}}, f.now);
+    Automations(settings).createAutomation(
+        localOwner, {"alpha", "Check staging", "e", "p", Json::object()},
+        {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", fireAt}, {"request", "Check staging"}}, f.now);
     settings.setBotPaused(localOwner, "alpha", true);
 
     const auto id = f.submit("Other work", "beta");
@@ -547,7 +549,7 @@ void resumeSkipsOccurrencesWhileWaitingForDispatch() {
     tick.get();
     resume.get();
 
-    settings.fireDueAutomations(fireAt);
+    Automations(settings).fireDueAutomations(fireAt);
     check(waited && !settings.botPaused("alpha") && settings.tasks("alpha").empty(),
           "Resume replayed a reminder that became due while dispatch held the lock");
 }
@@ -858,14 +860,14 @@ void connectionRecoveryRestoresSessionQuestion() {
             f.runtime->tick();
             const auto connection = f.wait(id, outage);
             check(f.task(id).at("question").at("suspendedWaitId") == old, "connection wait lost the suspended question");
-            check(f.store->inbox(localOwner, "alpha").empty(), "question remained actionable during the outage");
+            check(Inbox(*f.store).inbox(localOwner, "alpha").empty(), "question remained actionable during the outage");
             f.rejects(id, old, "answer", {{"text", "dev"}});
             if (manual) f.store->operate(localOwner, TaskTarget::from(f.store->task(id).task, connection), "reconcile");
             f.restart();
             f.t3.question("run-1");
             f.runtime->tick();
             const auto restored = f.wait(id, "user_question");
-            const auto inbox = f.store->inbox(localOwner, "alpha");
+            const auto inbox = Inbox(*f.store).inbox(localOwner, "alpha");
             check(restored != old && restored != connection && inbox.size() == 1 && inbox[0]["waitId"] == restored &&
                       inbox[0]["prompt"] == "Which branch?" && inbox[0]["choices"] == Json::array({"main", "dev"}) && f.model.calls == 2,
                   "the live question did not return with its clarification and a fresh target");
@@ -902,12 +904,12 @@ void connectionRecoveryDiscardsExpiredSessionQuestion() {
             f.t3.runs.at("run-1").question.requestId = "replacement";
             f.runtime->tick();
             f.wait(id, "user_question");
-            const auto inbox = f.store->inbox(localOwner, "alpha");
+            const auto inbox = Inbox(*f.store).inbox(localOwner, "alpha");
             check(inbox.size() == 1 && inbox[0]["prompt"] == "Which new branch?", "recovery restored an eclipsed clarification");
         } else {
             f.t3.runs.at("run-1") = {};
             f.reach(id, "running");
-            check(f.store->inbox(localOwner, "alpha").empty(), "recovery restored a remotely resolved question");
+            check(Inbox(*f.store).inbox(localOwner, "alpha").empty(), "recovery restored a remotely resolved question");
         }
         f.rejects(id, old, "answer", {{"text", "main"}});
         check(f.t3.replies == 0 && f.logs(id, "session_question_closed") == 1, "a closed question was answered or remained open");
@@ -1775,15 +1777,15 @@ void revisionWaitsForPeerClarification(bool direct = false) {
         throw std::runtime_error("The old peer question accepted an answer");
     } catch (const RequestChanged&) {
     }
-    const auto pending = f.store->inbox(localOwner, "alpha");
+    const auto pending = Inbox(*f.store).inbox(localOwner, "alpha");
     check(pending.size() == 1 && pending.at(0).at("itemKind") == "user_question" && pending.at(0).at("waitId") != old.waitId,
           "Replanning stranded the peer question");
     const auto& current = pending.at(0);
     if (direct) {
-        f.store->decideInbox(localOwner,
-                             {"alpha", InboxKind::user_question, current.at("itemId"), current.at("waitId"), root,
-                              current.at("targetRevision"), current.at("targetGeneration")},
-                             "answer", {{"text", "Use main"}});
+        Inbox(*f.store).decideInbox(localOwner,
+                                    {"alpha", InboxKind::user_question, current.at("itemId"), current.at("waitId"), root,
+                                     current.at("targetRevision"), current.at("targetGeneration")},
+                                    "answer", {{"text", "Use main"}});
     } else {
         Conversations(*f.store).receive(localOwner, routing, "branch-answer", "Use main", f.task(root).at("wait").at("messageId"));
         f.runtime->runConversations();
@@ -3186,12 +3188,12 @@ int main() {
                                                                                             localOwner, {"alpha", "", "e", "separate"},
                                                                                             "unrelated", "Create another Bot");
                                                                                         f.runtime->runConversations();
-                                                                                        check(f.store->inbox(localOwner).size() == 1,
+                                                                                        check(Inbox(*f.store).inbox(localOwner).size() == 1,
                                                                                               "The unrelated turn did not await approval");
                                                                                         f.t3.finish("run-1");
                                                                                         f.reach(task, "completed");
                                                                                         check(
-                                                                                            f.store->inbox(localOwner).size() == 1,
+                                                                                            Inbox(*f.store).inbox(localOwner).size() == 1,
                                                                                             "Task completion settled an unrelated approval");
                                                                                     }},
                                                                                    {"Never blocks a follow-up launch in the Session environment",

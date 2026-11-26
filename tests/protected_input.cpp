@@ -1,3 +1,4 @@
+#include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
 #include "flock/policy.hpp"
@@ -308,7 +309,7 @@ void exercise(const std::filesystem::path& dir) {
     auto metadata = policy.botSettings(owner, "Ernest");
     Id input = metadata.at("secretInputs").at(0).at("id");
     check(turn("submit_secret", {{"requestId", input}, {"value", "text-supplied-value"}}).find("Tool unavailable") != std::string::npos &&
-              store.decisionHistory(owner).empty(),
+              Inbox(store).decisionHistory(owner).empty(),
           "A Bot response fulfilled a protected decision");
     denied([&] { policy.submitSecret(viewer, "Ernest", input, credential); });
     policy.submitSecret(owner, "Ernest", input, credential);
@@ -354,7 +355,7 @@ void exercise(const std::filesystem::path& dir) {
         check(turn("request_bot_change", {{"operation", op}, {"targetBotId", "Target"}, {"name", "New"}}).find("\"status\":\"applied\"") !=
                   std::string::npos,
               "Full did not apply a Bot change");
-    check(applied.size() == 2 && store.inbox(owner).size() == 1, "Full queued a Bot change for review");
+    check(applied.size() == 2 && Inbox(store).inbox(owner).size() == 1, "Full queued a Bot change for review");
     denied([&] {
         policy.applyBotChange("Ernest", Person{"member", false}, "rename_bot", "Target", "Hijacked", 0, 0, options.applyBotChange);
     });

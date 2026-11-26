@@ -1,4 +1,5 @@
 #include "git_routes.hpp"
+#include "flock/git_events.hpp"
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
 #include "flock/store.hpp"
@@ -183,7 +184,7 @@ void gitRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
             unsigned char digest[SHA256_DIGEST_LENGTH];
             SHA256(reinterpret_cast<const unsigned char*>(req.body.data()), req.body.size(), digest);
             event->payloadDigest = hexDigest(digest, SHA256_DIGEST_LENGTH);
-            reply(res, 202, {{"status", store.receiveGitWebhook(*event) ? "received" : "duplicate"}});
+            reply(res, 202, {{"status", GitEvents(store).receiveGitWebhook(*event) ? "received" : "duplicate"}});
         } catch (const Json::exception&) {
             reply(res, 400, {{"error", "invalid_git_webhook"}});
         } catch (const std::invalid_argument&) {

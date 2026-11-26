@@ -1,4 +1,5 @@
 #pragma once
+#include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/intake.hpp"
@@ -34,7 +35,7 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
-    std::optional<Store::PlannerModel> plannerModel(std::string_view id) const;
+    std::optional<PlannerModel> plannerModel(std::string_view id) const;
     std::string soul(std::string_view id) const;
     std::string initialMemory(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;

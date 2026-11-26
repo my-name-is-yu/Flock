@@ -1,3 +1,8 @@
+#include "flock/git_events.hpp"
+#include "git_storage.hpp"
+#include "flock/bot_memory.hpp"
+#include "flock/automations.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "channel_storage.hpp"
 #include "database.hpp"
@@ -151,8 +156,8 @@ Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver 
     : p_(std::make_unique<Impl>(std::move(db), std::move(seed), std::move(automationModel))) {}
 Store::~Store() = default;
 
-void Store::protectGitCredential(std::string value) {
-    p_->secretStorage.protectGitCredential(std::move(value));
+void GitEvents::protectGitCredential(std::string value) {
+    secrets_.protectGitCredential(std::move(value));
 }
 Database& Database::of(Store& store) {
     return *store.p_;
@@ -161,6 +166,16 @@ Conversations::Conversations(Store& store)
     : database_(Database::of(store)), turns_(store.p_->conversationTurns), context_(store.p_->conversationContextStorage),
       memory_(store.p_->memoryStorage), modelCalls_(store.p_->modelCalls), channels_(store.p_->channelStorage),
       permissions_(store.p_->permissions) {}
+
+Memory::Memory(Store& store) : database_(Database::of(store)), memory_(store.p_->memoryStorage) {}
+
+Automations::Automations(Store& store)
+    : database_(Database::of(store)), automation_(store.p_->automationStorage), lifecycle_(store.p_->botLifecycle),
+      secrets_(store.p_->secretStorage), tasks_(store.p_->taskOperations), policy_(store.policy()) {}
+
+Inbox::Inbox(Store& store) : inbox_(store.p_->inboxStorage), git_(store.p_->gitStorage) {}
+
+GitEvents::GitEvents(Store& store) : git_(store.p_->gitStorage), secrets_(store.p_->secretStorage) {}
 
 const std::filesystem::path& Store::path() const {
     return p_->path;

@@ -3,6 +3,8 @@
 #include "model.hpp"
 #include "tests/fixtures.hpp"
 #include "../tests/task_history.hpp"
+#include "flock/automations.hpp"
+#include "flock/bot_memory.hpp"
 #include "flock/conversations.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
@@ -116,9 +118,9 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     Store store(temp.path / "state.db", {}, [&](std::string_view id) { return bots.plannerModel(id); });
     const auto now = utc(2026, 1, 1, 12, 0);
     const auto saved = bots.get("release").intake("");
-    store.createAutomation(localOwner, saved,
-                           {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
-    store.fireDueAutomations(now + 1);
+    Automations(store).createAutomation(
+        localOwner, saved, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
+    Automations(store).fireDueAutomations(now + 1);
     const Id id = store.tasks("release").at(0).task.id;
     struct RejectEffort final : Model {
         std::vector<Json> requests;
@@ -166,10 +168,11 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
         [&](std::string_view bot) { return bots.plannerModel(bot); });
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
-    for (const auto* bot : {"release", "triage"}) store.createAutomation(localOwner, bots.get(bot).intake(""), schedule, due - 60);
+    for (const auto* bot : {"release", "triage"})
+        Automations(store).createAutomation(localOwner, bots.get(bot).intake(""), schedule, due - 60);
     std::filesystem::rename(folder / "release", folder / "release.saved");
     std::filesystem::create_symlink("release", folder / "release");
-    store.fireDueAutomations(due);
+    Automations(store).fireDueAutomations(due);
 
     const Id release = store.tasks("release").at(0).task.id;
     const Id triage = store.tasks("triage").at(0).task.id;
@@ -258,7 +261,7 @@ void notesAndRoutingOnRestart() {
     t3.finished = true;
     {
         Store store(db, seed);
-        store.memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", "First updated memory"}});
+        Memory(store).memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", "First updated memory"}});
         Runtime runtime(store, model, t3, soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
         check(store.task(firstId).task.state == TaskState::completed, "first Bot did not complete with its original criterion");
@@ -434,7 +437,7 @@ void notesAcrossConversationAndWork() {
     first = {"Use the verified report.", "Lead with the evidence."};
     write(folder / "first" / "SOUL.md", first.soul);
     const auto stored = expectedNotes(first);
-    store.memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", stored.memory}});
+    Memory(store).memory({"fixture", true}, "first", "apply_memory_edit", {{"baseVersion", 0}, {"content", stored.memory}});
     checkResultAnswer(firstIntake, firstTask, edited, stored, std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake, firstTask, "deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
@@ -1091,7 +1094,7 @@ void botProfilesAndAvatars() {
     bots.syncSchedules(store, utc(2026, 11, 21, 0, 0), [](std::string_view id, std::string_view err) {
         throw std::runtime_error(std::string(id) + ": " + std::string(err));
     });
-    store.fireDueAutomations(utc(2026, 11, 21, 0, 2));
+    Automations(store).fireDueAutomations(utc(2026, 11, 21, 0, 2));
 
     // Upload a valid PNG avatar, preserve it on name-only edit, replace with GIF, then switch to icon.
     const std::string pngBytes = std::string("\x89PNG\r\n\x1a\n", 8) + std::string(16, '\x01');

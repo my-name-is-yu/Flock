@@ -1,3 +1,4 @@
+#include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
@@ -189,7 +190,7 @@ void run() {
           "review or scan missing in the Web inbox");
     check(model.followup("review-1").empty(), "An approval was treated as requested changes");
 
-    const auto inboxBeforeRequest = store.inbox(localOwner, "owner").size();
+    const auto inboxBeforeRequest = Inbox(store).inbox(localOwner, "owner").size();
     model.reviewTask = task;
     const Json reviewRequested{{"action", "review_requested"},
                                {"repository", repository},
@@ -203,7 +204,7 @@ void run() {
     runtime.runConversations();
     host->beforeCall = {};
     runtime.runConversations();
-    check(store.inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
+    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
               store.history(task).dump().find("tool-review-request") != std::string::npos,
           "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
 
@@ -212,7 +213,7 @@ void run() {
     check(post(client, "pull_request", "delayed-review-request", lateReview, 202).at("status") == "received",
           "delayed review request webhook was not enqueued");
     runtime.runConversations();
-    check(store.inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
+    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
               store.history(task).dump().find("delayed-review-request") != std::string::npos,
           "A late webhook for the same request created another card or lost the notification");
 
@@ -221,22 +222,22 @@ void run() {
     check(post(client, "pull_request", "external-review-request", externalReview, 202).at("status") == "received",
           "external review request webhook was not enqueued");
     runtime.runConversations();
-    check(store.inbox(localOwner, "owner").size() == inboxBeforeRequest + 2, "A distinct review request was suppressed");
+    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 2, "A distinct review request was suppressed");
 
-    const auto inboxBeforeMissingWebhook = store.inbox(localOwner, "owner").size();
+    const auto inboxBeforeMissingWebhook = Inbox(store).inbox(localOwner, "owner").size();
     Conversations(store).receive(localOwner, intake(), "review-without-webhook", "Request another review");
     runtime.runConversations();
-    const auto afterRequest = store.inbox(localOwner, "owner");
+    const auto afterRequest = Inbox(store).inbox(localOwner, "owner");
     check(afterRequest.size() == inboxBeforeMissingWebhook + 1 && afterRequest.front().at("prompt") == "Review requested on the Git host.",
           "The tool should create a card even if no webhook arrives");
-    store.decideInbox(localOwner, target(afterRequest.front()), "approve");
+    Inbox(store).decideInbox(localOwner, target(afterRequest.front()), "approve");
 
     auto laterReview = reviewRequested;
     laterReview["pull_request"]["title"] = "Another review requested";
     check(post(client, "pull_request", "review-after-prior-decision", laterReview, 202).at("status") == "received",
           "later review request webhook was not enqueued");
     runtime.runConversations();
-    check(store.inbox(localOwner, "owner").size() == inboxBeforeMissingWebhook + 1 &&
+    check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeMissingWebhook + 1 &&
               store.history(task).dump().find("review-after-prior-decision") != std::string::npos,
           "A handled review with a missing webhook hid a later request");
 

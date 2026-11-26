@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "model.hpp"
@@ -203,8 +204,9 @@ void runner() {
         check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
         check(recordedMutationReason(store.history(task), "git_open_pr"), "PR creation lost its rationale in task history");
         check(historyCount(store, task, "report") == 1, "Session result missing");
-        check(store.inbox(localOwner, "owner").at(0).at("prTitle") == "Pull request awaiting review", "PR awaiting review missing");
-        check(store.receiveGitWebhook({hostName, "ci-before-restart", repoName, "ci", "completed", {1}, sha, "test job failed", 81}),
+        check(Inbox(store).inbox(localOwner, "owner").at(0).at("prTitle") == "Pull request awaiting review", "PR awaiting review missing");
+        check(GitEvents(store).receiveGitWebhook(
+                  {hostName, "ci-before-restart", repoName, "ci", "completed", {1}, sha, "test job failed", 81}),
               "CI event was rejected before restart");
         check(historyCount(store, task, "git_webhook") == 0, "intake ran delivery synchronously");
     }
@@ -212,11 +214,12 @@ void runner() {
         Store store(path);
         const auto otherHistory = store.history(other);
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-        check(!store.receiveGitWebhook({hostName, "ci-before-restart", "org/other", "ci", "completed", {2}, sha, "changed duplicate", 81}),
+        check(!GitEvents(store).receiveGitWebhook(
+                  {hostName, "ci-before-restart", "org/other", "ci", "completed", {2}, sha, "changed duplicate", 81}),
               "same host and delivery ID inserted twice");
-        check(store.receiveGitWebhook({hostName, "wrong-pr", repoName, "ci", "completed", {2}, sha, "wrong PR", 81}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "wrong-pr", repoName, "ci", "completed", {2}, sha, "wrong PR", 81}),
               "unmatched webhook was not recorded");
-        check(store.receiveGitWebhook({hostName, "wrong-repo", "org/other", "ci", "completed", {1}, sha, "wrong repo", 81}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "wrong-repo", "org/other", "ci", "completed", {1}, sha, "wrong repo", 81}),
               "unmatched repository event was not recorded");
         runtime.runConversations();
         check(script.notifications == 1 && host->logCalls == 1 && historyCount(store, task, "git_webhook") == 1,
@@ -226,18 +229,20 @@ void runner() {
               "unrelated task was woken");
         check(store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
               "CI report is missing from the owning task");
-        check(store.receiveGitWebhook({hostName, "review", repoName, "review", "submitted", {1}, sha, "Approved", 0}), "review rejected");
-        check(store.receiveGitWebhook({hostName, "scan", repoName, "code_scan", "appeared", {}, sha, "Scan result", 0}), "scan rejected");
+        check(GitEvents(store).receiveGitWebhook({hostName, "review", repoName, "review", "submitted", {1}, sha, "Approved", 0}),
+              "review rejected");
+        check(GitEvents(store).receiveGitWebhook({hostName, "scan", repoName, "code_scan", "appeared", {}, sha, "Scan result", 0}),
+              "scan rejected");
         runtime.runConversations();
         runtime.runConversations();
-        const auto inbox = store.inbox(localOwner, "owner");
+        const auto inbox = Inbox(store).inbox(localOwner, "owner");
         check(inbox.size() == 3 && inbox.dump().find("Pull request review submitted") != std::string::npos &&
                   inbox.dump().find("Code scanning result") != std::string::npos,
               "Git inbox decisions missing");
         const auto review = target(inbox.at(0));
-        store.decideInbox(localOwner, review, "request_changes");
-        check(store.inbox(localOwner, "owner").size() == 2 &&
-                  store.decisionHistory(localOwner, "owner").at(0).at("decision") == "request_changes",
+        Inbox(store).decideInbox(localOwner, review, "request_changes");
+        check(Inbox(store).inbox(localOwner, "owner").size() == 2 &&
+                  Inbox(store).decisionHistory(localOwner, "owner").at(0).at("decision") == "request_changes",
               "Git inbox decision did not update and record");
         check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3, "webhooks were delivered more than once");
 
@@ -246,7 +251,7 @@ void runner() {
         args["taskId"] = sibling;
         check(invoke(store, runtime, script, "watch-sibling", "git_open_pr", args).at("prNumber") == 2,
               "Could not create a second watch at the same commit");
-        check(store.receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 81}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 81}),
               "CI event with a shared SHA was not saved");
         runtime.runConversations();
         check(script.notifications == 3 && historyCount(store, sibling, "git_webhook") == 0,
@@ -263,7 +268,7 @@ void invalidWebhookMetadata() {
         change(event);
         bool invalid = false;
         try {
-            store.receiveGitWebhook(event);
+            GitEvents(store).receiveGitWebhook(event);
         } catch (const std::invalid_argument&) {
             invalid = true;
         }
@@ -278,7 +283,7 @@ void invalidWebhookMetadata() {
         event.prNumbers.clear();
         event.headSha.clear();
     });
-    check(store.receiveGitWebhook(valid), "Rejected valid webhook metadata");
+    check(GitEvents(store).receiveGitWebhook(valid), "Rejected valid webhook metadata");
 }
 
 void webhookHeadPeriods() {
@@ -294,15 +299,15 @@ void webhookHeadPeriods() {
     check(invoke(store, runtime, script, "watch-first", "git_open_pr", args).at("prNumber") == 1, "could not create first watch");
 
     const std::string newSha(40, 'b');
-    check(store.receiveGitWebhook({hostName, "original-job", repoName, "ci", "completed", {}, sha, "Original head", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "original-job", repoName, "ci", "completed", {}, sha, "Original head", 0}),
           "could not enqueue original job");
-    check(store.receiveGitWebhook({hostName, "early-job", repoName, "ci", "completed", {}, newSha, "New head", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "early-job", repoName, "ci", "completed", {}, newSha, "New head", 0}),
           "could not enqueue early job");
     runtime.runConversations();
     check(historyCount(store, first, "git_webhook") == 1, "Early job was routed before synchronization");
-    check(store.receiveGitWebhook({hostName, "queued-old-job", repoName, "ci", "completed", {}, sha, "Queued old job", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "queued-old-job", repoName, "ci", "completed", {}, sha, "Queued old job", 0}),
           "could not enqueue a job before synchronization");
-    check(store.receiveGitWebhook({hostName, "first-sync", repoName, "pull_request", "synchronize", {1}, newSha, "New head", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "first-sync", repoName, "pull_request", "synchronize", {1}, newSha, "New head", 0}),
           "could not enqueue synchronization");
 
     const auto second = store.submit(intake());
@@ -310,12 +315,13 @@ void webhookHeadPeriods() {
     args["taskId"] = second;
     check(invoke(store, runtime, script, "watch-second", "git_open_pr", args).at("prNumber") == 2, "could not create second watch");
     check(historyCount(store, first, "git_webhook") == 4, "The old or early job was lost across synchronization");
-    check(store.receiveGitWebhook({hostName, "reused-head-job", repoName, "ci", "completed", {}, sha, "Reused head", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "reused-head-job", repoName, "ci", "completed", {}, sha, "Reused head", 0}),
           "could not enqueue job on reused head");
     runtime.runConversations();
     check(historyCount(store, first, "git_webhook") == 4 && historyCount(store, second, "git_webhook") == 1,
           "A superseded head prevented the current watch from receiving a SHA-only job");
-    check(store.receiveGitWebhook({hostName, "return-to-head", repoName, "pull_request", "synchronize", {1}, sha, "Original head", 0}),
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "return-to-head", repoName, "pull_request", "synchronize", {1}, sha, "Original head", 0}),
           "could not enqueue return to original head");
     runtime.runConversations();
     check(historyCount(store, first, "git_webhook") == 5 && historyCount(store, second, "git_webhook") == 1,
@@ -338,11 +344,11 @@ void pausedGitNotifications() {
         check(store.task(task).task.state == TaskState::completed && host->createCalls == 1,
               "Git notification fixture did not finish its watched request");
         store.setBotPaused(localOwner, "owner", true);
-        check(store.receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "paused-delivery", repoName, "comment", "created", {1}, sha, "Paused", 0}),
               "Paused delivery was not acknowledged");
         runtime.runConversations();
         check(script.notifications == 0 && historyCount(store, task, "git_webhook") == 0, "A Git webhook woke a paused Bot");
-        check(store.receiveGitWebhook({hostName, "paused-backlog", repoName, "ci", "completed", {}, sha, "Backlog", 0}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "paused-backlog", repoName, "ci", "completed", {}, sha, "Backlog", 0}),
               "Paused backlog delivery was not acknowledged");
     }
     {
@@ -352,7 +358,7 @@ void pausedGitNotifications() {
         runtime.runConversations();
         check(script.notifications == 0 && historyCount(restarted, task, "git_webhook") == 0,
               "Resume backfilled a Git webhook received during the pause");
-        check(restarted.receiveGitWebhook({hostName, "after-resume", repoName, "ci", "completed", {}, sha, "Active", 0}),
+        check(GitEvents(restarted).receiveGitWebhook({hostName, "after-resume", repoName, "ci", "completed", {}, sha, "Active", 0}),
               "New delivery was not acknowledged");
         runtime.runConversations();
         check(script.notifications == 1 && historyCount(restarted, task, "git_webhook") == 1,
@@ -375,25 +381,25 @@ void reviewAfterTaskProgress() {
     args["taskId"] = task;
     check(invoke(store, runtime, script, "open-review-pr", "git_open_pr", args).at("status") == "created",
           "fixture did not open a PR awaiting review");
-    const auto gitReview = target(store.inbox(localOwner, "owner").at(0));
+    const auto gitReview = target(Inbox(store).inbox(localOwner, "owner").at(0));
 
     check(invoke(store, runtime, script, "send-instruction", "send_to_task",
                  {{"taskId", task}, {"generation", gitReview.targetGeneration}, {"instruction", "Include the test results"}})
                   .at("ok") == true,
           "fixture did not update the task within its revision");
-    const auto inbox = store.inbox(localOwner, "owner");
+    const auto inbox = Inbox(store).inbox(localOwner, "owner");
     check(inbox.size() == 1, "Git review was lost after a Task generation change");
     const auto latest = target(inbox.at(0));
     check(latest.itemId == gitReview.itemId && latest.targetRevision == gitReview.targetRevision &&
               latest.targetGeneration > gitReview.targetGeneration,
           "Git review did not follow the Task within its revision");
     try {
-        store.decideInbox(localOwner, gitReview, "approve");
+        Inbox(store).decideInbox(localOwner, gitReview, "approve");
         throw std::runtime_error("A PR review decision with an invalid generation was accepted");
     } catch (const RequestChanged&) {
     }
-    store.decideInbox(localOwner, latest, "approve");
-    check(store.inbox(localOwner, "owner").empty(), "Refreshed Git review decision did not close the item");
+    Inbox(store).decideInbox(localOwner, latest, "approve");
+    check(Inbox(store).inbox(localOwner, "owner").empty(), "Refreshed Git review decision did not close the item");
 }
 
 void webhookDeliveryResumesAfterAnIdlePoll() {
@@ -407,7 +413,7 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const auto task = store.submit(intake());
     host->inspect = [&](const GitContext&, const GitOpenPr&) {
-        check(store.receiveGitWebhook({hostName, "early-ci", repoName, "ci", "completed", {}, sha, "Early head", 0}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "early-ci", repoName, "ci", "completed", {}, sha, "Early head", 0}),
               "Could not receive a webhook while the PR was opening");
         runtime.runConversations();
         check(historyCount(store, task, "git_webhook") == 0, "An unwatched event was delivered");
@@ -418,7 +424,8 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
 
     constexpr unsigned queued = 101;
     for (unsigned i = 0; i < queued; ++i)
-        check(receiver.receiveGitWebhook({hostName, "queued-" + std::to_string(i), repoName, "ci", "completed", {1}, sha, "Queued job", 0}),
+        check(GitEvents(receiver).receiveGitWebhook(
+                  {hostName, "queued-" + std::to_string(i), repoName, "ci", "completed", {1}, sha, "Queued job", 0}),
               "Could not receive a webhook on another connection");
     for (int i = 0; i < 3; ++i) runtime.runConversations();
     check(historyCount(store, task, "git_webhook") == queued + 1, "Delivery lost or repeated events across connections or batches");
@@ -448,7 +455,7 @@ void reconciliationAfterTaskRevision() {
     host->prs.push_back(std::move(extra));
     check(invoke(store, runtime, script, "find-two-prs", "git_open_pr", args).at("status") == "ambiguous",
           "fixture did not leave two verified candidates");
-    const auto initial = store.inbox(localOwner, "owner").at(0);
+    const auto initial = Inbox(store).inbox(localOwner, "owner").at(0);
     check(initial.at("candidates").size() == 2, "fixture failed to put candidates in the inbox");
     const auto changed = invoke(store, runtime, script, "revise-task", "change_task",
                                 {{"taskId", task},
@@ -459,17 +466,17 @@ void reconciliationAfterTaskRevision() {
     check(changed.at("ok") == true && store.task(task).task.replanning, "fixture did not revise the active task");
     check(invoke(store, runtime, script, "retry-after-replan", "git_open_pr", args).at("status") == "ambiguous",
           "fixture did not keep the PR creation unresolved");
-    const auto latest = store.inbox(localOwner, "owner").at(0);
+    const auto latest = Inbox(store).inbox(localOwner, "owner").at(0);
     check(latest.at("itemId") == initial.at("itemId") && latest.at("targetRevision") != initial.at("targetRevision") &&
               latest.at("targetRevision") == store.task(task).task.currentRevision.value() &&
               latest.at("targetGeneration") == store.task(task).task.generation && latest.at("candidates") == initial.at("candidates"),
           "Reconciliation lost its current target or verified candidates");
     try {
-        store.decideInbox(localOwner, target(initial), "reject_pr");
+        Inbox(store).decideInbox(localOwner, target(initial), "reject_pr");
         throw std::runtime_error("A stale reconciliation decision was accepted after task revision");
     } catch (const RequestChanged&) {
     }
-    store.decideInbox(localOwner, target(latest), "link_pr", {{"prNumber", 2}});
+    Inbox(store).decideInbox(localOwner, target(latest), "link_pr", {{"prNumber", 2}});
     const auto saved = persistence(path, lost.at("operationId").get<std::string>());
     check(saved.at("status") == "created" && saved.at("prNumber") == 2 && host->createCalls == 1,
           "The current reconciliation target could not link the original operation");
@@ -502,7 +509,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         const auto lost = invoke(store, runtime, script, "lost", "git_open_pr", args);
         check(lost.at("status") == "ambiguous" && persistence(path, operationId).at("status") == "ambiguous",
               "lost response was not recorded unresolved");
-        initial = target(store.inbox(localOwner, "owner").at(0));
+        initial = target(Inbox(store).inbox(localOwner, "owner").at(0));
     }
     host->inspect = {};
     const auto repo = GitRepository::parse(hostName, repoName);
@@ -535,29 +542,29 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         check(host->createCalls == 1 && host->lookupCalls == 1, "retry attempted a second create");
         if (losesRequest || multipleMatches || wrongCorrelation) {
             check(recovered.at("status") == "ambiguous" && !recovered.contains("prNumber"), "unverified PR was adopted");
-            const auto items = store.inbox(localOwner, "owner");
+            const auto items = Inbox(store).inbox(localOwner, "owner");
             check(items.size() == 1 && items.at(0).at("itemKind") == "pr_reconciliation", "reconciliation item missing or duplicated");
             const auto decision = target(items.at(0));
             const auto candidates = items.at(0).at("candidates");
             if (multipleMatches) {
                 check(candidates.size() == 2, "Only exact correlations should be candidates");
                 try {
-                    store.decideInbox(localOwner, initial, "reject_pr");
+                    Inbox(store).decideInbox(localOwner, initial, "reject_pr");
                     throw std::runtime_error("An outdated reconciliation decision was accepted");
                 } catch (const DecisionUnavailable&) {
                 }
                 try {
-                    store.decideInbox(localOwner, decision, "link_pr", {{"prNumber", 4}});
+                    Inbox(store).decideInbox(localOwner, decision, "link_pr", {{"prNumber", 4}});
                     throw std::runtime_error("An unverified candidate was accepted");
                 } catch (const Conflict&) {
                 }
-                store.decideInbox(localOwner, decision, "link_pr", {{"prNumber", 1}});
+                Inbox(store).decideInbox(localOwner, decision, "link_pr", {{"prNumber", 1}});
                 check(persistence(path, operationId).at("prNumber") == 1, "Selecting a verified PR did not link it");
                 check(watchedPrUrl(path) == "https://github.com/org/flock/pull/1", "Selected PR was not watched");
             } else {
                 check(candidates.empty(), "Title collision was offered for manual linking");
-                store.decideInbox(localOwner, decision, "reject_pr");
-                check(store.inbox(localOwner, "owner").empty() && persistence(path, operationId).at("status") == "rejected",
+                Inbox(store).decideInbox(localOwner, decision, "reject_pr");
+                check(Inbox(store).inbox(localOwner, "owner").empty() && persistence(path, operationId).at("status") == "rejected",
                       "Rejecting reconciliation did not close the decision");
                 check(invoke(store, runtime, script, "retry-rejected", "git_open_pr", args).at("status") == "rejected" &&
                           host->createCalls == 1,
@@ -568,7 +575,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
                       recovered.at("url") == "https://github.com/org/flock/pull/1" && recovered.at("operationId") == operationId &&
                       persistence(path, operationId).at("prNumber") == 1,
                   "the original PR was not recovered");
-            check(store.inbox(localOwner, "owner").dump().find("pr_reconciliation") == std::string::npos,
+            check(Inbox(store).inbox(localOwner, "owner").dump().find("pr_reconciliation") == std::string::npos,
                   "resolved reconciliation still pending");
             check(watchedPrUrl(path) == recovered.at("url").get<std::string>(), "recovered pull request is not watched");
         }
@@ -707,7 +714,7 @@ void accessAndActions() {
     const auto review = invoke(store, runtime, script, "review-existing-pr", "git_request_review",
                                argsFor({{"prNumber", 20}, {"reviewers", {"alice"}}}, repoName));
     check(review.at("ok") == true && review.at("watchAttached") == true, "Review request did not watch the existing PR");
-    check(store.receiveGitWebhook({hostName, "existing-pr-review", repoName, "review", "submitted", {20}, sha, "Approved", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "existing-pr-review", repoName, "review", "submitted", {20}, sha, "Approved", 0}),
           "Could not enqueue a review for the existing PR");
     runtime.runConversations();
     check(script.notifications == 1 && historyCount(store, task, "git_webhook") == 1 && historyCount(store, other, "git_webhook") == 0,
@@ -842,7 +849,7 @@ void taskMutationRestart(bool protectTitleOnRestart) {
         return {"complete", {{"report", "PR update outcome unknown"}}, {}};
     };
     Store store(path);
-    if (protectTitleOnRestart) store.protectGitCredential(title);
+    if (protectTitleOnRestart) GitEvents(store).protectGitCredential(title);
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     for (int i = 0; i < 5 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
     std::ifstream log(effects);
@@ -862,7 +869,7 @@ void taskReadRecovery() {
     Id task;
     {
         Store store(path);
-        store.protectGitCredential(secret);
+        GitEvents(store).protectGitCredential(secret);
         task = store.submit(intake());
         script.onTaskResult = [&](const ModelInput&) -> Decision {
             return {
@@ -930,14 +937,14 @@ void approvedTaskReadProjects() {
     store.policy().changeRule(localOwner, RuleKind::ask, Action::repository_read, GitRepository{hostName, repoName}.resource(), true);
     Runtime runtime(store, script, sessions, [](auto) { return std::string{}; }, options(host));
     const auto task = store.submit(intake(), &localOwner);
-    for (int i = 0; i < 8 && store.inbox(localOwner).empty(); ++i) runtime.tick();
-    const auto items = store.inbox(localOwner);
+    for (int i = 0; i < 8 && Inbox(store).inbox(localOwner).empty(); ++i) runtime.tick();
+    const auto items = Inbox(store).inbox(localOwner);
     check(items.size() == 1 && host->hostCalls == 0, "Git read reached the host before approval");
     const auto& card = items.at(0);
-    store.decideInbox(localOwner,
-                      {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
-                       card.at("targetRevision"), card.at("targetGeneration")},
-                      "allow_once");
+    Inbox(store).decideInbox(localOwner,
+                             {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
+                              card.at("targetRevision"), card.at("targetGeneration")},
+                             "allow_once");
     for (int i = 0; i < 8 && store.task(task).task.state != TaskState::completed; ++i) runtime.tick();
     check(phase == 2 && host->hostCalls == 1 && store.task(task).task.state == TaskState::completed,
           "Approved Git read did not settle through the task");
@@ -1030,7 +1037,7 @@ void redaction() {
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
-    store.protectGitCredential(credential);
+    GitEvents(store).protectGitCredential(credential);
     auto policy = store.policy();
     const auto input = policy.requestSecret("other", {"example"});
     policy.submitSecret(localOwner, "other", input, secret);
@@ -1050,10 +1057,11 @@ void redaction() {
     auto open = openArgs();
     open["taskId"] = task;
     check(invoke(store, runtime, script, "open-pr", "git_open_pr", open).at("ok") == true, "Could not create watch");
-    check(store.receiveGitWebhook({hostName, "secret-event", repoName, "review", "submitted", {1}, sha, credential + " " + secret, 0}),
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "secret-event", repoName, "review", "submitted", {1}, sha, credential + " " + secret, 0}),
           "Webhook with redactable content was rejected");
     runtime.runConversations();
-    for (const auto& content : {store.history(task).dump(), store.inbox(localOwner, "owner").dump()})
+    for (const auto& content : {store.history(task).dump(), Inbox(store).inbox(localOwner, "owner").dump()})
         check(content.find(secret) == content.npos && content.find(credential) == content.npos, "Webhook output exposed secrets");
     for (const auto& file : {path.string(), path.string() + "-wal"}) {
         std::ifstream database(file, std::ios::binary);
@@ -1088,7 +1096,7 @@ void notificationCannotControlASession() {
         result = steps.at(0).at("result");
         return Decision{"reply", {{"text", "Git notification received."}}, {}};
     };
-    check(store.receiveGitWebhook({hostName, "session-effect", repoName, "comment", "created", {1}, sha, "A comment", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "session-effect", repoName, "comment", "created", {1}, sha, "A comment", 0}),
           "Could not enqueue comment");
     runtime.runConversations();
     check(result.value("ok", true) == false && sessions.sessionSends.empty(),
@@ -1108,14 +1116,14 @@ void notificationBudgetAndRevocation() {
     auto args = openArgs();
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
-    check(store.receiveGitWebhook({hostName, "budget-event", repoName, "ci", "completed", {1}, sha, "A job failed", 81}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "budget-event", repoName, "ci", "completed", {1}, sha, "A job failed", 81}),
           "Could not enqueue job");
     runtime.runConversations();
-    const auto inbox = store.inbox(localOwner, "owner");
+    const auto inbox = Inbox(store).inbox(localOwner, "owner");
     const auto approval =
         std::find_if(inbox.begin(), inbox.end(), [](const Json& row) { return row.at("itemKind") == "conversation_model_budget"; });
     check(approval != inbox.end(), "The notification did not pause for model budget");
-    store.decideInbox(localOwner, target(*approval), "approve");
+    Inbox(store).decideInbox(localOwner, target(*approval), "approve");
     runtime.runConversations();
     const auto history = store.history(task);
     const auto event = std::find_if(history.begin(), history.end(), [](const Json& row) { return row.at("kind") == "git_webhook"; });
@@ -1126,12 +1134,12 @@ void notificationBudgetAndRevocation() {
 
     script.onNotification = [&] { store.policy().changeNeverRule(localOwner, Action::repository_read, repositoryTarget, true); };
     const auto replies = historyCount(store, task, "conversation_reply");
-    check(store.receiveGitWebhook({hostName, "revoked-turn", repoName, "comment", "created", {1}, sha, "An update", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "revoked-turn", repoName, "comment", "created", {1}, sha, "An update", 0}),
           "Could not enqueue new event");
     runtime.runConversations();
     check(script.notifications == 2 && historyCount(store, task, "conversation_reply") == replies,
           "A queued notification posted a reply after adding a Never rule");
-    check(store.receiveGitWebhook({hostName, "revoked-event", repoName, "comment", "created", {1}, sha, "Another update", 0}),
+    check(GitEvents(store).receiveGitWebhook({hostName, "revoked-event", repoName, "comment", "created", {1}, sha, "Another update", 0}),
           "Could not enqueue event after revocation");
     runtime.runConversations();
     check(historyCount(store, task, "git_webhook") == 2, "A blocked repository received another task event");

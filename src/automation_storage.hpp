@@ -1,5 +1,6 @@
 #pragma once
 
+#include "flock/store_options.hpp"
 #include "flock/json.hpp"
 #include "flock/store.hpp"
 #include "flock/types.hpp"
@@ -22,8 +23,7 @@ struct ScheduleImportError;
 class TaskOperations;
 class AutomationStorage {
 public:
-    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, const Policy&, Store::AutomationModelResolver,
-                      TaskOperations&);
+    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, const Policy&, AutomationModelResolver, TaskOperations&);
 
     void retireAutomations(const Json& botIds);
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
@@ -44,7 +44,7 @@ private:
     const SecretStorage& secretStorage_;
     const BotLifecycleStorage& lifecycle_;
     const Policy& permissions_;
-    const Store::AutomationModelResolver model_;
+    const AutomationModelResolver model_;
     TaskOperations& taskOperations;
 };
 }

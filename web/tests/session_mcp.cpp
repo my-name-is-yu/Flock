@@ -592,13 +592,13 @@ void sessionInvitations() {
               invitation.at("sessionInvitation").at("inviterBotId") == "release",
           "The invitation lost its Session origin or description");
     check(t3.sends.empty() && t3.checkedRuns.empty() && model.wakes == 0, "An invitation caused a send without approval or a wake");
-    const auto approval = store.inbox(bob).at(0);
+    const auto approval = Inbox(store).inbox(bob).at(0);
     check(approval.at("botId") == "triage" && approval.at("conversationEventId") == first.at("messageId"),
           "The invited Bot's send did not ask the Session requester for approval");
-    store.decideInbox(bob,
-                      {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"),
-                       approval.at("taskId"), approval.at("targetRevision"), approval.at("targetGeneration")},
-                      "allow_once");
+    Inbox(store).decideInbox(bob,
+                             {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"),
+                              approval.at("taskId"), approval.at("targetRevision"), approval.at("targetGeneration")},
+                             "allow_once");
     runtime->runConversations();
     check(t3.sends.size() == 1 && t3.sends.front().ownerBotId == "triage" && t3.sends.front().target.threadId == "thread" &&
               t3.sends.front().instruction == "Triage Bot: I checked staging.",
@@ -773,26 +773,26 @@ void syntheticTurnsShareModelBudget() {
         mcp.call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", key}, {"text", text}}).at("structuredContent");
     };
     const auto approve = [&](const Json& item) {
-        store.decideInbox(localOwner,
-                          {item.at("botId"), InboxKind::conversation_model_budget, item.at("itemId"), item.at("waitId"), item.at("taskId"),
-                           item.at("targetRevision"), item.at("targetGeneration")},
-                          "approve");
+        Inbox(store).decideInbox(localOwner,
+                                 {item.at("botId"), InboxKind::conversation_model_budget, item.at("itemId"), item.at("waitId"),
+                                  item.at("taskId"), item.at("targetRevision"), item.at("targetGeneration")},
+                                 "approve");
     };
     ask("follow-ups", "Keep checking");
     runtime.runConversations();
     runtime.runConversations();
-    const auto wakeApproval = store.inbox(localOwner, "release").at(0);
+    const auto wakeApproval = Inbox(store).inbox(localOwner, "release").at(0);
     check(model.calls == 2 && t3.sends == 1 && wakeApproval.at("itemKind") == "conversation_model_budget" &&
               wakeApproval.at("allowance") == 2,
           "A synthetic wake got a new two-call allowance");
     approve(wakeApproval);
     for (int i = 0; i < 3; ++i) runtime.runConversations();
-    const auto nextWake = store.inbox(localOwner, "release").at(0);
+    const auto nextWake = Inbox(store).inbox(localOwner, "release").at(0);
     check(model.calls == 4 && t3.sends == 2 && nextWake.at("waitId") != wakeApproval.at("waitId"),
           "Synthetic wakes did not share the renewed root allowance");
     ask("invite", "Invite Triage");
     runtime.runConversations();
-    const auto inviteApproval = store.inbox(localOwner, "triage").at(0);
+    const auto inviteApproval = Inbox(store).inbox(localOwner, "triage").at(0);
     check(model.calls == 5 && model.inviteeCalls == 0 && inviteApproval.at("itemKind") == "conversation_model_budget" &&
               inviteApproval.at("allowance") == 1,
           "The fresh ask did not get one call, or the invitation used the invitee's allowance");
@@ -841,17 +841,17 @@ void slowProbeAndStoppedApproval() {
     AskModel model;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     runtime.runConversations();
-    const auto card = store.inbox(localOwner).at(0);
+    const auto card = Inbox(store).inbox(localOwner).at(0);
     check(model.asks == 1 && model.origin.at("environmentId") == "env-1" && card.at("status") == "pending",
           "An earlier environment probe starved the healthy environment or skipped Supervised approval");
     mcp.call("flock_stop", {{"bot", "release"}, {"threadId", "thread"}}).at("structuredContent");
-    check(store.inbox(localOwner).empty(), "The stopped Session ask still had an approval in the inbox");
+    check(Inbox(store).inbox(localOwner).empty(), "The stopped Session ask still had an approval in the inbox");
     bool unavailable = false;
     try {
-        store.decideInbox(localOwner,
-                          {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
-                           card.at("targetRevision"), card.at("targetGeneration")},
-                          "allow_once");
+        Inbox(store).decideInbox(localOwner,
+                                 {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
+                                  card.at("targetRevision"), card.at("targetGeneration")},
+                                 "allow_once");
     } catch (const DecisionUnavailable&) {
         unavailable = true;
     }
@@ -1123,13 +1123,13 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     db->policy().setMode(alice, "supervised");
     runtime->runConversations();
     check(model.asks == 1 && model.origin == sessionOrigin, "Ask did not start an ordinary Bot turn with the Session origin");
-    const auto approval = db->inbox(bob).at(0);
+    const auto approval = Inbox(*db).inbox(bob).at(0);
     check(sends().empty() && approval.at("status") == "pending" && approval.at("conversationEventId") == anchor,
           "Supervised ask did not wait for the asking person's approval");
-    db->decideInbox(bob,
-                    {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"), approval.at("taskId"),
-                     approval.at("targetRevision"), approval.at("targetGeneration")},
-                    "allow_once");
+    Inbox(*db).decideInbox(bob,
+                           {approval.at("botId"), InboxKind::policy_approval, approval.at("itemId"), approval.at("waitId"),
+                            approval.at("taskId"), approval.at("targetRevision"), approval.at("targetGeneration")},
+                           "allow_once");
     runtime->runConversations();
     const auto wire = sends();
     check(wire.size() == 1, "The Bot did not send exactly one reply");

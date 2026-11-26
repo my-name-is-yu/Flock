@@ -1,4 +1,6 @@
 #include "bots.hpp"
+#include "flock/automations.hpp"
+#include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/intake.hpp"
@@ -407,11 +409,10 @@ std::optional<Bot> Bots::tryGet(std::string_view id) const {
     }
 }
 
-std::optional<Store::PlannerModel> Bots::plannerModel(std::string_view id) const {
+std::optional<PlannerModel> Bots::plannerModel(std::string_view id) const {
     const auto bot = tryGet(id);
     if (!bot) return std::nullopt;
-    Store::PlannerModel planner{bot->settings.at("model").get<std::string>(), bot->settings.at("modelProvider").get<std::string>(),
-                                std::nullopt};
+    PlannerModel planner{bot->settings.at("model").get<std::string>(), bot->settings.at("modelProvider").get<std::string>(), std::nullopt};
     if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
         planner.reasoningEffort = effort->get<std::string>();
     if (bot->settings.contains("modelCallLimit")) planner.modelCallLimit = initialModelCallLimit(bot->settings);
@@ -699,7 +700,7 @@ Json Bots::updateRunSettings(Store& store, std::string_view id, const Json& sett
     if (!settings.is_object() || settings.empty() || settings.size() != botRunSettingCount(settings))
         throw BotProfileError("invalid_profile_update", "Save how the Bot runs separately from its profile");
     std::vector<std::string> configErrors;
-    const auto importErrors = store.syncSchedules(id, now, [&](const auto& commit) {
+    const auto importErrors = Automations(store).syncSchedules(id, now, [&](const auto& commit) {
         std::lock_guard lock(mutex_);
         const auto file = path(id) / "config.json";
         const auto original = readText(file, maxConfigBytes);
@@ -778,12 +779,12 @@ void Bots::syncBotSchedules(Store& store, std::string_view id, Seconds now, cons
     } catch (const Json::exception& error) {
         errors.emplace_back(error.what());
     }
-    reportScheduleErrors(id, store.syncSchedules(id, schedules, now), errors, report);
+    reportScheduleErrors(id, Automations(store).syncSchedules(id, schedules, now), errors, report);
 }
 
 void Bots::syncSchedules(Store& store, Seconds now, const ScheduleReporter& report) const {
     const auto botIds = ids();
     for (const auto& id : botIds) syncBotSchedules(store, id, now, report);
-    store.pruneAutomations(botIds);
+    Automations(store).pruneAutomations(botIds);
 }
 }

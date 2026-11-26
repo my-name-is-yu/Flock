@@ -1,4 +1,6 @@
 #include "fake_git.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
@@ -145,7 +147,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         retired = store.submit(intake());
         for (int i = 0; i < 8 && store.task(retired).task.state != TaskState::completed; ++i) runtime.tick();
         check(store.task(retired).task.state == TaskState::completed && host->createCalls == 1, "The original PR task did not finish");
-        const auto pending = store.inbox(localOwner, "owner");
+        const auto pending = Inbox(store).inbox(localOwner, "owner");
         check(pending.size() == 1 && pending.at(0).at("prTitle") == "Pull request awaiting review",
               "Expected a pending review on the completed task");
         bool blockedByReview = false;
@@ -155,7 +157,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
             blockedByReview = true;
         }
         check(blockedByReview && !store.botDeleted("owner"), "A pending Git review did not block Bot deletion");
-        store.decideInbox(localOwner, target(pending.at(0)), "approve");
+        Inbox(store).decideInbox(localOwner, target(pending.at(0)), "approve");
 
         sibling = store.submit(intake("sibling", "sibling-project"));
         auto siblingArgs = openArgs("sibling-change");
@@ -170,11 +172,11 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         const auto blocked = model.runTool(store, runtime, "replacement", "claim-active-watch", mutation(replacement));
         check(blocked.at("ok") == false && host->hostCalls == calls, "An active Bot's PR became available to another task");
 
-        check(store.receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 0}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 0}),
               "Could not save the shared-commit event");
         runtime.runConversations();
         store.deleteBot(localOwner, "owner");
-        check(store.receiveGitWebhook({hostName, "retired-watch", repoName, "ci", "completed", {1}, sha, "Retired PR", 0}),
+        check(GitEvents(store).receiveGitWebhook({hostName, "retired-watch", repoName, "ci", "completed", {1}, sha, "Retired PR", 0}),
               "Could not save an explicit event after deletion");
         runtime.runConversations();
         check(historyCount(store, retired, "git_webhook") == 0 && historyCount(store, sibling, "git_webhook") == 0,
@@ -186,7 +188,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
 
         host->result["headSha"] = newHead;
         const auto queueEventBeforeWatchTransfer = [&] {
-            check(store.receiveGitWebhook({hostName, "before-handoff", repoName, "ci", "completed", {1}, sha, "Old watch", 0}),
+            check(GitEvents(store).receiveGitWebhook({hostName, "before-handoff", repoName, "ci", "completed", {1}, sha, "Old watch", 0}),
                   "Could not queue an explicit pre-handoff event");
         };
         auto webhookQueued = std::make_shared<std::promise<bool>>();
@@ -196,49 +198,49 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
             if (context.botId != "replacement") return;
             const auto saveReviewRequests = [&] {
                 if (!requestsReview) return true;
-                return store.receiveGitWebhook({hostName,
-                                                "unrelated-review",
-                                                repoName,
-                                                "pull_request",
-                                                "review_requested",
-                                                {1},
-                                                newHead,
-                                                "Requested Bob separately",
-                                                0,
-                                                {},
-                                                "Bob"}) &&
-                       store.receiveGitWebhook({hostName,
-                                                "matching-review",
-                                                repoName,
-                                                "pull_request",
-                                                "review_requested",
-                                                {1},
-                                                newHead,
-                                                "Requested Alice",
-                                                0,
-                                                {},
-                                                "Alice"});
+                return GitEvents(store).receiveGitWebhook({hostName,
+                                                           "unrelated-review",
+                                                           repoName,
+                                                           "pull_request",
+                                                           "review_requested",
+                                                           {1},
+                                                           newHead,
+                                                           "Requested Bob separately",
+                                                           0,
+                                                           {},
+                                                           "Bob"}) &&
+                       GitEvents(store).receiveGitWebhook({hostName,
+                                                           "matching-review",
+                                                           repoName,
+                                                           "pull_request",
+                                                           "review_requested",
+                                                           {1},
+                                                           newHead,
+                                                           "Requested Alice",
+                                                           0,
+                                                           {},
+                                                           "Alice"});
             };
             webhookQueued->set_value(
-                store.receiveGitWebhook({hostName,
-                                         "shared-head-during-handoff",
-                                         repoName,
-                                         "ci",
-                                         "completed",
-                                         {},
-                                         sha,
-                                         "CI activity for both PRs before synchronization",
-                                         0}) &&
-                store.receiveGitWebhook({hostName,
-                                         "ci-before-delayed-sync",
-                                         repoName,
-                                         "ci",
-                                         "completed",
-                                         {},
-                                         delayedSyncHead,
-                                         "CI before its synchronization webhook",
-                                         0}) &&
-                store.receiveGitWebhook(
+                GitEvents(store).receiveGitWebhook({hostName,
+                                                    "shared-head-during-handoff",
+                                                    repoName,
+                                                    "ci",
+                                                    "completed",
+                                                    {},
+                                                    sha,
+                                                    "CI activity for both PRs before synchronization",
+                                                    0}) &&
+                GitEvents(store).receiveGitWebhook({hostName,
+                                                    "ci-before-delayed-sync",
+                                                    repoName,
+                                                    "ci",
+                                                    "completed",
+                                                    {},
+                                                    delayedSyncHead,
+                                                    "CI before its synchronization webhook",
+                                                    0}) &&
+                GitEvents(store).receiveGitWebhook(
                     {hostName, "during-handoff", repoName, "ci", "completed", {1}, newHead, "New watch before host response", 0}) &&
                 saveReviewRequests());
             resume.wait();
@@ -264,18 +266,18 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         Runtime runtime(store, model, sessions, soul, options(host));
         runtime.runConversations();
         check(webhookWasUndelivered(path, "ci-before-delayed-sync"), "A future head observation attributed unsynchronized CI activity");
-        check(store.receiveGitWebhook({hostName,
-                                       "synchronize-after-handoff",
-                                       repoName,
-                                       "pull_request",
-                                       "synchronize",
-                                       {1},
-                                       delayedSyncHead,
-                                       "Delayed synchronization for the CI head",
-                                       0}) &&
-                  store.receiveGitWebhook(
+        check(GitEvents(store).receiveGitWebhook({hostName,
+                                                  "synchronize-after-handoff",
+                                                  repoName,
+                                                  "pull_request",
+                                                  "synchronize",
+                                                  {1},
+                                                  delayedSyncHead,
+                                                  "Delayed synchronization for the CI head",
+                                                  0}) &&
+                  GitEvents(store).receiveGitWebhook(
                       {hostName, "after-handoff-explicit", repoName, "ci", "completed", {1}, delayedSyncHead, "New watch", 0}) &&
-                  store.receiveGitWebhook(
+                  GitEvents(store).receiveGitWebhook(
                       {hostName, "after-handoff-commit", repoName, "ci", "completed", {}, delayedSyncHead, "New head", 0}),
               "Could not enqueue activity after handoff");
         runtime.runConversations();
@@ -293,14 +295,14 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
                   history.find("after-handoff-commit") != std::string::npos && history.find("before-handoff") == std::string::npos,
               "The replacement watch lost new activity or replayed an old event after restart");
         if (requestsReview) {
-            const auto inbox = store.inbox(localOwner, "replacement");
+            const auto inbox = Inbox(store).inbox(localOwner, "replacement");
             const auto matching =
                 std::ranges::find_if(inbox, [](const Json& item) { return item.at("prompt") == "Review requested on the Git host."; });
             check(history.find("matching-review") != std::string::npos && history.find("unrelated-review") != std::string::npos &&
                       inbox.size() == 2 && matching != inbox.end(),
                   "The review request lost a conversation event or created a duplicate inbox item");
-            store.decideInbox(localOwner, target(*matching), "approve");
-            const auto remaining = store.inbox(localOwner, "replacement");
+            Inbox(store).decideInbox(localOwner, target(*matching), "approve");
+            const auto remaining = Inbox(store).inbox(localOwner, "replacement");
             check(remaining.size() == 1 && remaining.front().at("prompt") == "Requested Bob separately",
                   "Review-request correlation removed an unrelated inbox item");
         }

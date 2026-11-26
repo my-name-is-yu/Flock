@@ -1,3 +1,5 @@
+#include "flock/automations.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
 
@@ -990,7 +992,7 @@ void fullModeProfiles(const std::filesystem::path& directory) {
     check(bots.ids() == std::vector<std::string>{"reviewer"} && policy.allows(creator, Action::bot_settings, "reviewer"),
           "Full did not apply a Bot creation with the requesting person's ownership");
     send("rename_bot", "Reviewer");
-    check(bots.cards().at(0).at("name") == "Reviewer" && store.inbox(creator).empty(), "Full did not apply a Bot rename directly");
+    check(bots.cards().at(0).at("name") == "Reviewer" && Inbox(store).inbox(creator).empty(), "Full did not apply a Bot rename directly");
     policy.changeNeverRule(localOwner, Action::bot_rename, "review*", true);
     send("rename_bot", "Other name");
     check(bots.cards().at(0).at("name") == "Reviewer", "Never rule did not block the profile write");
@@ -1815,7 +1817,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     check(accepted.at("duplicate") == false && replayed.at("duplicate") == true && accepted.at("tasks").size() == 1 &&
               replayed.at("tasks") == accepted.at("tasks") && store.tasks().size() == 1,
           "Webhook redelivery enqueued another task");
-    store.fireDueAutomations(cb.clock() + 60);
+    Automations(store).fireDueAutomations(cb.clock() + 60);
     check(store.tasks().size() == 1, "Canceled reminder fired after its due time");
     const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
     check(request.at("trigger").at("source") == "deploy" && request.at("trigger").at("triggerId") == trigger &&

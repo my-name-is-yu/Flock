@@ -1,3 +1,5 @@
+#include "flock/git_events.hpp"
+#include "secret_storage.hpp"
 #include "storage.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
@@ -267,7 +269,7 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messag
     if (deliveries.size() < batchSize) gitWebhooksDrainedAt = version;
 }
 
-bool Store::receiveGitWebhook(const GitWebhook& event) {
-    return p_->gitStorage.receiveGitWebhook(event);
+bool GitEvents::receiveGitWebhook(const GitWebhook& event) {
+    return git_.receiveGitWebhook(event);
 }
 }

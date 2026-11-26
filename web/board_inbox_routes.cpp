@@ -73,9 +73,9 @@ void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks&
             }
         });
     };
-    get("/api/inbox", "items", [&store](const Person& actor, const std::string& bot) { return store.inbox(actor, bot); });
+    get("/api/inbox", "items", [&store](const Person& actor, const std::string& bot) { return Inbox(store).inbox(actor, bot); });
     get("/api/inbox/history", "decisions",
-        [&store](const Person& actor, const std::string& bot) { return store.decisionHistory(actor, bot); });
+        [&store](const Person& actor, const std::string& bot) { return Inbox(store).decisionHistory(actor, bot); });
 
     server.Post("/api/inbox/decide", [&store, &callbacks](const Request& req, Response& res) {
         if (req.body.size() > 128 * 1024) return error(res, 413, "payload_too_large");
@@ -90,7 +90,8 @@ void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks&
                                      targetId(body, "targetRevision"),
                                      targetId(body, "targetGeneration")};
             if (!validBotId(target.botId)) return error(res, 400, "invalid_bot");
-            store.decideInbox(person(callbacks, req), target, body.at("decision").get<std::string>(), body.value("data", Json::object()));
+            Inbox(store).decideInbox(person(callbacks, req), target, body.at("decision").get<std::string>(),
+                                     body.value("data", Json::object()));
             reply(res, 200, {{"accepted", true}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");

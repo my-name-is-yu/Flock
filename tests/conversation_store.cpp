@@ -1,3 +1,4 @@
+#include "flock/automations.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
@@ -262,8 +263,9 @@ void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
     auto reminder = Fixture::bot("beta");
     reminder.request = "Fire a scheduled reminder";
     const auto createReminder = [&](Seconds from) {
-        writer.createAutomation(localOwner, reminder,
-                                {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", from + 1}, {"request", reminder.request}}, from);
+        Automations(writer).createAutomation(
+            localOwner, reminder, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", from + 1}, {"request", reminder.request}},
+            from);
     };
     const auto makeDue = [&] {
         if (externalWrite)
@@ -924,7 +926,7 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     const auto approve = [&](Store& connection) {
         ready.arrive_and_wait();
         try {
-            connection.decideInbox(localOwner, target, "approve");
+            Inbox(connection).decideInbox(localOwner, target, "approve");
             return true;
         } catch (const DecisionUnavailable&) {
             return false;
@@ -944,7 +946,7 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
           "Approval did not update the saved pause and its status column together");
     bool rejected = false;
     try {
-        store.decideInbox(localOwner, target, "approve");
+        Inbox(store).decideInbox(localOwner, target, "approve");
     } catch (const Conflict&) {
         rejected = true;
     }
@@ -997,7 +999,7 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     if (approveTask)
         store.operate(localOwner, taskTarget, "approve");
     else
-        store.decideInbox(localOwner, turnTarget, "approve");
+        Inbox(store).decideInbox(localOwner, turnTarget, "approve");
     const auto changes = Conversations(store).conversationChangesSince(beforeApproval, "alpha");
     check(Conversations(store).pausedConversations("alpha").empty() && taskJson(store.task(taskId)).at("wait").is_null() &&
               Conversations(store).pausedConversations("beta").size() == 1 &&
@@ -1006,7 +1008,7 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
     bool rejected = false;
     try {
         if (approveTask)
-            store.decideInbox(localOwner, turnTarget, "approve");
+            Inbox(store).decideInbox(localOwner, turnTarget, "approve");
         else
             store.operate(localOwner, taskTarget, "approve");
     } catch (const Conflict&) {
@@ -1025,7 +1027,7 @@ void oneApprovalResumesSharedBudgetWaits(bool approveTask) {
                                   return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == message &&
                                          row.at("data").at("text") == "I started the release note.";
                               }) &&
-              reopened.inbox(localOwner, "alpha").empty() &&
+              Inbox(reopened).inbox(localOwner, "alpha").empty() &&
               fixture.count("SELECT call_limit FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 6,
           "Shared work did not finish after restart with exactly one new block");
 }
@@ -1045,7 +1047,7 @@ void notesFailureReleasesUnusedApproval() {
     const auto pauses = Conversations(store).pausedConversations("alpha");
     check(tasks.size() == 1 && pauses.size() == 1, "The turn did not start a task and pause for approval");
     const Id pause = pauses.at(0).at("messageId");
-    store.decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause}, "approve");
+    Inbox(store).decideInbox(localOwner, {"alpha", InboxKind::conversation_model_budget, message, pause, 0, 0, pause}, "approve");
 
     execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
     execution.runtime.runConversations();

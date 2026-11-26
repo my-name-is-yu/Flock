@@ -263,12 +263,12 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
     store->policy().setMode(localOwner, "supervised");
     const auto origin = receive("supervised");
     runtime->runConversations();
-    const auto item = store->inbox(localOwner).at(0);
+    const auto item = Inbox(*store).inbox(localOwner).at(0);
     check(sends() == before && item.at("status") == "pending", "Supervised sent before approval");
     restart();
     const InboxTarget approval{item.at("botId"),  InboxKind::policy_approval, item.at("itemId"),          item.at("waitId"),
                                item.at("taskId"), item.at("targetRevision"),  item.at("targetGeneration")};
-    store->decideInbox(localOwner, approval, "allow_once");
+    Inbox(*store).decideInbox(localOwner, approval, "allow_once");
     runtime->runConversations();
     if (sends() != before + 1 || model.result.value("delivery", "") != "queued")
         throw std::runtime_error("Approved Session send did not queue: " + model.result.dump());
@@ -437,14 +437,14 @@ void sessionMessageWake(T3& t3, const std::filesystem::path& database, const std
                            {"text", "Send an update to T3."}},
                           [&](auto, auto) { return intake; });
     runtime->runConversations();
-    const auto items = store->inbox(localOwner);
+    const auto items = Inbox(*store).inbox(localOwner);
     const auto card = std::ranges::find_if(
         items, [](const Json& item) { return item.value("itemKind", "") == "policy_approval" && item.value("status", "") == "pending"; });
     check(sends() == before + 3 && card != items.end(), "The Slack send did not wait for policy approval");
-    store->decideInbox(localOwner,
-                       {card->at("botId"), InboxKind::policy_approval, card->at("itemId"), card->at("waitId"), card->at("taskId"),
-                        card->at("targetRevision"), card->at("targetGeneration")},
-                       "allow_once");
+    Inbox(*store).decideInbox(localOwner,
+                              {card->at("botId"), InboxKind::policy_approval, card->at("itemId"), card->at("waitId"), card->at("taskId"),
+                               card->at("targetRevision"), card->at("targetGeneration")},
+                              "allow_once");
     runtime->runConversations();
     check(sends() == before + 4, "The approved Slack send did not queue");
     fixture({{"botRunStatus", "completed"}});

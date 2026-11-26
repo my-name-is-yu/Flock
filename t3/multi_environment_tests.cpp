@@ -799,15 +799,16 @@ void supervised(Scenario& fixture) {
     fixture.store.policy().setMode(localOwner, "supervised");
     fixture.start();
     auto card = [&](const Endpoint& endpoint) {
-        for (const auto& item : fixture.store.inbox(localOwner, bot))
+        for (const auto& item : Inbox(fixture.store).inbox(localOwner, bot))
             if (item.at("target") == endpoint.id() && item.at("status") == "pending") return item;
         return Json(nullptr);
     };
     auto approve = [&](const Json& item) {
-        fixture.store.decideInbox(localOwner,
-                                  {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
-                                   item.at("targetRevision"), item.at("targetGeneration")},
-                                  "allow_once");
+        Inbox(fixture.store)
+            .decideInbox(localOwner,
+                         {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), item.at("taskId"),
+                          item.at("targetRevision"), item.at("targetGeneration")},
+                         "allow_once");
     };
     fixture.advanceUntil([&](const TaskView&) { return !card(fixture.local).is_null() && !card(fixture.mini).is_null(); },
                          "both dispatches should request separate approvals");

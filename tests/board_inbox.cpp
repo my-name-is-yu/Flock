@@ -195,7 +195,7 @@ InboxTarget target(const Json& item) {
 }
 
 InboxTarget pending(Store& store, InboxKind kind, std::string_view bot = {}) {
-    return target(row(store.inbox(owner, bot), "itemKind", inboxKindName(kind)));
+    return target(row(Inbox(store).inbox(owner, bot), "itemKind", inboxKindName(kind)));
 }
 
 Id openReview(Store& store, Runtime& runtime, Script& script, const Intake& routing, Id task, std::string branch,
@@ -204,7 +204,7 @@ Id openReview(Store& store, Runtime& runtime, Script& script, const Intake& rout
     script.openPrArgs.update({{"taskId", task}, {"title", reviewPrompt}});
     Conversations(store).receive(owner, routing, branch, "Open a pull request for review.");
     runtime.runConversations();
-    return row(store.inbox(owner, routing.botId), "prompt", reviewPrompt).at("itemId");
+    return row(Inbox(store).inbox(owner, routing.botId), "prompt", reviewPrompt).at("itemId");
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -259,14 +259,15 @@ void exercise(const std::filesystem::path& path) {
     runtime.runConversations();
 
     const auto before = db.exec("PRAGMA data_version");
-    const auto inbox = store.inbox(alice);
-    check(store.inbox(alice) == inbox && db.exec("PRAGMA data_version") == before, "refreshing the inbox mutated SQLite");
+    const auto inbox = Inbox(store).inbox(alice);
+    check(Inbox(store).inbox(alice) == inbox && db.exec("PRAGMA data_version") == before, "refreshing the inbox mutated SQLite");
     const auto questionRow = row(inbox, "itemKind", "user_question");
     check(questionRow.at("botId") == "report" && questionRow.at("botName") == "report" && questionRow.at("taskId") == question &&
               questionRow.at("requestTitle") == "Report the work" && questionRow.at("request") == "Report the work\nInclude the source" &&
               questionRow.at("prompt") == "Which report?",
           "inbox dropped the question's request or prompt");
-    check(store.inbox(alice, "private").empty() && store.inbox(reader, "review").empty(), "inbox membership restrictions were ignored");
+    check(Inbox(store).inbox(alice, "private").empty() && Inbox(store).inbox(reader, "review").empty(),
+          "inbox membership restrictions were ignored");
     check(row(inbox, "itemKind", "user_question").at("choices") == Json::array({"Draft", "Final"}) &&
               row(inbox, "itemKind", "conversation_model_budget").at("itemId") == conversation.at("messageId") &&
               row(inbox, "itemKind", "conversation_model_budget").at("request") == "Pause this conversation" &&
@@ -277,7 +278,7 @@ void exercise(const std::filesystem::path& path) {
               row(inbox, "itemKind", "deadline").at("taskId") == deadlineTask &&
               row(inbox, "itemKind", "unknown_delivery").at("taskId") == unknown && inbox.size() == 9,
           "inbox omitted a pending decision or its prompt");
-    const auto readerQuestion = row(store.inbox(reader), "itemKind", "user_question");
+    const auto readerQuestion = row(Inbox(store).inbox(reader), "itemKind", "user_question");
     const auto waitAnchor = report.at("wait").at("messageId");
     check(readerQuestion.at("canDecide").get<bool>() && readerQuestion.at("conversationEventId") == waitAnchor &&
               readerQuestion.at("waitId") != waitAnchor &&
@@ -290,7 +291,7 @@ SELECT )SQL" +
             std::to_string(question) + ",1,'fixture_activity','{}' FROM newer");
     check(taskJson(store.task(question)).at("wait").at("messageId") == waitAnchor,
           "task detail lost the wait anchor after 129 newer events");
-    check(row(store.inbox(reader), "itemKind", "user_question") == readerQuestion,
+    check(row(Inbox(store).inbox(reader), "itemKind", "user_question") == readerQuestion,
           "Inbox disagreed with task detail about the wait anchor");
     const auto active = store.activeTasks("report");
     const auto activeQuestion = std::ranges::find_if(active, [&](const Store::ActiveTask& task) { return task.task.id == question; });
@@ -312,22 +313,22 @@ SELECT )SQL" +
           "a paused turn did not point to its conversation reply");
 
     const auto questionBefore = pending(store, user_question);
-    rejected<DecisionDenied>([&] { store.decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
+    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
                              "nonmember answered a question");
     const auto taskQuestion = TaskTarget::from(store.task(question).task, questionBefore.waitId);
     rejected<DecisionDenied>([&] { store.operate(bob, taskQuestion, "answer", {{"text", "Final"}}); },
                              "nonmember answered through the direct controls");
     auto forged = questionBefore;
     ++forged.targetGeneration;
-    rejected<RequestChanged>([&] { store.decideInbox(alice, forged, "answer", {{"text", "Final"}}); },
+    rejected<RequestChanged>([&] { Inbox(store).decideInbox(alice, forged, "answer", {{"text", "Final"}}); },
                              "someone could submit a different task generation");
 
-    store.decideInbox(alice, pending(store, pr_review), "approve");
+    Inbox(store).decideInbox(alice, pending(store, pr_review), "approve");
     check(db.exec("SELECT status='approved' FROM pr_review_items WHERE id=" + std::to_string(review)) == 1,
           "PR approval failed to update the linked review");
-    store.decideInbox(owner, pending(store, protected_input), "supply", {{"value", "test-vault-value"}});
-    check(store.decisionHistory(owner).dump().find("test-vault-value") == std::string::npos, "secret was journaled");
-    const auto old = target(row(store.inbox(alice), "taskId", changed));
+    Inbox(store).decideInbox(owner, pending(store, protected_input), "supply", {{"value", "test-vault-value"}});
+    check(Inbox(store).decisionHistory(owner).dump().find("test-vault-value") == std::string::npos, "secret was journaled");
+    const auto old = target(row(Inbox(store).inbox(alice), "taskId", changed));
     const auto staleReview =
         openReview(store, runtime, script, intake("report", "unused", "turn"), changed, "revision-a", "Review the first source");
     script.managed = changed;
@@ -338,23 +339,24 @@ SELECT )SQL" +
           "conversation did not change the task revision");
     const auto sent = sessions.sends;
     const auto interrupted = sessions.interrupts;
-    rejected<RequestChanged>([&] { store.decideInbox(alice, old, "approve"); }, "old approval applied to revision B");
+    rejected<RequestChanged>([&] { Inbox(store).decideInbox(alice, old, "approve"); }, "old approval applied to revision B");
     rejected<RequestChanged>(
         [&] {
-            store.decideInbox(alice, {"report", pr_review, staleReview, 0, changed, old.targetRevision, old.targetGeneration}, "approve");
+            Inbox(store).decideInbox(alice, {"report", pr_review, staleReview, 0, changed, old.targetRevision, old.targetGeneration},
+                                     "approve");
         },
         "an old PR review approved a new revision");
     check(taskJson(store.task(changed)) == revisionB && sessions.sends == sent && sessions.interrupts == interrupted &&
-              store.decisionHistory(owner).size() == 2,
+              Inbox(store).decisionHistory(owner).size() == 2,
           "rejected approval changed task, delivery, or history");
 
-    const auto extra = target(row(store.inbox(alice), "taskId", budget));
+    const auto extra = target(row(Inbox(store).inbox(alice), "taskId", budget));
     const auto allowance = store.task(budget).task.allowance.remaining;
     std::barrier ready(2);
     const auto act = [&](Store& connection, const Person& actor) {
         ready.arrive_and_wait();
         try {
-            connection.decideInbox(actor, extra, "approve");
+            Inbox(connection).decideInbox(actor, extra, "approve");
             return actor.id;
         } catch (const DecisionUnavailable&) {
             return std::string{};
@@ -388,7 +390,7 @@ SELECT )SQL" +
     const auto withdrawing = pending(store, user_question);
     Conversations(store).receive(localOwner, intake("report", "unused", "turn"), "withdraw", "Withdraw the question");
     runtime.runConversations();
-    for (const auto& remaining : store.inbox(alice, "report"))
+    for (const auto& remaining : Inbox(store).inbox(alice, "report"))
         check(remaining.at("itemKind") != "user_question", "withdrawn question remained in the Inbox");
     const auto withdrawn = taskJson(store.task(question));
     const auto& sessionQuestionTarget = withdrawn.at("question").at("target");
@@ -398,35 +400,35 @@ SELECT )SQL" +
     check(sessionQuestionTarget.at("waitId").is_null() && sessionQuestionTarget.at("eventId") == withdrawn.at("eventId") &&
               withdrawn.at("eventId") != report.at("eventId"),
           "withdraw left the active Session question on the old event");
-    rejected<DecisionUnavailable>([&] { store.decideInbox(alice, withdrawing, "answer", {{"text", "Final"}}); },
+    rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, withdrawing, "answer", {{"text", "Final"}}); },
                                   "withdrawn question accepted an answer");
 
     const auto delivery = pending(store, unknown_delivery);
     db.exec("CREATE TRIGGER reject_audit BEFORE INSERT ON inbox_decisions BEGIN SELECT RAISE(ABORT,'test rollback'); END");
     const auto previous = taskJson(store.task(unknown));
-    rejected<std::runtime_error>([&] { store.decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}}); },
+    rejected<std::runtime_error>([&] { Inbox(store).decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}}); },
                                  "failed history insertion did not abort a decision");
     check(taskJson(store.task(unknown)) == previous && pending(store, unknown_delivery) == delivery && sessions.reconciles == 0,
           "failed history insertion committed reconciliation intent or wait update");
     db.exec("DROP TRIGGER reject_audit");
-    store.decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}});
+    Inbox(store).decideInbox(alice, delivery, "reconcile", {{"threadId", "candidate"}});
     const auto reconciling = store.task(unknown);
     check(reconciling.pendingAction && reconciling.pendingAction->command.candidate &&
               reconciling.pendingAction->command.candidate->threadId == "candidate" && reconciling.task.state == TaskState::sending &&
               sessions.reconciles == 0,
           "reconciliation did not commit the canonical delivery intent");
-    store.decideInbox(alice, pending(store, deadline), "extend", {{"deadline", due + 3600}});
+    Inbox(store).decideInbox(alice, pending(store, deadline), "extend", {{"deadline", due + 3600}});
     check(store.task(deadlineTask).task.deadline == due + 3600, "deadline extension did not resume the run");
-    store.decideInbox(alice, pending(store, model_budget, "review"), "approve");
+    Inbox(store).decideInbox(alice, pending(store, model_budget, "review"), "approve");
     check(store.task(model).task.state == TaskState::deciding &&
               db.exec("SELECT count(*) FROM events e JOIN model_attempts a ON a.id=e.reserved_attempt WHERE a.task_id=" +
                       std::to_string(model)) == 1,
           "model approval did not reserve a call for the exact task event");
     const auto turn = pending(store, conversation_model_budget);
-    store.decideInbox(alice, turn, "approve");
-    rejected<DecisionUnavailable>([&] { store.decideInbox(alice, turn, "approve"); }, "turn approved twice");
+    Inbox(store).decideInbox(alice, turn, "approve");
+    rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, turn, "approve"); }, "turn approved twice");
     check(Conversations(store).pausedConversations("review").empty(), "conversation model approval did not release the pause");
-    const auto decision = row(store.decisionHistory(alice), "itemKind", "conversation_model_budget");
+    const auto decision = row(Inbox(store).decisionHistory(alice), "itemKind", "conversation_model_budget");
     check(decision.at("requestTitle") == "Pause this conversation" && decision.at("decidedByYou") == true,
           "a taskless conversation decision lost its source title or actor");
     policy.requestSecret("review", {"after-restart"});
@@ -442,7 +444,7 @@ void protectedInputSource(const std::filesystem::path& path) {
     const auto repeat = Conversations(store).receive(owner, routing, "repeat", "Repeated request").at("messageId").get<Id>();
     check(policy.requestSecret("report", ref, source) == request && policy.requestSecret("report", ref, repeat) == request,
           "repeated protected input changed its request ID");
-    const auto inbox = store.inbox(owner, "report");
+    const auto inbox = Inbox(store).inbox(owner, "report");
     check(inbox.size() == 1 && inbox.at(0).at("itemId") == request && inbox.at(0).at("request") == "First request" &&
               inbox.at(0).at("conversationEventId") == source,
           "protected input lost its first conversation source");
@@ -470,21 +472,23 @@ void chatDecision(const std::filesystem::path& path) {
     Conversations(store).receive(alice, routing, "revoked", "Use Final", wait.at("messageId"));
     policy.setMember(owner, "report", alice.id, false);
     runtime.runConversations();
-    check(taskJson(store.task(taskId)) == task && store.decisionHistory(owner).empty(), "a queued chat answer survived access revocation");
+    check(taskJson(store.task(taskId)) == task && Inbox(store).decisionHistory(owner).empty(),
+          "a queued chat answer survived access revocation");
     policy.setMember(owner, "report", alice.id, true);
     Conversations(store).receive(alice, routing, "answer", "Use Final", wait.at("messageId"));
     runtime.runConversations();
-    const auto history = store.decisionHistory(owner);
+    const auto history = Inbox(store).decisionHistory(owner);
     check(history.size() == 1 && history.at(0).at("decidedBy") == alice.id && history.at(0).at("decision") == "answer" &&
               history.at(0).at("decidedByYou") == false && history.at(0).at("requestTitle") == "Prepare the report" &&
-              history.at(0).at("targetRevision") == item.targetRevision && store.inbox(owner, "report").empty() &&
+              history.at(0).at("targetRevision") == item.targetRevision && Inbox(store).inbox(owner, "report").empty() &&
               !taskJson(store.task(taskId)).contains("blockerReason"),
           "the chat answer did not use the canonical decision audit");
-    rejected<DecisionUnavailable>([&] { store.decideInbox(alice, item, "answer", {{"text", "Draft"}}); },
+    rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, item, "answer", {{"text", "Draft"}}); },
                                   "the Inbox applied an answer after chat decided the wait");
     Conversations(store).receive(owner, routing, "change-report", "Switch the scope");
     runtime.runConversations();
-    check(store.task(taskId).task.intent == "Revision B" && store.decisionHistory(owner).at(0).at("requestTitle") == "Prepare the report",
+    check(store.task(taskId).task.intent == "Revision B" &&
+              Inbox(store).decisionHistory(owner).at(0).at("requestTitle") == "Prepare the report",
           "replanning changed the historical decision title");
 }
 
@@ -501,7 +505,7 @@ void reviewReply(const std::filesystem::path& path) {
         openReview(store, runtime, script, routing, task, "report", "Check the report");
         openReview(store, runtime, script, routing, task, "source", "Check the source");
     }
-    const auto items = store.inbox(owner, "report");
+    const auto items = Inbox(store).inbox(owner, "report");
     const auto firstAnchor = row(items, "prompt", "Check the report").at("conversationEventId");
     const auto review = row(items, "prompt", "Check the source");
     const auto second = review.at("itemId");
@@ -515,7 +519,7 @@ void reviewReply(const std::filesystem::path& path) {
             " SELECT task_id,time,kind,'{}',pr_review_item_id" +
             anchoredRow);
     Store restarted(path);
-    check(row(restarted.inbox(owner, "report"), "itemId", second) == review &&
+    check(row(Inbox(restarted).inbox(owner, "report"), "itemId", second) == review &&
               db.exec("SELECT count(*) FROM journal WHERE kind='pr_review_requested'") == 2,
           "reopening the store changed the review or its conversation anchor");
 
@@ -533,7 +537,7 @@ void reviewReply(const std::filesystem::path& path) {
                                            {"title", prReviewTitle},
                                            {"text", "Check the source"},
                                            {"prUrl", "https://github.com/org/flock/pull/2"}} &&
-              restarted.inbox(owner, "report").size() == 2 && restarted.decisionHistory(owner).empty(),
+              Inbox(restarted).inbox(owner, "report").size() == 2 && Inbox(restarted).decisionHistory(owner).empty(),
           "reply did not carry the exact pending PR context to the Bot");
 }
 }
@@ -547,11 +551,11 @@ int main() {
         chatDecision(directory.path / "chat.db");
         reviewReply(directory.path / "review-reply.db");
         Store restarted(path);
-        const auto history = restarted.decisionHistory(alice);
+        const auto history = Inbox(restarted).decisionHistory(alice);
         const auto approval = row(history, "itemKind", "extra_run");
         check(history.size() == 7 && approval.at("decidedAt").get<Id>() > 0 &&
                   (approval.at("decidedBy") == "alice" || approval.at("decidedBy") == "bob") &&
-                  row(restarted.inbox(alice), "itemKind", "protected_input").at("prompt") == "Supply a value for after-restart",
+                  row(Inbox(restarted).inbox(alice), "itemKind", "protected_input").at("prompt") == "Supply a value for after-restart",
               "restart lost pending requests or recorded decisions");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

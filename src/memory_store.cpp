@@ -1,3 +1,4 @@
+#include "flock/bot_memory.hpp"
 #include "conversation_turns.hpp"
 #include "memory_storage.hpp"
 
@@ -5,6 +6,7 @@
 #include "database.hpp"
 #include "secret_storage.hpp"
 #include "storage.hpp"
+#include "flock/store_options.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/limits.hpp"
 #include "flock/memory_automation.hpp"
@@ -84,7 +86,7 @@ Json revisionView(const Statement& row) {
 }
 
 MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Policy& permissions,
-                             ConversationStorage& conversationTurns, Store::MemorySeed seed)
+                             ConversationStorage& conversationTurns, MemorySeed seed)
     : database_(database), secretStorage_(secretStorage), permissions(permissions), conversationTurns(conversationTurns),
       seed_(std::move(seed)) {}
 
@@ -160,10 +162,10 @@ std::string MemoryStorage::seedPrivateMemory(std::string_view key, std::string_v
     return content;
 }
 
-Json Store::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args) {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db);
-    auto result = p_->memoryStorage.memory(bot, actor, operation, args, unixTime());
+Json Memory::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args) {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db);
+    auto result = memory_.memory(bot, actor, operation, args, unixTime());
     if (result.is_null()) throw Conflict("Unknown memory operation");
     tx.commit();
     return result;
