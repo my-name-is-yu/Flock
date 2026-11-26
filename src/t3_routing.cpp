@@ -1,5 +1,4 @@
 #include "task_routing.hpp"
-#include "secret_storage.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "task_storage.hpp"
@@ -7,7 +6,6 @@
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"
@@ -135,7 +133,7 @@ LinkedTaskDestinations TaskRouting::discoverLinkedTaskDestinations(T3& t3, std::
         gateways = registeredT3Environments(bot);
     }
     LinkedTaskDestinations result;
-    const auto scrub = secretStorage.redactor(bot);
+    const auto scrub = permissions.secretRedactor(bot);
     std::set<std::tuple<std::string, std::string, std::string>> seenRoutes;
     std::set<std::string> seenNames;
     for (const auto& gateway : gateways) {
@@ -312,7 +310,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
             if (destinations.primary.environmentId.empty()) destinations.primary = route;
             destinations.targets.push_back({name, std::move(route)});
         }
-        secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
+        permissions.secretRedactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
         return destinations;
     }
     if (!sessionRef.empty() && (!selectedSession || !sessionReadStorage.permitsWorkSession(message, *selectedSession)))
@@ -334,7 +332,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
             destinations.primary.projectId = rememberedT3Project(bot, destinations.primary.environmentId);
         if (destinations.primary.projectId.empty()) throw ToolError("Choose a T3 project before verifying a commit");
         destinations.targets.push_back({environment.empty() ? destinations.primary.environmentId : environment, destinations.primary});
-        secretStorage.redactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
+        permissions.secretRedactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
     }
     return destinations;
 }
@@ -351,7 +349,7 @@ TaskChange TaskRouting::taskChange(const conversation::Message& message, const J
     if (!environment.empty()) {
         change.route = taskRoute(message.bot, message.routing, environment, &task, &linked);
         if (change.route.environmentId.empty()) throw ToolError("Unknown environment " + environment + "; use one of task.environments");
-        secretStorage.redactor(message.bot)
+        permissions.secretRedactor(message.bot)
             .requirePublic({change.route.environmentId, change.route.projectId, change.route.gatewayEnvironmentId});
     }
     return change;

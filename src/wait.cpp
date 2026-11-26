@@ -1,4 +1,4 @@
-#include "flock/tasks.hpp"
+#include "flock/task_history.hpp"
 #include "task_operations.hpp"
 #include "task_records.hpp"
 #include "wait_storage.hpp"
@@ -287,7 +287,7 @@ Wait decodeWaitingEntry(Id entry, const Json& data) {
     });
 }
 
-Wait Tasks::waitingEvent(const Json& event) {
+Wait TaskHistory::waitingEvent(const Json& event) {
     return decodeWaitingEntry(event.at("id"), event.at("data"));
 }
 
@@ -349,12 +349,12 @@ void WaitStorage::clearWait(TaskData& task, std::string_view resolution) {
     const auto id = row.number(0);
     row.next();
     if (task.blocker && task.blocker->waitId == id) task.blocker.reset();
-    journalStorage.journal(task.id, "wait_closed", {{"waitId", id}, {"resolution", resolution}});
+    database.writeJournal(task.id, "wait_closed", {{"waitId", id}, {"resolution", resolution}});
 }
 
 void WaitStorage::unlockQuestion(TaskData& task, std::string_view reason) {
     if (!task.question) return;
-    journalStorage.journal(task.id, "session_question_closed", {{"requestId", task.question->target.requestId}, {"resolution", reason}});
+    database.writeJournal(task.id, "session_question_closed", {{"requestId", task.question->target.requestId}, {"resolution", reason}});
     task.question.reset();
 }
 

@@ -1,3 +1,6 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
 #include "flock/notifications.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/workflows.hpp"
@@ -143,8 +146,8 @@ struct Fixture {
     Id turn(std::string text, std::string tool = {}, Json args = Json::object()) {
         bot.action = {tool, args, "Execute the requested operation"};
         bot.result = nullptr;
-        auto receipt =
-            Conversations(*store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, std::to_string(++sequence), text);
+        auto receipt = ConversationIntake(*store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()},
+                                                          std::to_string(++sequence), text);
         runtime->runConversations();
         return receipt.at("messageId");
     }
@@ -176,7 +179,7 @@ void workflowLaunchUsesPolicyAndRedactsQueuedPrompt() {
     const auto input = policy.requestSecret("bot", {"workflow-credential"});
     policy.submitSecret(owner, "bot", input, secret);
     policy.changeNeverRule(owner, Action::environment_launch, "env", false);
-    Tasks(*f.store).operate(owner, TaskTarget::from(Tasks(*f.store).task(task).task, wait.at("id")), "reconcile");
+    TaskControl(*f.store).operate(owner, TaskTarget::from(Tasks(*f.store).task(task).task, wait.at("id")), "reconcile");
     f.t3.loseReceipt = true;
     f.ticks(1);
     require(f.t3.commands.size() == 1 && f.t3.commands[0].instruction.find(secret) == std::string::npos &&
@@ -301,7 +304,7 @@ void freshStandaloneSessionIncludesEarlierEvidence() {
     const Id sourceTask = f.status()["stages"][0]["taskId"];
     f.t3.finish("run-1", "Option B must preserve the retry window");
     f.ticks(1);
-    const auto history = Tasks(*f.store).history(sourceTask);
+    const auto history = TaskHistory(*f.store).history(sourceTask);
     const auto report = std::ranges::find_if(history, [](const Json& item) { return item.at("kind") == "report"; });
     require(report != history.end(), "fixture did not save the source report");
     f.bot.work = [](const ModelInput& input) -> Decision {
@@ -738,8 +741,8 @@ void settledWhileReadingInstruction() {
     const Id task = f.status()["stages"][0]["taskId"];
     f.t3.finish("run-1", {{"artifactVersion", shaA}, {"finding", "Keep the original row count"}});
     f.t3.onObserve = [&] {
-        Conversations(*f.store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, "fresh",
-                                        "Continue in a fresh Session");
+        ConversationIntake(*f.store).receive({"owner", true}, {"bot", "", "env", "project", Json::object()}, "fresh",
+                                             "Continue in a fresh Session");
         f.bot.action = {"continue_fresh_session", {{"taskId", task}}, "Continue the same task"};
     };
     f.ticks(1);
@@ -805,7 +808,8 @@ void scopedCompactionPages() {
     const auto summary = f.call("compact_conversation", {{"endMessageId", end}, {"summary", "Keep the original evidence"}});
     require(summary["compaction"]["originalCount"] == 3, "summary counted messages outside its boundary");
     f.bot.action = {"expand_context", {{"compactionId", summary["compaction"]["compactionId"]}}, "Look up original evidence"};
-    Conversations(*f.store).receive({"owner", true}, {"other", "", "env", "project", Json::object()}, "read", "Read first Bot's evidence");
+    ConversationIntake(*f.store).receive({"owner", true}, {"other", "", "env", "project", Json::object()}, "read",
+                                         "Read first Bot's evidence");
     f.runtime->runConversations();
     require(f.bot.result.at("ok") == false && f.bot.history.empty(), "compaction crossed Bot histories");
     std::string replay;
@@ -900,7 +904,7 @@ void compactAndContinue() {
     f.ticks(3);
     const Id task = f.status()["stages"][1]["taskId"];
     auto before = taskJson(Tasks(*f.store).task(task));
-    const auto history = Tasks(*f.store).history(task);
+    const auto history = TaskHistory(*f.store).history(task);
     f.call("continue_fresh_session", {{"taskId", task}, {"instruction", "Repeat checks with fresh context"}});
     f.ticks(3);
     require(f.t3.commands.size() == 2 && f.t3.interrupts.contains("run-2"), "fresh handoff bypassed settlement");
@@ -910,7 +914,7 @@ void compactAndContinue() {
     require(after["doneWhen"] == before["doneWhen"] && after["currentRevision"] == before["currentRevision"] &&
                 after["inputArtifactVersion"] == shaA && after["activeRun"]["threadId"] == "thread-3" &&
                 f.t3.commands.back().tool == CommandTool::delegate && f.t3.commands.back().instruction.find(shaA) != std::string::npos &&
-                Tasks(*f.store).history(task, 0, static_cast<unsigned>(history.size())) == history,
+                TaskHistory(*f.store).history(task, 0, static_cast<unsigned>(history.size())) == history,
             "fresh continuation lost task provenance");
 }
 }

@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/person.hpp"
@@ -111,6 +115,8 @@ struct Scene {
     ScratchDirectory directory;
     Store store;
     Tasks taskStore{store};
+    TaskList taskList{store};
+    TaskHistory taskHistory{store};
     Mixed& model;
     Runs t3;
     Runtime runtime;
@@ -135,7 +141,7 @@ struct Scene {
                                      std::to_string(tickLimit) + " ticks, got " + state);
     }
     Id task(std::string request, std::string project, Json question = nullptr) {
-        const auto id = taskStore.submit(intake(std::move(request), std::move(project)));
+        const auto id = TaskIntake(store).submit(intake(std::move(request), std::move(project)));
         const bool asksQuestion = !question.is_null();
         if (asksQuestion) model.questions.emplace(id, std::move(question));
         reach(id, asksQuestion ? "waiting" : "running");
@@ -150,7 +156,7 @@ struct Scene {
     }
     TaskSnapshots snapshot() const {
         TaskSnapshots tasks;
-        for (auto& task : taskJson(taskStore.tasks("", 0, 200))) {
+        for (auto& task : taskJson(taskList.tasks("", 0, 200))) {
             const auto id = task.at("id").get<Id>();
             tasks.emplace(id, std::move(task));
         }
@@ -160,7 +166,7 @@ struct Scene {
         auto before = snapshot();
         const auto runCount = t3.runs.size();
         const auto interruptCount = t3.interrupted.size();
-        const auto receipt = Conversations(store).receive(
+        const auto receipt = ConversationIntake(store).receive(
             localOwner, intake(), "message-" + std::to_string(Conversations(store).conversation("release", 0, 200).size()), text, replyTo);
         runtime.runConversations();
         check(t3.runs.size() == runCount && t3.interrupted.size() == interruptCount, "unexpected T3 send or interrupt");
@@ -183,7 +189,7 @@ struct Action {
 std::vector<Json> checkEvents(const Scene& s, const Turn& turn, Id task, std::initializer_list<std::string_view> expected) {
     std::vector<std::string> kinds;
     std::vector<Json> payloads;
-    for (const auto& row : s.taskStore.history(task, turn.message(), 200)) {
+    for (const auto& row : s.taskHistory.history(task, turn.message(), 200)) {
         if (row.at("id") >= turn.replyMessage()) break;
         kinds.push_back(row.at("kind").get<std::string>());
         payloads.push_back(row.at("data"));

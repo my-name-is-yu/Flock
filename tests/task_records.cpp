@@ -1,3 +1,5 @@
+#include "flock/intake.hpp"
+#include "flock/task_intake.hpp"
 #include "../src/task_storage.hpp"
 #include "../src/journal.hpp"
 #include "../src/journal_task.hpp"
@@ -51,7 +53,7 @@ struct SavedTask {
         ~Directory() { std::filesystem::remove_all(path); }
     } directory;
     Store store{directory.path / "state.db"};
-    Id task = Tasks(store).submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
+    Id task = TaskIntake(store).submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
 
     void exec(const char* sql, Json args = Json::array()) {
         sqlite3* raw = nullptr;

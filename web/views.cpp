@@ -1,7 +1,8 @@
+#include "flock/task_history.hpp"
+#include "flock/task_list.hpp"
 #include "views.hpp"
 #include "flock/peer_conversations.hpp"
 #include "flock/workflows.hpp"
-#include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
@@ -255,7 +256,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
     for (auto event = events.rbegin(); event != events.rend(); ++event) {
         const auto kind = field(*event, "kind");
         const auto& data = event->at("data");
-        const auto wait = kind == "waiting" ? std::optional{Tasks::waitingEvent(*event)} : std::nullopt;
+        const auto wait = kind == "waiting" ? std::optional{TaskHistory::waitingEvent(*event)} : std::nullopt;
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
                               (wait && (wait->reason() == WaitReason::user_question || wait->reason() == WaitReason::model_failure));
         auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
@@ -380,7 +381,7 @@ std::string_view botPresence(const auto& states) {
     return priority[highest];
 }
 
-Json activity(const std::vector<Tasks::ActiveTask>& activeTasks, std::string_view bot) {
+Json activity(const std::vector<TaskList::ActiveTask>& activeTasks, std::string_view bot) {
     const auto states = activeTasks | std::views::transform([](const auto& active) { return displayState(active.task); });
     Json result = {{"presence", botPresence(states)},
                    {"waits", Json::array()},
@@ -452,7 +453,7 @@ Json botSettings(const Json& bot) {
 Json botList(Store& store, const Json& bots) {
     auto result = Json::array();
     if (bots.empty()) return result;
-    const auto statesByBot = Tasks(store).activeTaskStatesByBot();
+    const auto statesByBot = TaskList(store).activeTaskStatesByBot();
     for (const auto& bot : bots) {
         const auto id = field(bot, "id");
         if (id.empty()) continue;
@@ -476,7 +477,7 @@ Json conversation(Store& store, std::string_view bot, Id before, std::string_vie
     auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
     const auto redactor = Policy{store}.secretRedactor(bot);
     for (auto& event : events)
-        if (field(event, "kind") == "waiting") event["data"] = waitView(Tasks::waitingEvent(event));
+        if (field(event, "kind") == "waiting") event["data"] = waitView(TaskHistory::waitingEvent(event));
     events = redactor.record(std::move(events), SecretRedactor::Fields::external);
     markdown::SensitiveText sensitive;
     if (!redactor.empty()) sensitive = [&](std::string_view text) { return redactor.containsProtectedText(text); };
@@ -512,7 +513,7 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
-    const auto tasks = Tasks(store).sessionTasks(bot, before, sessionsSize + 1);
+    const auto tasks = TaskHistory(store).sessionTasks(bot, before, sessionsSize + 1);
     Json result = {{"sessionTasks", Json::array()}, {"sessionsBefore", 0}};
     auto& page = result["sessionTasks"];
     for (const auto& task : tasks) {
@@ -534,7 +535,7 @@ Json sessionGroups(const std::vector<TaskView>& tasks) {
 Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, std::string_view viewer) {
     const auto id = field(bot, "id");
     auto result = conversation(store, id, 0, viewer);
-    const auto activeTasks = Tasks(store).activeTasks(id);
+    const auto activeTasks = TaskList(store).activeTasks(id);
     result.update(activity(activeTasks, id));
     if (changedSessionTasks) {
         result["sessionTasks"] = sessionGroups(*changedSessionTasks);

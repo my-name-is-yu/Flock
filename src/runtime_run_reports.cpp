@@ -16,8 +16,6 @@
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "journal_storage.hpp"
-#include "json_fields.hpp"
-#include "secret_storage.hpp"
 #include "task_events.hpp"
 
 #include <functional>
@@ -29,11 +27,11 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::RunReports::RunReports(Database& database, JournalStorage& journalStorage, SecretStorage& secretStorage,
-                                            TaskEvents& taskEvents, WorkflowStorage& workflowStorage, T3& t3, const Policy& policy,
-                                            TaskUpdates& updates, SessionHistory& history, const std::function<Seconds()>& clock)
-    : database(database), journalStorage(journalStorage), secretStorage(secretStorage), taskEvents(taskEvents),
-      workflowStorage(workflowStorage), t3(t3), policy(policy), updates(updates), history(history), clock(clock) {}
+Runtime::Components::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents,
+                                            WorkflowStorage& workflowStorage, T3& t3, const Policy& policy, TaskUpdates& updates,
+                                            SessionHistory& history, const std::function<Seconds()>& clock)
+    : database(database), journalStorage(journalStorage), taskEvents(taskEvents), workflowStorage(workflowStorage), t3(t3), policy(policy),
+      updates(updates), history(history), clock(clock) {}
 
 void Runtime::Components::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
@@ -58,7 +56,7 @@ RunEvidence Runtime::Components::RunReports::fetchRunEvidence(const TaskData& ta
         evidence.availability = RunEvidence::Availability::ReportUnavailable;
         evidence.detail = error.what();
     }
-    const auto scrub = secretStorage.redactor(task.botId);
+    const auto scrub = policy.secretRedactor(task.botId);
     evidence.report = scrub.text(evidence.report);
     evidence.detail = scrub.text(evidence.detail);
     if (scrub.text(evidence.itemId) != evidence.itemId) evidence.itemId.clear();

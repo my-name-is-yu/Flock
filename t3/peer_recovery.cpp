@@ -1,3 +1,5 @@
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "internal.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
@@ -81,7 +83,7 @@ int main(int argc, char** argv) {
                 check(http(origin + "/fixture", "POST", {{"Content-Type", "application/json"}}, body).status == 200,
                       "fixture rejected OAuth");
             });
-            Tasks(store).submit({"release", "Check the fixture", "env-1", "project"});
+            TaskIntake(store).submit({"release", "Check the fixture", "env-1", "project"});
         } else
             check(phase == "recover", "unknown recovery phase");
 
@@ -92,8 +94,8 @@ int main(int argc, char** argv) {
             if (bot == "release") return std::vector<PeerBot>{{"Verifier", {"verifier", "", "env-1", "project"}}};
             return std::vector<PeerBot>{};
         };
-        const Id source = Tasks(store).tasks("release").at(0).task.id;
-        const auto originalRecipients = Tasks(store).tasks("verifier");
+        const Id source = TaskList(store).tasks("release").at(0).task.id;
+        const auto originalRecipients = TaskList(store).tasks("verifier");
         if (phase == "recover") {
             check(Tasks(store).task(source).task.state == TaskState::peer_waiting && originalRecipients.size() == 1,
                   "the original Bot exchange did not survive the crash");
@@ -105,7 +107,7 @@ int main(int argc, char** argv) {
         for (int tick = 0; tick < 20; ++tick) runtime.tick();
         check(phase == "recover", "T3 sent back a response before the Runtime was killed");
 
-        const auto recipients = Tasks(store).tasks("verifier");
+        const auto recipients = TaskList(store).tasks("verifier");
         check(recipients.size() == 1 && originalRecipients.size() == 1 && recipients.at(0).task.id == originalRecipients.at(0).task.id,
               "recovery created a different recipient task");
         const auto& verifier = recipients.at(0);

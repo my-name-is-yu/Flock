@@ -2,7 +2,6 @@
 
 #include "database.hpp"
 #include "runtime_components.hpp"
-#include "task_records.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/task.hpp"
@@ -16,6 +15,7 @@
 namespace flockv0 {
 class JournalStorage;
 class TaskEvents;
+class TaskRecords;
 class WaitStorage;
 
 class Runtime::Components::TaskUpdates {
@@ -36,7 +36,7 @@ public:
     bool changeTask(Id id, const auto& update, TaskData* saved = nullptr) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        auto task = records.load(id);
+        auto task = loadTask(id);
         if (!update(task)) return false;
         saveTask(task);
         transaction.commit();
@@ -54,6 +54,8 @@ public:
             saved);
     }
 private:
+    TaskData loadTask(Id id);
+
     Database& database;
     JournalStorage& journal;
     TaskEvents& events;

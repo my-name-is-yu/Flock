@@ -19,7 +19,6 @@
 #include "flock/secrets.hpp"
 #include "git_storage.hpp"
 #include "journal_storage.hpp"
-#include "json_fields.hpp"
 #include "peer_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "secret_storage.hpp"

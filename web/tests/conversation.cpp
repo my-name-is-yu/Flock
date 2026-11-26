@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/peer_conversations.hpp"
@@ -360,9 +364,9 @@ void inspectors(const std::filesystem::path& path) {
     const auto routing = callbacks().intake("release", "");
     auto server = startWeb(store, 0, callbacks());
     Browser browser(*server);
-    model.boundary = Conversations(store).receive({"fixture", true}, routing, "a", "Original release instructions").at("messageId");
-    Conversations(store).receive({"fixture", true}, routing, "b", "Summarize");
-    Conversations(store).receive({"fixture", true}, routing, "c", "Release");
+    model.boundary = ConversationIntake(store).receive({"fixture", true}, routing, "a", "Original release instructions").at("messageId");
+    ConversationIntake(store).receive({"fixture", true}, routing, "b", "Summarize");
+    ConversationIntake(store).receive({"fixture", true}, routing, "c", "Release");
     runtime.runConversations();
     Policy policy{store};
     policy.submitSecret({"fixture", true}, "release", policy.requestSecret("release", {"inspector-token"}), model.credential);
@@ -494,12 +498,12 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     const auto page = browser.get("/api/view?bot=release");
     const auto asked = conversationReply(page, question.at("messageId"));
     check(asked.at("suggestions") == Json::array({"local-env", "backup"}) && page.at("pausedConversations").empty() &&
-              page.at("waits").empty() && Tasks(store).tasks().empty(),
+              page.at("waits").empty() && TaskList(store).tasks().empty(),
           "the Bot's question was not an ordinary message with its suggested replies");
     const auto receipt = send("choose-backup", "backup", asked.at("messageId"));
     tick(runtime, 4);
     const auto resolved = browser.get("/api/view?bot=release");
-    const auto tasks = Tasks(store).tasks("release");
+    const auto tasks = TaskList(store).tasks("release");
     check(tasks.size() == 1 && conversationReply(resolved, receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task",
           "the chosen destination did not create a Task");
     const auto& task = tasks.front();
@@ -569,7 +573,7 @@ void parallelVerificationInView(const std::filesystem::path& path) {
           "the saved Session row lost its active destination state or name");
     t3.localFinished = true;
     runtime.tick();
-    const auto saved = Tasks(store).tasks("release").at(0);
+    const auto saved = TaskList(store).tasks("release").at(0);
     const auto& prior = saved.task.runResults()[1];
     now = prior.deadline.value() + 1;
     runtime.tick();
@@ -622,7 +626,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto web = callbacks(&disableIntake);
     auto server = startWeb(store, 0, web);
     Browser browser(*server);
-    const auto taskId = Tasks(store).submit(web.intake("release", comparisonRequest));
+    const auto taskId = TaskIntake(store).submit(web.intake("release", comparisonRequest));
     tick(runtime, 3);
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions, .itemId = "comparison-report"};
@@ -643,7 +647,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").get<Id>();
     const auto since = "&changesAfter=" + std::to_string(cursor);
     check(receipt["status"] == "received" && messageId > 0, "conversation receipt was missing");
-    check(model.turns == 0 && Tasks(store).tasks().size() == 1, "HTTP intake ran the model before returning its receipt");
+    check(model.turns == 0 && TaskList(store).tasks().size() == 1, "HTTP intake ran the model before returning its receipt");
     disableIntake = true;
     check(browser.post("/api/messages", message, 201) == receipt, "retry did not recover its receipt with changed Bot settings");
     auto changed = message;
@@ -675,7 +679,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(response["route"] == "reply" && responseText.find("差分を先に集計する") != std::string::npos &&
               responseText.find("金額が変わった更新だけを人が確かめる") != std::string::npos && response["actions"].empty(),
           "answer did not explain the second option without changing work");
-    check(questions == 1 && answers == 1 && Tasks(store).tasks().size() == 1 && t3.launches == 1,
+    check(questions == 1 && answers == 1 && TaskList(store).tasks().size() == 1 && t3.launches == 1,
           "read-only conversation or retry created extra messages, Tasks or Runs");
     const auto& sessionTasks = page.at("sessionTasks");
     check(sessionTasks.size() == 1 && sessionTasks.at(0).at("id") == taskId && sessionTasks.at(0).at("sessions").size() == 1 &&
@@ -714,7 +718,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(summarized.at("route") == "reply" && summaryText.find("ID で明細の差分を集計") != std::string::npos &&
               summaryText.size() < model.summarySourceSize,
           "The summary did not condense the selected option");
-    check(model.explained == 1 && model.summarized == 1 && Tasks(store).tasks().size() == 1 && t3.launches == 1 &&
+    check(model.explained == 1 && model.summarized == 1 && TaskList(store).tasks().size() == 1 && t3.launches == 1 &&
               Tasks(store).task(taskId).runs == runs,
           "Two read-only answers added work or missed the model calls");
 
@@ -724,13 +728,13 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto estimatePage = browser.get("/api/view?bot=release");
     const auto estimateReply = conversationReply(estimatePage, estimate.at("messageId"));
     check(estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" && estimatePage.at("pausedConversations").empty() &&
-              estimatePage.at("waits").empty() && Tasks(store).tasks().size() == 1,
+              estimatePage.at("waits").empty() && TaskList(store).tasks().size() == 1,
           "the Bot's question left pending state or started work");
     const auto detail =
         browser.post("/api/messages", {{"botId", "release"}, {"clientMessageId", "estimate-detail"}, {"text", budgetDetail}}, 201);
     runtime.runConversations();
     const auto estimateAnswer = conversationReply(browser.get("/api/view?bot=release"), detail.at("messageId"));
-    check(estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos && Tasks(store).tasks().size() == 1 &&
+    check(estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos && TaskList(store).tasks().size() == 1 &&
               t3.launches == 1 && Tasks(store).task(taskId).runs == runs,
           "the follow-up answer created work or lost the context");
 
@@ -740,11 +744,11 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto statusReply = conversationReply(browser.get("/api/view?bot=release"), statusReceipt.at("messageId"));
     const auto statusReplyText = statusReply.at("text").get<std::string>();
     check(statusReplyText.find(comparisonRequest) != std::string::npos && statusReplyText.find("完了") != std::string::npos &&
-              Tasks(store).tasks().size() == 1 && t3.launches == 1,
+              TaskList(store).tasks().size() == 1 && t3.launches == 1,
           "progress inquiry with changed settings failed to report completion without creating work");
     disableIntake = false;
-    const auto firstWaitTask = Tasks(store).submit(web.intake("triage", "掲載する範囲を決める"));
-    const auto secondWaitTask = Tasks(store).submit({"triage", "次回の掲載範囲を決める", "linked env", "next-scope"});
+    const auto firstWaitTask = TaskIntake(store).submit(web.intake("triage", "掲載する範囲を決める"));
+    const auto secondWaitTask = TaskIntake(store).submit({"triage", "次回の掲載範囲を決める", "linked env", "next-scope"});
     tick(runtime, 3);
     t3.observations["thread-triage"] = {.kind = Observation::Kind::Question, .question = {"scope-question", {{.id = "scope"}}}};
     t3.observations["thread-next-scope"] = t3.observations.at("thread-triage");
@@ -789,7 +793,7 @@ void conversationEntry(const std::filesystem::path& path) {
           "T3 did not receive exactly one matching answer for the original question");
     const auto& waits = afterAnswer.at("waits");
     check(waits.size() == 1 && waits[0]["id"] == secondWaitTask && waits[0]["wait"]["messageId"] == otherQuestion &&
-              waits[0]["wait"]["reason"] == "user_question" && Tasks(store).tasks().size() == 3,
+              waits[0]["wait"]["reason"] == "user_question" && TaskList(store).tasks().size() == 3,
           "The freeform or stale answer changed another wait or created a task");
 
     const auto choice = browser.post(
@@ -884,11 +888,11 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     const auto hello = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "hello"}, {"text", greeting}}, 201);
     runtime.runConversations();
     check(conversationReply(browser.get("/api/view?bot=ernest"), hello.at("messageId")).at("text") == greetingReply &&
-              Tasks(store).tasks().empty() && browser.get(dm).at("messages").empty(),
+              TaskList(store).tasks().empty() && browser.get(dm).at("messages").empty(),
           "ordinary user chat forwarded without a Bot decision");
 
     const auto receipt = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "rollout"}, {"text", request}}, 201);
-    check(Tasks(store).tasks().empty() && browser.get(dm).at("messages").empty(), "HTTP intake started a Bot-to-Bot exchange");
+    check(TaskList(store).tasks().empty() && browser.get(dm).at("messages").empty(), "HTTP intake started a Bot-to-Bot exchange");
     const auto received = browser.get("/api/view?bot=ernest").at("events");
     const auto userMessage = std::ranges::find_if(received, [&](const Json& event) {
         return event.at("id") == receipt.at("messageId") && event.at("kind") == "conversation_message";
@@ -898,14 +902,15 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     original = {{"text", userMessage->at("data").at("text")}, {"time", userMessage->at("time")}};
     runtime.runConversations();
     check(conversationReply(browser.get("/api/view?bot=ernest"), receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task" &&
-              Tasks(store).tasks("ernest").size() == 1 && Tasks(store).tasks("reviewer").empty() && browser.get(dm).at("messages").empty(),
+              TaskList(store).tasks("ernest").size() == 1 && TaskList(store).tasks("reviewer").empty() &&
+              browser.get(dm).at("messages").empty(),
           "the user's request bypassed Ernest's decision and contacted Reviewer");
 
     tick(runtime, 8);
     if (access == PeerAccess::paused) {
-        const auto sender = Tasks(store).tasks("ernest").at(0).task.id;
-        check(Tasks(store).tasks("reviewer").empty() && browser.get(dm).at("messages").empty() &&
-                  Tasks(store).history(sender).dump().find(botPausedMessage) != std::string::npos,
+        const auto sender = TaskList(store).tasks("ernest").at(0).task.id;
+        check(TaskList(store).tasks("reviewer").empty() && browser.get(dm).at("messages").empty() &&
+                  TaskHistory(store).history(sender).dump().find(botPausedMessage) != std::string::npos,
               "a paused peer accepted a consultation or gave the requesting Bot no reason");
         return;
     }
@@ -990,7 +995,7 @@ void fullModeProfiles(const std::filesystem::path& directory) {
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; }, options);
     const auto send = [&](std::string_view operation, std::string_view name) {
         model.change = {"request_bot_change", {{"operation", operation}, {"targetBotId", "reviewer"}, {"name", name}}, ""};
-        Conversations(store).receive(creator, {"release", "", "local-env", "release"}, name, name);
+        ConversationIntake(store).receive(creator, {"release", "", "local-env", "release"}, name, name);
         runtime.runConversations();
     };
     send("create_bot", "Review team");
@@ -1193,9 +1198,9 @@ void chatGPTConversation(const std::filesystem::path& home) {
     };
 
     const auto request = send("blockers", blockers);
-    check(Tasks(store).tasks().empty(), "composer created a Task before the Bot's turn");
+    check(TaskList(store).tasks().empty(), "composer created a Task before the Bot's turn");
     advance(5);
-    check(conversationReply(view(), request).at("actions").at(0).at("tool") == "start_task" && Tasks(store).tasks().size() == 1,
+    check(conversationReply(view(), request).at("actions").at(0).at("tool") == "start_task" && TaskList(store).tasks().size() == 1,
           "ordinary composer request did not create exactly one Task");
     const auto releaseTask = linkedTask(request);
     check(Tasks(store).task(releaseTask).task.state == TaskState::running && t3.launches == 1, "the Task did not start one Run");
@@ -1219,7 +1224,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto clarification = conversationReply(view(), missing);
     check(clarification.at("text") == "What is the planned certificate renewal date?",
           "missing evidence did not produce a question for the user");
-    check(Tasks(store).tasks().size() == 1 && t3.launches == 1 && Tasks(store).task(releaseTask).runs == completed.runs,
+    check(TaskList(store).tasks().size() == 1 && t3.launches == 1 && Tasks(store).task(releaseTask).runs == completed.runs,
           "result follow-ups created a Task or changed Runs");
 
     const auto consult = send("consult-verifier", consultation);
@@ -1237,7 +1242,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
               incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
               incoming.at("text") == consultationReply,
           "Verifier's reply did not return to its original exchange");
-    check(Tasks(store).task(consultTask).task.state == TaskState::completed && Tasks(store).tasks("verifier").size() == 1 &&
+    check(Tasks(store).task(consultTask).task.state == TaskState::completed && TaskList(store).tasks("verifier").size() == 1 &&
               t3.launches == 1,
           "the originating Task did not resume after the consultation");
 
@@ -1257,7 +1262,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
         firstTask.task.state == TaskState::running && secondTask.task.state == TaskState::running && active.size() == 2 && t3.launches == 3,
         "ambiguous-stop fixture requires two active Runs: " + std::string(taskStateName(firstTask.task.state)) + ", " +
             std::string(taskStateName(secondTask.task.state)) + ", active=" + active.dump() + ", launches=" + std::to_string(t3.launches));
-    const auto taskCount = Tasks(store).tasks().size();
+    const auto taskCount = TaskList(store).tasks().size();
     const auto stop = send("stop", "それ止めて");
     advance(3);
     const auto afterStop = view();
@@ -1267,7 +1272,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
               std::ranges::all_of(active,
                                   [&](const Json& run) { return std::ranges::find(suggestions, run.at("request")) != suggestions.end(); }),
           "ambiguous stop did not ask the user to choose between both running tasks");
-    check(afterStop.at("activeSessions") == active && Tasks(store).tasks().size() == taskCount && t3.launches == 3 &&
+    check(afterStop.at("activeSessions") == active && TaskList(store).tasks().size() == taskCount && t3.launches == 3 &&
               Tasks(store).task(firstTask.task.id).runs == firstTask.runs &&
               Tasks(store).task(secondTask.task.id).runs == secondTask.runs && t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");
@@ -1378,7 +1383,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto adjacentRequest = policy.requestSecret("staging-triage", {"renderer-adjacent"});
     const auto formRequest = policy.requestSecret("staging-triage", {"renderer-form"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
-        return Conversations(store)
+        return ConversationIntake(store)
             .receive(owner, {std::string(bot), "unused", "local-env", "fixture"}, clientId, text)
             .at("messageId")
             .get<Id>();
@@ -1526,7 +1531,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
         intake.config["modelCallLimit"] = 2;
         return intake;
     };
-    const auto task = Tasks(*store).submit(webCallbacks.intake("release", comparisonRequest));
+    const auto task = TaskIntake(*store).submit(webCallbacks.intake("release", comparisonRequest));
     auto server = startWeb(webStore, 0, std::move(webCallbacks));
     Browser browser(*server);
     tick(*runtime, 3);
@@ -1583,7 +1588,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     const auto& answer = resumed.at("events").back().at("data");
     check(resumed.at("pausedConversations").empty() && answer.at("route") == "reply" &&
               answer.at("replyToMessageId") == receipt.at("messageId") && model.turns == 4 && model.explained == 1 &&
-              model.summarized == 1 && Tasks(*store).tasks().size() == 1 && t3.launches == 1,
+              model.summarized == 1 && TaskList(*store).tasks().size() == 1 && t3.launches == 1,
           "approval did not resume the unfinished turn from its saved steps");
 }
 
@@ -1655,7 +1660,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
         runtime.runConversations();
         pauses = browser.get(view).at("pausedConversations");
-        const auto tasks = Tasks(store).tasks();
+        const auto tasks = TaskList(store).tasks();
         check(pauses.size() == 2 && tasks.size() == 1, "Fixture did not pause two turns after creating one task");
         taskFromDemotedTurn = tasks.front().task.id;
 
@@ -1664,7 +1669,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         retainedQueue = send(browser, retained, "Queued retained root");
         memberQueue = send(browser, memberCredential, "Queued demoted root with Bot membership");
         mixedQueue = send(browser, alternate, "Queued mixed credential roles");
-        trustedQueue = Conversations(store)
+        trustedQueue = ConversationIntake(store)
                            .receive(localOwner, {"release", "", "local-env", "release"}, "local", "Trusted local owner")
                            .at("messageId");
     }
@@ -1705,7 +1710,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                                                 "Queued demoted root with Bot membership",
                                                 "Trusted local owner",
                                                 "Trusted local owner"};
-        check(model.inputs == expected && Tasks(store).tasks().size() == 4 && page.at("pausedConversations").empty(),
+        check(model.inputs == expected && TaskList(store).tasks().size() == 4 && page.at("pausedConversations").empty(),
               "Access changes delivered model context or ran work for a revoked actor");
         check(!model.leakedCredential && page.dump().find("Bearer fixture-") == std::string::npos,
               "Web credentials entered a model request or conversation output");
@@ -1718,7 +1723,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         runtime.runConversations();
         const auto denied = conversationReply(browser.get(view), racing);
         check(model.inputs.back() == "Demoted during model call" && denied.at("route") == "access" && denied.at("actions").empty() &&
-                  Tasks(store).tasks().size() == 4,
+                  TaskList(store).tasks().size() == 4,
               "Revoked authority survived the pre-effect check");
         tick(runtime, 3);
         check(t3.launches == 1 && Tasks(store).task(taskFromDemotedTurn).task.state == TaskState::running,
@@ -1821,10 +1826,10 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
     const auto accepted = send(webhook("event-1", "main")), replayed = send(webhook("event-1", "main"));
     check(accepted.at("duplicate") == false && replayed.at("duplicate") == true && accepted.at("tasks").size() == 1 &&
-              replayed.at("tasks") == accepted.at("tasks") && Tasks(store).tasks().size() == 1,
+              replayed.at("tasks") == accepted.at("tasks") && TaskList(store).tasks().size() == 1,
           "Webhook redelivery enqueued another task");
     Automations(store).fireDueAutomations(cb.clock() + 60);
-    check(Tasks(store).tasks().size() == 1, "Canceled reminder fired after its due time");
+    check(TaskList(store).tasks().size() == 1, "Canceled reminder fired after its due time");
     const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
     check(request.at("trigger").at("source") == "deploy" && request.at("trigger").at("triggerId") == trigger &&
               !request.at("trigger").contains("externalEventId"),

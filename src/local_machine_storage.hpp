@@ -15,7 +15,6 @@ namespace flockv0 {
 class Database;
 class LocalMachine;
 class Policy;
-class SecretStorage;
 class TaskRecords;
 struct Decision;
 struct Person;
@@ -24,9 +23,8 @@ struct WebIdentityState;
 
 class LocalMachineStorage {
 public:
-    LocalMachineStorage(Database& database, const Policy& permissions, const SecretStorage& secretStorage,
-                        const WebIdentityState& webIdentity, const TaskRecords& taskRecords)
-        : database(database), permissions(permissions), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords) {}
+    LocalMachineStorage(Database& database, const Policy& permissions, const WebIdentityState& webIdentity, const TaskRecords& taskRecords)
+        : database(database), permissions(permissions), webIdentity(webIdentity), taskRecords(taskRecords) {}
 
     void setRootPeople(std::vector<std::string> ids);
     void setWebOrigin(std::string origin);
@@ -44,7 +42,6 @@ private:
 
     Database& database;
     const Policy& permissions;
-    const SecretStorage& secretStorage;
     const WebIdentityState& webIdentity;
     const TaskRecords& taskRecords;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;

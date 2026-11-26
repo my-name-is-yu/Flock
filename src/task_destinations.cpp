@@ -1,6 +1,5 @@
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
-#include "secret_storage.hpp"
 #include "peer_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/t3.hpp"
@@ -50,7 +49,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std
         return "Flock cannot use this T3 environment under the current permissions.";
     try {
         auto projects = t3.projects(environment);
-        const auto scrub = secretStorage.redactor(bot);
+        const auto scrub = permissions.secretRedactor(bot);
         std::erase_if(projects, [&](const T3Project& project) { return scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
@@ -119,7 +118,7 @@ bool TaskRouting::applyProjectCatalog(TaskData& task, ProjectCatalog catalog) {
         return true;
     }
     if (projectQuestionOpen(bot, environment)) return false;
-    waitStorage.wait(task, projectQuestion(projects, secretStorage.redactor(bot)),
+    waitStorage.wait(task, projectQuestion(projects, permissions.secretRedactor(bot)),
                      "Which T3 project should this Bot use in this environment?");
     return true;
 }

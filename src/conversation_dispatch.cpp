@@ -18,7 +18,6 @@
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/decision.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"

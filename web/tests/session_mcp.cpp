@@ -1,3 +1,7 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
+#include "flock/web_conversation_intake.hpp"
 #include "http_fixture.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/identity.hpp"
@@ -255,7 +259,7 @@ void stopDuringSendDispatch() {
               t3.cancelled == std::vector<std::string>{"in-flight-run"},
           "Stop committed before recording and cancelling the in-flight Run");
 
-    Conversations(store).receive(localOwner, cb.intake("release", ""), "after-wire-race", "Send another update");
+    ConversationIntake(store).receive(localOwner, cb.intake("release", ""), "after-wire-race", "Send another update");
     runtime.runConversations();
     check(t3.sends == 1 && model.wakes == 0 && model.send.at("error") == "This Bot's participation in the Session has stopped",
           "A send or wake passed the committed stop");
@@ -462,9 +466,9 @@ void webSendParticipation() {
         if (id == alice.id || id == admin.id) return true;
         return {};
     });
-    Conversations(store).receiveWeb(admin, cb.intake("release", ""), "admin-send", "Post as admin.");
+    WebConversationIntake(store).receiveWeb(admin, cb.intake("release", ""), "admin-send", "Post as admin.");
     runtime.runConversations();
-    Conversations(store).receiveWeb(admin, cb.intake("release", ""), "admin-leave", "Leave as admin.");
+    WebConversationIntake(store).receiveWeb(admin, cb.intake("release", ""), "admin-leave", "Leave as admin.");
     runtime.runConversations();
     check(t3.sends == 2 && model.leave.value("ok", false) && model.leave.at("cancelled") == 1 &&
               t3.cancelled.back() == "admin-thread/web-send-run",
@@ -655,7 +659,7 @@ void sessionInvitations() {
 
     const auto reject = [&](const char* request, const char* recipient, std::string_view error) {
         model.target = recipient;
-        Conversations(store).receiveWeb(bob, cb.intake("release", ""), request, "Try another invitation.");
+        WebConversationIntake(store).receiveWeb(bob, cb.intake("release", ""), request, "Try another invitation.");
         runtime->runConversations();
         check(model.receipts.at("Release Bot") == Json{{"ok", false}, {"error", error}},
               "Unexpected invitation result: " + model.receipts.at("Release Bot").dump());
@@ -937,11 +941,11 @@ void stopSelectedTaskAndConsultation() {
                     {.peers = [](std::string_view) { return std::vector{peer("triage")}; }});
     auto blockingIntake = peer("triage").intake;
     blockingIntake.request = "Hold the peer's project slot.";
-    const auto blocker = Tasks(store).submit(blockingIntake);
+    const auto blocker = TaskIntake(store).submit(blockingIntake);
     const auto start = [&](const char* key, const char* text) -> Id {
         mcp.call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", key}, {"text", text}}).at("structuredContent");
         runtime.runConversations();
-        return Tasks(store).tasks("release").front().task.id;
+        return TaskList(store).tasks("release").front().task.id;
     };
     const auto selected = start("queued-task", "Work in the selected Session.");
     const auto sender = start("consult", "Consult a peer.");
@@ -1023,7 +1027,7 @@ void inviteIntoPeerLaunch() {
     });
     const auto invite = [&](const Person& actor, const char* id) {
         connector.connect("env-1", actor.id, 4173);
-        Conversations(store).receiveWeb(actor, cb.intake("triage", ""), id, "Invite the verifier.");
+        WebConversationIntake(store).receiveWeb(actor, cb.intake("triage", ""), id, "Invite the verifier.");
         runtime.runConversations();
     };
     invite(other, "foreign-peer-launch");
@@ -1250,7 +1254,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     server = startWeb(*db, 0, cb);
     runtime = std::make_unique<Runtime>(*db, model, *t3, soul, options);
     // Simulate a non-Session-origin wake that was already queued for a model turn.
-    const auto queuedWake = Conversations(*db).receive(localOwner, cb.intake("release", ""), "queued-before-stop", "Pending wake");
+    const auto queuedWake = ConversationIntake(*db).receive(localOwner, cb.intake("release", ""), "queued-before-stop", "Pending wake");
     const auto markWake = "UPDATE messages SET routing=json_set(routing,'$.sessionWake',json_object("
                           "'environmentId','env-1','threadId','thread','reason','finished')) WHERE id=" +
                           std::to_string(queuedWake.at("messageId").get<Id>());
@@ -1309,7 +1313,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
               effects().at("t3_queue").back() == cancel("bot-run-4") && effects().at("t3_queue").size() == 5 &&
               !effects().contains("t3_thread_interrupt") && runs().at("person-queued") == "queued",
           "leave_session did not perform and report the same stop as flock_stop");
-    Conversations(*db).receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
+    ConversationIntake(*db).receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
     runtime->runConversations();
     auto sharedTools = model.ask.webTools;
     check(std::erase(sharedTools, "review_preference") == 1 && sharedTools == model.ask.sessionTools,

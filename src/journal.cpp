@@ -229,9 +229,4 @@ Id JournalStorage::journalInterrupt(Id task, const ConversationInterruptEntry& e
                                  {.run = &entry.run.ref, .environmentId = entry.run.environmentId});
 }
 
-Id JournalStorage::journal(Id id, std::string_view kind, const Json& data) {
-    database.exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
-    return database.last();
-}
-
 }

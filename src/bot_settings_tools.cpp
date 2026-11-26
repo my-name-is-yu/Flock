@@ -1,4 +1,3 @@
-#include "json_fields.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/policy.hpp"
 #include "task_routing.hpp"

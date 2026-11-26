@@ -111,6 +111,7 @@ public:
     Id dataVersion() const;
     std::pair<Id, Id> changeStamp() const;
     Id last() const;
+    Id writeJournal(Id task, std::string_view kind, const Json&);
     Id writeJournal(std::optional<Id>, JournalKind, const Json&, const JournalKeys&, std::optional<std::string_view> conversationBot = {});
 
     sqlite3* db = nullptr;

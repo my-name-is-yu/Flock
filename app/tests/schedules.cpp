@@ -1,3 +1,4 @@
+#include "flock/task_list.hpp"
 #include "fixtures.hpp"
 #include "../bots.hpp"
 #include "flock/tasks.hpp"
@@ -73,10 +74,10 @@ void cronIntakeAndRestart() {
         Store store(db);
         bots.syncSchedules(store, utc(2026, 3, 8, 6, 0), report);
         Automations(store).fireDueAutomations(utc(2026, 3, 8, 9, 0));
-        check(Tasks(store).tasks().empty(), "nonexistent spring local time was submitted");
+        check(TaskList(store).tasks().empty(), "nonexistent spring local time was submitted");
         Automations(store).fireDueAutomations(utc(2026, 11, 1, 5, 30));
         Automations(store).fireDueAutomations(utc(2026, 11, 1, 6, 30));
-        const auto tasks = Tasks(store).tasks();
+        const auto tasks = TaskList(store).tasks();
         check(tasks.size() == 2, "both fall-back instants should submit exactly once");
         check(std::get<TimedTaskTrigger>(tasks[0].task.trigger.value().details).targetTime == utc(2026, 11, 1, 6, 30) &&
                   std::get<TimedTaskTrigger>(tasks[1].task.trigger.value().details).targetTime == utc(2026, 11, 1, 5, 30),
@@ -87,9 +88,9 @@ void cronIntakeAndRestart() {
         Store store(db);
         bots.syncSchedules(store, utc(2026, 11, 1, 6, 30), report);
         Automations(store).fireDueAutomations(utc(2026, 11, 1, 6, 30));
-        check(Tasks(store).tasks().size() == 2, "duplicate scheduled UTC instant registered after restart");
+        check(TaskList(store).tasks().size() == 2, "duplicate scheduled UTC instant registered after restart");
         Automations(store).fireDueAutomations(utc(2027, 11, 1, 5, 35));
-        check(Tasks(store).tasks().size() == 4, "configured schedules did not retain their due time across restart");
+        check(TaskList(store).tasks().size() == 4, "configured schedules did not retain their due time across restart");
     }
 }
 
@@ -120,8 +121,8 @@ void invalidSessionSettingsPreserveDueTimes() {
     Store store(database);
     bots.syncSchedules(store, due + 3600, report);
     Automations(store).fireDueAutomations(due + 3600);
-    check(Tasks(store).tasks("release").size() == 1 &&
-              std::get<TimedTaskTrigger>(Tasks(store).tasks("release").at(0).task.trigger.value().details).targetTime == due,
+    check(TaskList(store).tasks("release").size() == 1 &&
+              std::get<TimedTaskTrigger>(TaskList(store).tasks("release").at(0).task.trigger.value().details).targetTime == due,
           "invalid Session settings erased the original scheduled occurrence");
 }
 
@@ -150,14 +151,14 @@ void configuredScheduleLifecycle() {
     write(folder / "config.json", config.dump());
     sync(next);
     Automations(store).fireDueAutomations(next);
-    check(errors.size() == 1 && schedule().at("status") == "inactive" && Tasks(store).tasks().empty(),
+    check(errors.size() == 1 && schedule().at("status") == "inactive" && TaskList(store).tasks().empty(),
           "invalid configuration left its previously stored route active");
 
     config["projectId"] = "repaired-project";
     write(folder / "config.json", config.dump());
     sync(next);
     Automations(store).fireDueAutomations(next);
-    check(Tasks(store).tasks("release").size() == 1 && Tasks(store).tasks("release").at(0).task.projectId == "repaired-project",
+    check(TaskList(store).tasks("release").size() == 1 && TaskList(store).tasks("release").at(0).task.projectId == "repaired-project",
           "repaired config did not restore the schedule's identity and route");
 
     config["cron"] = Json::array();
@@ -168,7 +169,7 @@ void configuredScheduleLifecycle() {
     write(folder / "config.json", config.dump());
     sync(next);
     Automations(store).fireDueAutomations(next);
-    check(schedule().at("id") == id && schedule().at("status") == "active" && Tasks(store).tasks().size() == 1,
+    check(schedule().at("id") == id && schedule().at("status") == "active" && TaskList(store).tasks().size() == 1,
           "reintroduced configuration duplicated a firing or lost its schedule ID");
     Automations(store).cancelAutomation(owner, "release", id);
     sync(next);
@@ -185,7 +186,7 @@ void configuredScheduleLifecycle() {
     Automations(store).fireDueAutomations(next + 1);
     rejects<AccessDenied>([&] { Automations(store).receiveWebhook(owner, "deploy", "event-1", Json::object(), next + 1); },
                           "webhook was delivered for a removed Bot");
-    check(Tasks(store).tasks().size() == 1, "automation for a removed Bot queued work");
+    check(TaskList(store).tasks().size() == 1, "automation for a removed Bot queued work");
 }
 
 void runSettingsChangesResyncConfiguredSchedules() {
@@ -249,7 +250,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
               allowance.at("projectId") == "new-project",
           "saving the allowance changed the model, effort or destination");
     Automations(store).fireDueAutomations(due + 1);
-    const auto tasks = Tasks(store).tasks("release");
+    const auto tasks = TaskList(store).tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.environmentId == "new-environment" && tasks.at(0).task.projectId == "new-project" &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).targetTime == due,
           "workspace save lost the due time, kept the old route, or restored a canceled schedule");
@@ -266,7 +267,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
               cleared.at("projectId") == "new-project" && errors.size() == 1,
           "clearing the model left configuration behind or changed the destination");
     Automations(store).fireDueAutomations(due + 86400);
-    check(Tasks(store).tasks("release").size() == 1, "a configured schedule fired after its model was cleared");
+    check(TaskList(store).tasks("release").size() == 1, "a configured schedule fired after its model was cleared");
     rejects<BotProfileError>([&] { bots.updateRunSettings(store, "release", {{"reasoningEffort", "low"}}, due + 86400, report); },
                              "a Bot saved an effort without a model");
     bots.updateRunSettings(store, "release", {{"model", "next-model"}}, due + 86400, report);
@@ -275,7 +276,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(!unplaced.contains("projectId") && unplaced.at("environmentId") == "new-environment" && errors.size() == 2,
           "clearing the project changed the environment or silently kept configured schedules active");
     Automations(store).fireDueAutomations(due + 2 * 86400);
-    check(Tasks(store).tasks("release").size() == 1, "a configured schedule fired after its destination was cleared");
+    check(TaskList(store).tasks("release").size() == 1, "a configured schedule fired after its destination was cleared");
 }
 
 void automationFiringsUseCurrentPlannerSettings() {
@@ -303,7 +304,7 @@ void automationFiringsUseCurrentPlannerSettings() {
         firstDue - 60);
 
     Automations(store).fireDueAutomations(firstDue);
-    const auto previousTask = Tasks(store).tasks("release").at(0).task.id;
+    const auto previousTask = TaskList(store).tasks("release").at(0).task.id;
     const auto report = [](std::string_view, std::string_view error) { throw std::runtime_error(std::string(error)); };
     bots.updateRunSettings(store, "release",
                            {{"model", "current-model"},
@@ -314,7 +315,7 @@ void automationFiringsUseCurrentPlannerSettings() {
                            firstDue, report);
 
     Automations(store).fireDueAutomations(nextDue);
-    const auto recurring = Tasks(store).tasks("release").at(0).task;
+    const auto recurring = TaskList(store).tasks("release").at(0).task;
     check(recurring.trigger.value().id == schedule.at("id").get<Id>() &&
               std::get<TimedTaskTrigger>(recurring.trigger.value().details).targetTime == nextDue,
           "model change lost the next scheduled occurrence");
@@ -344,7 +345,7 @@ void automationFiringsUseCurrentPlannerSettings() {
     bots.updateRunSettings(store, "release", {{"reasoningEffort", ""}}, nextDue, report);
     Automations(store).fireDueAutomations(defaultDue);
     currentConfig.erase("reasoningEffort");
-    checkTask(Tasks(store).tasks("release").at(0).task.id, currentConfig);
+    checkTask(TaskList(store).tasks("release").at(0).task.id, currentConfig);
 
     write(folder / "config.json", botConfig("current-model").dump());
     const auto reset = Automations(store).receiveWebhook(owner, "deploy", "event-2", {{"branch", "main"}}, defaultDue);
@@ -354,7 +355,7 @@ void automationFiringsUseCurrentPlannerSettings() {
     const auto fallbackDue = utc(2026, 1, 5, 0, 0);
     write(folder / "config.json", "invalid");
     Automations(store).fireDueAutomations(fallbackDue);
-    const auto fallback = Tasks(store).tasks("release").at(0).task;
+    const auto fallback = TaskList(store).tasks("release").at(0).task;
     check(std::get<TimedTaskTrigger>(fallback.trigger.value().details).targetTime == fallbackDue,
           "unreadable Bot settings prevented the saved automation from firing");
     checkTask(fallback.id, saved.config);
@@ -389,7 +390,7 @@ void unreadableProfileKeepsAutomationDelivery() {
           "both Bots must receive one copy of the webhook");
     for (const auto id : {"release", "triage"}) {
         const bool unavailable = std::string_view(id) == "release";
-        const auto tasks = Tasks(store).tasks(id);
+        const auto tasks = TaskList(store).tasks(id);
         check(tasks.size() == 2 && tasks.at(0).task.request == "Deploy check" && tasks.at(1).task.request == "Daily check",
               "both Bots must receive one task per automation");
         for (const auto& task : tasks) {
@@ -429,7 +430,7 @@ BEGIN SELECT RAISE(ABORT,'schedule write rejected'); END;
     rejects<std::runtime_error>([&] { bots.updateRunSettings(store, "release", {{"projectId", "next-project"}}, due, report); },
                                 "workspace save succeeded after the schedule write failed");
     Automations(store).fireDueAutomations(due);
-    const auto tasks = Tasks(store).tasks("release");
+    const auto tasks = TaskList(store).tasks("release");
     const auto& project = config.at("projectId").get_ref<const std::string&>();
     check(tasks.size() == 1 && tasks.front().task.projectId == project && bots.get("release").projectId == project,
           "a failed schedule update published a destination that did not match the due task");
@@ -472,7 +473,7 @@ void invalidEntriesPreserveDueSchedule() {
               schedules.at(2).at("status") == "active" && schedules.at(2).at("nextRunAt") == firstDue,
           "Invalid cron edits disturbed the valid sibling's saved run time");
     Automations(store).fireDueAutomations(now);
-    const auto tasks = Tasks(store).tasks("release");
+    const auto tasks = TaskList(store).tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.request == "Daily check" &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).coveredFrom == firstDue &&
               std::get<TimedTaskTrigger>(tasks.at(0).task.trigger.value().details).occurrenceCount == 3,
@@ -513,7 +514,7 @@ void malformedDuplicatesDeactivateSchedules() {
               schedules.at(1).at("nextRunAt").is_null(),
           "A malformed duplicate left the previously configured schedule active");
     Automations(store).fireDueAutomations(due);
-    const auto tasks = Tasks(store).tasks("release");
+    const auto tasks = TaskList(store).tasks("release");
     check(tasks.size() == 1 && tasks.at(0).task.request == "Weekly check", "The unrelated schedule did not fire on restart");
 }
 }

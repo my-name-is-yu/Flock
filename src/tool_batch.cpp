@@ -1,9 +1,9 @@
 #include "tool_batch.hpp"
 #include "flock/types.hpp"
 #include "flock/decision.hpp"
-#include "json_fields.hpp"
 #include "flock/git_host.hpp"
 #include "workspace_internal.hpp"
+#include "flock/json.hpp"
 
 #include <algorithm>
 #include <cstddef>

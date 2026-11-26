@@ -118,7 +118,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
                     reports.writeRunReport(task, report);
             }
             if (task.runStop) {
-                journalStorage.journal(task.id, "interrupt_settled", runStopJson(*task.runStop));
+                database.writeJournal(task.id, "interrupt_settled", runStopJson(*task.runStop));
                 task.runStop.reset();
             }
             if (state == TaskState::cancelling)
@@ -163,7 +163,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
             taskEvents.event(task, "question/" + task.environmentId + "/" + run.threadId + "/" + observed.question.requestId, data);
             task.question =
                 TaskQuestion{observed.question.fields, {std::nullopt, task.eventId, taskWaitRun(task), observed.question.requestId}};
-            journalStorage.journal(task.id, "session_question", data);
+            database.writeJournal(task.id, "session_question", data);
             task.state = TaskState::deciding;
             return true;
         }
@@ -301,12 +301,12 @@ void Runtime::Components::RunObserver::finishReplan(const TaskData& task) {
                 current.gatewayEnvironmentId = destination->route.gatewayEnvironmentId;
             current.newSessionRequired = true;
             current.selectedSession.reset();
-            journalStorage.journal(id, "session_destination_changed",
-                                   {{"from", oldEnvironment},
-                                    {"to", destination->route.environmentId},
-                                    {"fromProject", oldProject},
-                                    {"toProject", current.projectId},
-                                    {"revisionId", revisionJson(current.currentRevision)}});
+            database.writeJournal(id, "session_destination_changed",
+                                  {{"from", oldEnvironment},
+                                   {"to", destination->route.environmentId},
+                                   {"fromProject", oldProject},
+                                   {"toProject", current.projectId},
+                                   {"revisionId", revisionJson(current.currentRevision)}});
         }
         if (destination && (destination->pinned || destination->route.projectId.empty())) current.pendingDestination.reset();
         questions.closeQuestion(current, "user_instruction");
@@ -333,8 +333,8 @@ void Runtime::Components::RunObserver::stopNote(const TaskData& snapshot, const 
         auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;
         if (saved == detail) return false;
         saved = detail;
-        journalStorage.journal(task.id, cancel ? "cancelling" : "replanning",
-                               {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
+        database.writeJournal(task.id, cancel ? "cancelling" : "replanning",
+                              {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
         return true;
     });
 }

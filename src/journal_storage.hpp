@@ -35,7 +35,6 @@ class JournalStorage {
 public:
     JournalStorage(Database& database, ChannelStorage& channelStorage) : database(database), channelStorage(channelStorage) {}
 
-    Id journal(Id, std::string_view kind, const Json&);
     Id journal(Id, const Wait&);
     Id journal(Id, const CompletionEntry&);
     Id journal(Id, const ToolErrorEntry&);

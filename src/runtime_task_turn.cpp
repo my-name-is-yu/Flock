@@ -27,7 +27,6 @@
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "git_storage.hpp"
-#include "journal_storage.hpp"
 #include "model_calls.hpp"
 #include "peer_storage.hpp"
 #include "secret_storage.hpp"
@@ -50,18 +49,17 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-Runtime::Components::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, JournalStorage& journalStorage, ModelCalls& modelCalls,
-                                        PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
-                                        TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-                                        MemoryStorage& memoryStorage, Model& model, const SoulLoader& soul,
-                                        const std::function<Seconds()>& clock, GitHost* gitHost, const std::string& sessionRead,
-                                        std::stop_token stop, TaskUpdates& updates, RunReports& reports, SessionHistory& sessionHistory,
-                                        PeerExchanges& peerExchanges, RunObserver& runs, SessionPrompts& prompts, TaskDecisions& decisions)
-    : database(database), gitStorage(gitStorage), journalStorage(journalStorage), modelCalls(modelCalls), peerStorage(peerStorage),
-      secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage),
-      memoryStorage(memoryStorage), model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead),
-      stop(std::move(stop)), updates(updates), reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs),
-      prompts(prompts), decisions(decisions) {}
+Runtime::Components::TaskTurn::TaskTurn(Database& database, GitStorage& gitStorage, ModelCalls& modelCalls, PeerStorage& peerStorage,
+                                        SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
+                                        TaskRouting& taskRouting, WaitStorage& waitStorage, MemoryStorage& memoryStorage, Model& model,
+                                        const SoulLoader& soul, const std::function<Seconds()>& clock, GitHost* gitHost,
+                                        const std::string& sessionRead, std::stop_token stop, TaskUpdates& updates, RunReports& reports,
+                                        SessionHistory& sessionHistory, PeerExchanges& peerExchanges, RunObserver& runs,
+                                        SessionPrompts& prompts, TaskDecisions& decisions)
+    : database(database), gitStorage(gitStorage), modelCalls(modelCalls), peerStorage(peerStorage), secretStorage(secretStorage),
+      taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), memoryStorage(memoryStorage),
+      model(model), soul(soul), clock(clock), gitHost(gitHost), sessionRead(sessionRead), stop(std::move(stop)), updates(updates),
+      reports(reports), sessionHistory(sessionHistory), peerExchanges(peerExchanges), runs(runs), prompts(prompts), decisions(decisions) {}
 
 std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData& task, const Json& event,
                                                                   const std::optional<PeerExchange>& peer, bool canSend, bool canRead) {
@@ -94,7 +92,7 @@ void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& ev
     const auto why = bounded(secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
     database.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
                   {attempts, transient ? clock() + (1 << (attempts - 1)) : 0, event["id"]});
-    journalStorage.journal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
+    database.writeJournal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
     task.feedback = why;
     if (cause == FailureCause::UnsupportedReasoningEffort)
         waitStorage.wait(task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, why);

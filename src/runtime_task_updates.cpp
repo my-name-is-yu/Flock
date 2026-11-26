@@ -1,4 +1,3 @@
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "journal_storage.hpp"
 #include "task_events.hpp"
@@ -33,6 +32,10 @@ void Runtime::Components::TaskUpdates::consumeEvent(TaskData& task) {
 
 TaskData Runtime::Components::TaskUpdates::snapshot(Id id) {
     std::lock_guard lock(database.mutex);
+    return loadTask(id);
+}
+
+TaskData Runtime::Components::TaskUpdates::loadTask(Id id) {
     return records.load(id);
 }
 

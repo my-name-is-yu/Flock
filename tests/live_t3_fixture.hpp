@@ -1,5 +1,7 @@
 #pragma once
 
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
@@ -146,7 +148,7 @@ inline Id submit(Store& store, std::string_view environmentId, std::string_view 
     }
     if (scenario == "question" || scenario == "ambiguous-question") config["session"]["interactionMode"] = "plan";
     if (const auto* mode = std::getenv("FLOCK_ACCEPTANCE_RUNTIME_MODE")) config["session"]["runtimeMode"] = mode;
-    return Tasks(store).submit({"acceptance", std::string(scenario), std::string(environmentId), std::string(projectId), config});
+    return TaskIntake(store).submit({"acceptance", std::string(scenario), std::string(environmentId), std::string(projectId), config});
 }
 
 inline int pump(Store& store, T3& t3, Id id, std::string_view targetState) {
@@ -169,7 +171,7 @@ inline int pump(Store& store, T3& t3, Id id, std::string_view targetState) {
         }
         if (state == targetState) return 0;
         if (targetState == "read-saved") {
-            const auto history = Tasks(store).history(id);
+            const auto history = TaskHistory(store).history(id);
             if (std::any_of(history.begin(), history.end(), [](const Json& item) { return item["kind"] == "session_read"; })) return 0;
         }
         if ((state == "waiting" && task.at("wait").value("reason", "") != "t3_input") || state == "completed" || state == "cancelled")

@@ -15,7 +15,6 @@
 #include "database.hpp"
 #include "flock/policy.hpp"
 #include "journal_storage.hpp"
-#include "json_fields.hpp"
 #include "peer_storage.hpp"
 #include "task_events.hpp"
 #include "task_operations.hpp"
@@ -211,8 +210,8 @@ bool Runtime::Components::PeerExchanges::replyPeer(TaskData& task, const Json& e
         task.state = TaskState::completed;
         task.peerOutcome = outcome;
         finishPeer(*peer, task, std::move(other), status, body, action);
-        journalStorage.journal(task.id, "peer_completed",
-                               {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
+        database.writeJournal(task.id, "peer_completed",
+                              {{"text", body}, {"status", status}, {"reason", decision.reason}, {"doneWhen", task.doneWhen}});
     } else {
         transitionPeer(*peer, task, other, peerMessage(*peer, task, other, type, body, action));
     }

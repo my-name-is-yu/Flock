@@ -21,7 +21,6 @@ class ConversationStorage;
 class Database;
 class JournalStorage;
 class Policy;
-class SecretStorage;
 struct Decision;
 struct ModelImage;
 struct Person;
@@ -31,11 +30,10 @@ struct WebIdentityState;
 class PolicyApprovals;
 class ChannelStorage {
 public:
-    ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const SecretStorage& secretStorage,
-                   const WebIdentityState& webIdentity, JournalStorage& journalStorage, ConversationStorage& conversationTurns,
-                   PolicyApprovals& policyApprovals)
-        : database(database), path(path), permissions(permissions), secretStorage(secretStorage), webIdentity(webIdentity),
-          journalStorage(journalStorage), conversationTurns(conversationTurns), policyApprovals(policyApprovals) {}
+    ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const WebIdentityState& webIdentity,
+                   JournalStorage& journalStorage, ConversationStorage& conversationTurns, PolicyApprovals& policyApprovals)
+        : database(database), path(path), permissions(permissions), webIdentity(webIdentity), journalStorage(journalStorage),
+          conversationTurns(conversationTurns), policyApprovals(policyApprovals) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
@@ -65,7 +63,6 @@ private:
     Database& database;
     const std::filesystem::path& path;
     const Policy& permissions;
-    const SecretStorage& secretStorage;
     const WebIdentityState& webIdentity;
     JournalStorage& journalStorage;
     ConversationStorage& conversationTurns;

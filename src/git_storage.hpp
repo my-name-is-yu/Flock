@@ -48,7 +48,7 @@ public:
                SessionParticipationStorage& sessionParticipationStorage)
         : database(database), secretStorage(secretStorage), inboxStorage(inboxStorage), taskRecords(taskRecords),
           journalStorage(journalStorage), webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns),
-          botLifecycle(botLifecycle), policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage) {}
+          policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
 
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);

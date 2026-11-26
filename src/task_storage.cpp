@@ -1,4 +1,5 @@
-#include "flock/tasks.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_list.hpp"
 #include "task_operations.hpp"
 #include "model_calls.hpp"
 #include "conversation_storage.hpp"
@@ -690,11 +691,6 @@ std::optional<TaskBlocker> TaskRecords::queueBlocker(Id id) const {
     return row.next() ? taskBlocker(row) : std::nullopt;
 }
 
-TaskView Tasks::task(Id id) const {
-    std::lock_guard lock(database_.mutex);
-    return records_.taskDetails(id, true);
-}
-
 TaskView TaskRecords::taskDetails(Id id, bool includeBlocker) const {
     static const auto sql = "SELECT w.id,w.reason,w.data," + taskProjection() +
                             " FROM tasks t LEFT JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL WHERE t.id=?";
@@ -730,7 +726,7 @@ void TaskRecords::addTaskDetails(TaskView& view) const {
     }
 }
 
-std::vector<TaskView> Tasks::tasks(std::string_view bot, Id before, unsigned limit) const {
+std::vector<TaskView> TaskList::tasks(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(database_.mutex);
     static const auto sql = taskPageSql("(?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?");
     auto rows = database_.query(sql.c_str(), {bot, bot, before, before, std::clamp(limit, 1u, 200u)});
@@ -742,7 +738,7 @@ std::vector<TaskView> Tasks::tasks(std::string_view bot, Id before, unsigned lim
     return result;
 }
 
-std::vector<Tasks::ActiveTask> Tasks::activeTasks(std::string_view bot) const {
+std::vector<TaskList::ActiveTask> TaskList::activeTasks(std::string_view bot) const {
     std::lock_guard lock(database_.mutex);
     static const auto sql = taskPageSql("bot_id=? AND state NOT IN ('completed','cancelled')");
     auto rows = database_.query(sql.c_str(), {bot});
@@ -751,7 +747,7 @@ std::vector<Tasks::ActiveTask> Tasks::activeTasks(std::string_view bot) const {
     return result;
 }
 
-std::map<std::string, std::vector<TaskPresence>> Tasks::activeTaskStatesByBot() const {
+std::map<std::string, std::vector<TaskPresence>> TaskList::activeTaskStatesByBot() const {
     std::lock_guard lock(database_.mutex);
     auto rows = database_.query(R"SQL(
 SELECT bot_id,state,replanning,min(id)
@@ -793,7 +789,7 @@ FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
     return view;
 }
 
-std::vector<TaskView> Tasks::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
+std::vector<TaskView> TaskHistory::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(database_.mutex);
     auto rows = database_.query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
                                 " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
@@ -804,7 +800,7 @@ std::vector<TaskView> Tasks::sessionTasks(std::string_view bot, Id before, unsig
     return result;
 }
 
-std::pair<Id, std::vector<TaskView>> Tasks::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
+std::pair<Id, std::vector<TaskView>> TaskHistory::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
     std::lock_guard lock(database_.mutex);
     auto newest = database_.query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
     newest.next();

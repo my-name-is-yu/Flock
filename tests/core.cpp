@@ -1,3 +1,5 @@
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
@@ -147,7 +149,7 @@ int main() {
             Store store(db);
             checkSchemaRefusals(db);
             Runtime runtime(store, model, t3, notes);
-            id = Tasks(store).submit({"release", "Check main", "env", "proj"});
+            id = TaskIntake(store).submit({"release", "Check main", "env", "proj"});
             tickUntil(runtime, [&] { return Tasks(store).task(id).task.state == TaskState::running; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;
             const auto pollsBeforeIdle = t3.polls;
@@ -170,7 +172,7 @@ int main() {
             check(task["runs"].size() == 1 && task["runs"][0]["threadId"] == "thread-1" && task["runs"][0]["runId"] == "run-1" &&
                       task["additionalUsed"] == 0 && t3.launches == 1 && t3.replies == 1,
                   "restart duplicated the Run or consumed additional work");
-            const auto history = Tasks(store).history(id);
+            const auto history = TaskHistory(store).history(id);
             const auto isCompletion = [](const Json& entry) { return entry["kind"] == "completed"; };
             const auto completion = std::find_if(history.begin(), history.end(), isCompletion);
             check(std::count_if(history.begin(), history.end(), isCompletion) == 1 && (*completion)["data"]["text"] == "main confirmed" &&

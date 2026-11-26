@@ -1,3 +1,8 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/decision_errors.hpp"
@@ -206,7 +211,7 @@ Id openReview(Store& store, Runtime& runtime, Script& script, const Intake& rout
               std::string_view reviewPrompt) {
     script.openPrArgs = git_fixture::openArgs(branch);
     script.openPrArgs.update({{"taskId", task}, {"title", reviewPrompt}});
-    Conversations(store).receive(owner, routing, branch, "Open a pull request for review.");
+    ConversationIntake(store).receive(owner, routing, branch, "Open a pull request for review.");
     runtime.runConversations();
     return row(Inbox(store).inbox(owner, routing.botId), "prompt", reviewPrompt).at("itemId");
 }
@@ -222,15 +227,15 @@ void exercise(const std::filesystem::path& path) {
     policy.setMember(owner, "review", bob.id, true);
     policy.setMember(owner, "report", reader.id, true);
 
-    const auto question = Tasks(store).submit(intake("report", "Report the work\nInclude the source", "question"));
-    const auto unknown = Tasks(store).submit(intake("review", "Recover the delivery", "unknown"));
-    const auto deadlineTask = Tasks(store).submit(intake("review", "Track the deadline", "deadline"));
-    const auto changed = Tasks(store).submit(intake("report", "Revision A", "changed"));
-    const auto budget = Tasks(store).submit(intake("review", "Approve an extra run", "budget"));
-    const auto model = Tasks(store).submit(intake("review", "Add a model call", "model"));
-    const auto hidden = Tasks(store).submit(intake("private", "Unshared request", "private"));
-    const auto terminal = Tasks(store).submit(intake("review", "Cancelled request", "closed"));
-    Tasks(store).operate(localOwner, TaskTarget::from(Tasks(store).task(terminal).task, 0), "cancel");
+    const auto question = TaskIntake(store).submit(intake("report", "Report the work\nInclude the source", "question"));
+    const auto unknown = TaskIntake(store).submit(intake("review", "Recover the delivery", "unknown"));
+    const auto deadlineTask = TaskIntake(store).submit(intake("review", "Track the deadline", "deadline"));
+    const auto changed = TaskIntake(store).submit(intake("report", "Revision A", "changed"));
+    const auto budget = TaskIntake(store).submit(intake("review", "Approve an extra run", "budget"));
+    const auto model = TaskIntake(store).submit(intake("review", "Add a model call", "model"));
+    const auto hidden = TaskIntake(store).submit(intake("private", "Unshared request", "private"));
+    const auto terminal = TaskIntake(store).submit(intake("review", "Cancelled request", "closed"));
+    TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(terminal).task, 0), "cancel");
 
     Seconds now = unixTime();
     Script script;
@@ -257,8 +262,8 @@ void exercise(const std::filesystem::path& path) {
     const auto review =
         openReview(store, runtime, script, intake("report", "unused", "turn"), question, "published-report", "Check the report and source");
     const auto secret = policy.requestSecret("review", {"report-credential"});
-    const auto conversation = Conversations(store).receive(localOwner, intake("review", "unused", "turn", {{"modelCallLimit", 1}}), "pause",
-                                                           "Pause this conversation");
+    const auto conversation = ConversationIntake(store).receive(localOwner, intake("review", "unused", "turn", {{"modelCallLimit", 1}}),
+                                                                "pause", "Pause this conversation");
     script.failConversation = true;
     runtime.runConversations();
 
@@ -297,10 +302,10 @@ SELECT )SQL" +
           "task detail lost the wait anchor after 129 newer events");
     check(row(Inbox(store).inbox(reader), "itemKind", "user_question") == readerQuestion,
           "Inbox disagreed with task detail about the wait anchor");
-    const auto active = Tasks(store).activeTasks("report");
-    const auto activeQuestion = std::ranges::find_if(active, [&](const Tasks::ActiveTask& task) { return task.task.id == question; });
+    const auto active = TaskList(store).activeTasks("report");
+    const auto activeQuestion = std::ranges::find_if(active, [&](const TaskList::ActiveTask& task) { return task.task.id == question; });
     check(taskJson(Tasks(store).task(question)).at("wait") == report.at("wait") &&
-              row(taskJson(Tasks(store).tasks("report")), "id", question).at("wait") == report.at("wait") &&
+              row(taskJson(TaskList(store).tasks("report")), "id", question).at("wait") == report.at("wait") &&
               activeQuestion != active.end() && activeQuestion->wait && activeQuestion->wait->id == report.at("wait").at("id").get<Id>() &&
               activeQuestion->wait->messageId == waitAnchor.get<Id>() && activeQuestion->wait->reason() == WaitReason::user_question,
           "task views disagreed about the open wait");
@@ -320,7 +325,7 @@ SELECT )SQL" +
     rejected<DecisionDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
                              "nonmember answered a question");
     const auto taskQuestion = TaskTarget::from(Tasks(store).task(question).task, questionBefore.waitId);
-    rejected<DecisionDenied>([&] { Tasks(store).operate(bob, taskQuestion, "answer", {{"text", "Final"}}); },
+    rejected<DecisionDenied>([&] { TaskControl(store).operate(bob, taskQuestion, "answer", {{"text", "Final"}}); },
                              "nonmember answered through the direct controls");
     auto forged = questionBefore;
     ++forged.targetGeneration;
@@ -336,7 +341,7 @@ SELECT )SQL" +
     const auto staleReview =
         openReview(store, runtime, script, intake("report", "unused", "turn"), changed, "revision-a", "Review the first source");
     script.managed = changed;
-    Conversations(store).receive(localOwner, intake("report", "unused", "turn"), "change", "Switch the scope");
+    ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "change", "Switch the scope");
     runtime.runConversations();
     const auto revisionB = taskJson(Tasks(store).task(changed));
     check(revisionB.at("currentRevision") != old.targetRevision && revisionB.at("doneWhen") == "Verify source B",
@@ -372,35 +377,35 @@ SELECT )SQL" +
     const auto b = second.get();
     check(a.empty() != b.empty() && Tasks(store).task(budget).task.allowance.remaining == allowance + 3,
           "simultaneous approval took effect more or less than once");
-    const auto decided = row(Tasks(store).history(budget), "kind", "inbox_decision").at("data");
+    const auto decided = row(TaskHistory(store).history(budget), "kind", "inbox_decision").at("data");
     check(decided.at("decidedBy") == (a.empty() ? b : a) && decided.at("decidedAt").get<Id>() > 0 && decided.at("decision") == "approve" &&
               decided.at("targetRevision") == extra.targetRevision,
           "task history lost who decided, when, or what they reviewed");
 
     script.managed = question;
-    Conversations(store).receive(localOwner, intake("report", "unused", "turn"), "block", "Report the blocker");
+    ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "block", "Report the blocker");
     runtime.runConversations();
     const auto blockerReason = [&](Id task) { return taskJson(Tasks(store).task(task)).value("blockerReason", std::string{}); };
     check(blockerReason(question) == "Waiting for a signed report" &&
-              row(Tasks(store).history(question), "kind", "blocker_recorded").at("data").at("blockerReason") ==
+              row(TaskHistory(store).history(question), "kind", "blocker_recorded").at("data").at("blockerReason") ==
                   "Waiting for a signed report",
           "blocker tool did not update the task and history");
-    Conversations(store).receive(alice, intake("report", "unused", "turn"), "clear", "Clear the blocker");
+    ConversationIntake(store).receive(alice, intake("report", "unused", "turn"), "clear", "Clear the blocker");
     runtime.runConversations();
-    check(blockerReason(question).empty() && row(Tasks(store).history(question), "kind", "blocker_cleared").is_object(),
+    check(blockerReason(question).empty() && row(TaskHistory(store).history(question), "kind", "blocker_cleared").is_object(),
           "explicitly clearing an independent blocker left the task blocked");
-    Conversations(store).receive(alice, intake("report", "unused", "turn"), "wait-blocker", "The question is blocking");
+    ConversationIntake(store).receive(alice, intake("report", "unused", "turn"), "wait-blocker", "The question is blocking");
     runtime.runConversations();
     check(blockerReason(question) == "Waiting for the branch", "the recorded blocker lost its progress condition");
     const auto withdrawing = pending(store, user_question);
-    Conversations(store).receive(localOwner, intake("report", "unused", "turn"), "withdraw", "Withdraw the question");
+    ConversationIntake(store).receive(localOwner, intake("report", "unused", "turn"), "withdraw", "Withdraw the question");
     runtime.runConversations();
     for (const auto& remaining : Inbox(store).inbox(alice, "report"))
         check(remaining.at("itemKind") != "user_question", "withdrawn question remained in the Inbox");
     const auto withdrawn = taskJson(Tasks(store).task(question));
     const auto& sessionQuestionTarget = withdrawn.at("question").at("target");
     check(withdrawn.at("wait").is_null() && !withdrawn.contains("blockerReason") &&
-              row(Tasks(store).history(question), "kind", "question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
+              row(TaskHistory(store).history(question), "kind", "question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
           "withdraw action did not close and journal the question");
     check(sessionQuestionTarget.at("waitId").is_null() && sessionQuestionTarget.at("eventId") == withdrawn.at("eventId") &&
               withdrawn.at("eventId") != report.at("eventId"),
@@ -445,8 +450,8 @@ void protectedInputSource(const std::filesystem::path& path) {
     const SecretRef ref{"report-credential"};
     const auto routing = intake("report", "Prepare the report", "question");
     const auto request = policy.requestSecret("report", ref);
-    const auto source = Conversations(store).receive(owner, routing, "secret", "First request").at("messageId").get<Id>();
-    const auto repeat = Conversations(store).receive(owner, routing, "repeat", "Repeated request").at("messageId").get<Id>();
+    const auto source = ConversationIntake(store).receive(owner, routing, "secret", "First request").at("messageId").get<Id>();
+    const auto repeat = ConversationIntake(store).receive(owner, routing, "repeat", "Repeated request").at("messageId").get<Id>();
     check(policy.requestSecret("report", ref, source) == request && policy.requestSecret("report", ref, repeat) == request,
           "repeated protected input changed its request ID");
     const auto inbox = Inbox(store).inbox(owner, "report");
@@ -460,27 +465,27 @@ void chatDecision(const std::filesystem::path& path) {
     Policy policy{store};
     policy.setMember(owner, "report", alice.id, true);
     const auto routing = intake("report", "Prepare the report", "question");
-    const auto taskId = Tasks(store).submit(routing);
+    const auto taskId = TaskIntake(store).submit(routing);
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; });
     for (int step = 0; step < 6; ++step) runtime.tick();
     script.managed = taskId;
-    Conversations(store).receive(alice, routing, "report-blocker", "The question is blocking");
+    ConversationIntake(store).receive(alice, routing, "report-blocker", "The question is blocking");
     runtime.runConversations();
     check(taskJson(Tasks(store).task(taskId)).value("blockerReason", std::string{}) == "Waiting for the branch",
           "question-linked blocker was not recorded");
     const auto task = taskJson(Tasks(store).task(taskId));
     const auto& wait = task.at("wait");
     const auto item = pending(store, InboxKind::user_question, "report");
-    Conversations(store).receive(alice, routing, "revoked", "Use Final", wait.at("messageId"));
+    ConversationIntake(store).receive(alice, routing, "revoked", "Use Final", wait.at("messageId"));
     policy.setMember(owner, "report", alice.id, false);
     runtime.runConversations();
     check(taskJson(Tasks(store).task(taskId)) == task && Inbox(store).decisionHistory(owner).empty(),
           "a queued chat answer survived access revocation");
     policy.setMember(owner, "report", alice.id, true);
-    Conversations(store).receive(alice, routing, "answer", "Use Final", wait.at("messageId"));
+    ConversationIntake(store).receive(alice, routing, "answer", "Use Final", wait.at("messageId"));
     runtime.runConversations();
     const auto history = Inbox(store).decisionHistory(owner);
     check(history.size() == 1 && history.at(0).at("decidedBy") == alice.id && history.at(0).at("decision") == "answer" &&
@@ -490,7 +495,7 @@ void chatDecision(const std::filesystem::path& path) {
           "the chat answer did not use the canonical decision audit");
     rejected<DecisionUnavailable>([&] { Inbox(store).decideInbox(alice, item, "answer", {{"text", "Draft"}}); },
                                   "the Inbox applied an answer after chat decided the wait");
-    Conversations(store).receive(owner, routing, "change-report", "Switch the scope");
+    ConversationIntake(store).receive(owner, routing, "change-report", "Switch the scope");
     runtime.runConversations();
     check(Tasks(store).task(taskId).task.intent == "Revision B" &&
               Inbox(store).decisionHistory(owner).at(0).at("requestTitle") == "Prepare the report",
@@ -500,7 +505,7 @@ void chatDecision(const std::filesystem::path& path) {
 void reviewReply(const std::filesystem::path& path) {
     Store store(path);
     const auto routing = intake("report", "Prepare the report", "review");
-    const auto task = Tasks(store).submit(routing);
+    const auto task = TaskIntake(store).submit(routing);
     {
         Script script;
         Sessions sessions;
@@ -531,7 +536,7 @@ void reviewReply(const std::filesystem::path& path) {
     Script script;
     Sessions sessions;
     Runtime runtime(restarted, script, sessions, [](std::string_view) { return std::string{}; });
-    const auto message = Conversations(restarted).receive(owner, routing, "review-reply", "Which checks ran?", anchor).at("messageId");
+    const auto message = ConversationIntake(restarted).receive(owner, routing, "review-reply", "Which checks ran?", anchor).at("messageId");
     runtime.runConversations();
     const auto line = row(Conversations(restarted).conversation("report"), "id", message);
     check(line.at("data").at("replyToMessageId") == anchor &&

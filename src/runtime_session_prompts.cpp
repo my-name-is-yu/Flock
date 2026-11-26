@@ -17,7 +17,6 @@
 #include "flock/outbox_instruction.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
-#include "json_fields.hpp"
 #include "secret_storage.hpp"
 #include "task_events.hpp"
 

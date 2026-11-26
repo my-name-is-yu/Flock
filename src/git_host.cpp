@@ -9,17 +9,14 @@
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
 #include "flock/run_ref.hpp"
-#include "json_fields.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
-#include "flock/board_inbox.hpp"
 #include "run_ref_storage.hpp"
 #include "flock/policy.hpp"
 #include "policy_approvals.hpp"
 #include "policy_origin.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "secret_storage.hpp"
-#include "journal_storage.hpp"
 #include "task_records.hpp"
 #include "workspace_internal.hpp"
 
@@ -518,9 +515,9 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
 )SQL",
                           {reviewKey, taskId, repo.host, repo.repo, args.at("prNumber"), eventCursor, args.at("reviewers").dump()});
         }
-        journalStorage.journal(taskId, "git_mutation",
-                               secretStorage.sharedRedactor().record(gitJournal(
-                                   context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
+        database.writeJournal(taskId, "git_mutation",
+                              secretStorage.sharedRedactor().record(gitJournal(
+                                  context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
         tx.commit();
     }
     try {
@@ -557,8 +554,8 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
     database.exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
                   " WHERE task_id=?2 AND invocation=?3",
                   {result, taskId, key});
-    journalStorage.journal(taskId, "git_mutation",
-                           scrub.record(gitJournal(context, decision.tool, repo, {{"target", audit}, {"outcome", result}})));
+    database.writeJournal(taskId, "git_mutation",
+                          scrub.record(gitJournal(context, decision.tool, repo, {{"target", audit}, {"outcome", result}})));
     tx.commit();
     return result;
 }

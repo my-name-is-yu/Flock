@@ -1,6 +1,8 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
-#include "flock/conversations.hpp"
 #include "flock/web.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/decision.hpp"
@@ -123,7 +125,7 @@ void run() {
     Id task;
     {
         Store store(database);
-        task = Tasks(store).submit(intake());
+        task = TaskIntake(store).submit(intake());
         Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(task).task.state == TaskState::completed && host->createCalls == 1, "initial watch was not recorded");
@@ -156,7 +158,7 @@ void run() {
     Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
     runtime.runConversations();
     check(model.received == 1 && host->logCalls == 1 && model.followup("job-run-1") == "failed_check" &&
-              Tasks(store).history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
+              TaskHistory(store).history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
           "authenticated webhook did not wake the persisted task and produce a CI report");
     const std::string newSha(40, 'b');
     auto nextJob = payload;
@@ -201,12 +203,12 @@ void run() {
         check(post(client, "pull_request", "tool-review-request", reviewRequested, 202).at("status") == "received",
               "review request webhook not enqueued during the host call");
     };
-    Conversations(store).receive(localOwner, intake(), "request-review", "Request a review");
+    ConversationIntake(store).receive(localOwner, intake(), "request-review", "Request a review");
     runtime.runConversations();
     host->beforeCall = {};
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              Tasks(store).history(task).dump().find("tool-review-request") != std::string::npos,
+              TaskHistory(store).history(task).dump().find("tool-review-request") != std::string::npos,
           "A signed review webhook duplicated the tool's inbox item or was lost from the conversation");
 
     auto lateReview = reviewRequested;
@@ -215,7 +217,7 @@ void run() {
           "delayed review request webhook was not enqueued");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 1 &&
-              Tasks(store).history(task).dump().find("delayed-review-request") != std::string::npos,
+              TaskHistory(store).history(task).dump().find("delayed-review-request") != std::string::npos,
           "A late webhook for the same request created another card or lost the notification");
 
     auto externalReview = lateReview;
@@ -226,7 +228,7 @@ void run() {
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeRequest + 2, "A distinct review request was suppressed");
 
     const auto inboxBeforeMissingWebhook = Inbox(store).inbox(localOwner, "owner").size();
-    Conversations(store).receive(localOwner, intake(), "review-without-webhook", "Request another review");
+    ConversationIntake(store).receive(localOwner, intake(), "review-without-webhook", "Request another review");
     runtime.runConversations();
     const auto afterRequest = Inbox(store).inbox(localOwner, "owner");
     check(afterRequest.size() == inboxBeforeMissingWebhook + 1 && afterRequest.front().at("prompt") == "Review requested on the Git host.",
@@ -239,7 +241,7 @@ void run() {
           "later review request webhook was not enqueued");
     runtime.runConversations();
     check(Inbox(store).inbox(localOwner, "owner").size() == inboxBeforeMissingWebhook + 1 &&
-              Tasks(store).history(task).dump().find("review-after-prior-decision") != std::string::npos,
+              TaskHistory(store).history(task).dump().find("review-after-prior-decision") != std::string::npos,
           "A handled review with a missing webhook hid a later request");
 
     auto changes = review;
@@ -284,7 +286,7 @@ void run() {
               model.followup("inline-comment") == "review_comment" && model.followup("inline-edit").empty() &&
               model.followup("failed-check") == "failed_check" && model.followup("passed-check").empty(),
           "Signed notifications did not distinguish actionable events from report-only updates");
-    const auto notifications = Tasks(store).history(task).dump();
+    const auto notifications = TaskHistory(store).history(task).dump();
     check(notifications.find("src/example.cpp") != std::string::npos && notifications.find("\"line\":72") != std::string::npos &&
               notifications.find("\"originalLine\":true") != std::string::npos &&
               notifications.find("/pull/1#discussion_r301") != std::string::npos,
@@ -302,7 +304,7 @@ void run() {
         check(post(client, "issue_comment", "own-comment", ownComment, 202).at("status") == "received",
               "Own comment delivery before the host returned was not accepted");
     };
-    Conversations(store).receive(localOwner, intake(), "write-comment", "Please post the comment");
+    ConversationIntake(store).receive(localOwner, intake(), "write-comment", "Please post the comment");
     runtime.runConversations();
     host->beforeCall = {};
     check(host->comments == 1, "Flock did not author the expected comment");
@@ -320,7 +322,7 @@ void run() {
                                          {"body", "Use a test."}},
                                         "Submit the review the person asked for"};
     host->result["id"] = 203;
-    Conversations(store).receive(localOwner, intake(), "write-review", "Please submit a review");
+    ConversationIntake(store).receive(localOwner, intake(), "write-review", "Please submit a review");
     runtime.runConversations();
     auto ownReview = changes;
     ownReview["review"] = {{"id", 203}, {"state", "changes_requested"}, {"body", "Use a test."}};

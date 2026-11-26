@@ -1,3 +1,8 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_history.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "bots.hpp"
 #include "flock/secret_ref.hpp"
 #include "demo.hpp"
@@ -124,7 +129,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
     Automations(store).createAutomation(
         localOwner, saved, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
     Automations(store).fireDueAutomations(now + 1);
-    const Id id = Tasks(store).tasks("release").at(0).task.id;
+    const Id id = TaskList(store).tasks("release").at(0).task.id;
     struct RejectEffort final : Model {
         std::vector<Json> requests;
         ModelTurn decide(const ModelInput& input) override {
@@ -148,7 +153,7 @@ void retryScheduledTaskWithUpdatedReasoningEffort() {
                             {"projectId", "new-project"},
                             {"modelCallLimit", 7}},
                            now + 1, [](auto, auto) {});
-    Tasks(store).operate(localOwner, TaskTarget::from(rejected.task, rejected.wait.value().id), "retry");
+    TaskControl(store).operate(localOwner, TaskTarget::from(rejected.task, rejected.wait.value().id), "retry");
     for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
     const auto retried = Tasks(store).task(id);
     check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
@@ -177,8 +182,8 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
     std::filesystem::create_symlink("release", folder / "release");
     Automations(store).fireDueAutomations(due);
 
-    const Id release = Tasks(store).tasks("release").at(0).task.id;
-    const Id triage = Tasks(store).tasks("triage").at(0).task.id;
+    const Id release = TaskList(store).tasks("release").at(0).task.id;
+    const Id triage = TaskList(store).tasks("triage").at(0).task.id;
     NotesModel model;
     NotesT3 t3;
     RuntimeOptions options;
@@ -197,11 +202,11 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery) {
     std::filesystem::rename(folder / "release.saved", folder / "release");
     if (recovery == NotesRecovery::Edit) {
         model.editTask = release;
-        Conversations(store).receive(localOwner, bots.get("release").intake(""), "edit-automation", "Check staging instead");
+        ConversationIntake(store).receive(localOwner, bots.get("release").intake(""), "edit-automation", "Check staging instead");
         runtime.runConversations();
         check(Tasks(store).task(release).task.intent == "Check staging instead", "the conversation did not save the edit");
     } else
-        Tasks(store).operate(localOwner, TaskTarget::from(paused.task, paused.wait.value().id), "retry");
+        TaskControl(store).operate(localOwner, TaskTarget::from(paused.task, paused.wait.value().id), "retry");
     runtime.tick();
     const auto retried = Tasks(store).task(release);
     check(retried.task.state == TaskState::queued && retried.blockedBy && retried.blockedBy->id == triage && t3.commands.size() == 1,
@@ -231,12 +236,12 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db, seed);
         Runtime runtime(store, model, t3, soul);
-        firstId = Tasks(store).submit(bots.get("first").intake("Request for first Bot"));
+        firstId = TaskIntake(store).submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
         runtime.tick();
         check(Tasks(store).task(firstId).task.state == TaskState::waiting, "fixture did not reach user question");
         waitId = Tasks(store).task(firstId).wait.value().id;
-        secondId = Tasks(store).submit(bots.get("second").intake("Request for second Bot"));
+        secondId = TaskIntake(store).submit(bots.get("second").intake("Request for second Bot"));
         runtime.tick();
         check(Tasks(store).task(secondId).blockedBy.value().id == firstId && t3.commands.empty(),
               "same-project tasks must queue across Bots");
@@ -244,11 +249,11 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db, seed);
         Runtime runtime(store, model, t3, soul);
-        Tasks(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer", {{"text", "main"}});
+        TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer", {{"text", "main"}});
         rejects<Conflict>(
             [&] {
-                Tasks(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer",
-                                     {{"text", "old answer"}});
+                TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer",
+                                           {{"text", "old answer"}});
             },
             "duplicate answer accepted");
         runtime.tick();
@@ -383,9 +388,9 @@ void notesAcrossConversationAndWork() {
     };
     const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
         const auto start = model.requests.size();
-        Conversations(store).receive(localOwner, bot, "new-work", "Collect the validation evidence");
+        ConversationIntake(store).receive(localOwner, bot, "new-work", "Collect the validation evidence");
         runtime.runConversations();
-        const auto tasks = Tasks(store).tasks(bot.botId);
+        const auto tasks = TaskList(store).tasks(bot.botId);
         check(tasks.size() == 1, "the request should create one Task for this Bot");
         const Id task = tasks.at(0).task.id;
         for (int step = 0; step < 10 && Tasks(store).task(task).task.state != TaskState::completed; ++step) runtime.tick();
@@ -402,11 +407,13 @@ void notesAcrossConversationAndWork() {
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
         const Id result = lastTaskEvent(store, task, "completed").at("id");
-        return Conversations(store).receive(localOwner, bot, key, "Why does that evidence support the result?", result).at("messageId");
+        return ConversationIntake(store)
+            .receive(localOwner, bot, key, "Why does that evidence support the result?", result)
+            .at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question, const BotNotes& notes, std::string_view expectedReply) {
         const auto before = taskJson(Tasks(store).task(task));
-        const auto taskCount = Tasks(store).tasks().size();
+        const auto taskCount = TaskList(store).tasks().size();
         const auto commands = t3.commands.size();
         const auto start = model.requests.size();
         runtime.tick();
@@ -429,7 +436,7 @@ void notesAcrossConversationAndWork() {
         check(event != readText.npos && responseText.starts_with(readText.substr(0, event + eventField.size())) &&
                   readText != responseText && expectedTools == respond.at("tools") && read.at("instructions") == respond.at("instructions"),
               "a read-only turn step changed the prompt prefix before event data");
-        check(Tasks(store).tasks().size() == taskCount && t3.commands.size() == commands && taskJson(Tasks(store).task(task)) == before,
+        check(TaskList(store).tasks().size() == taskCount && t3.commands.size() == commands && taskJson(Tasks(store).task(task)) == before,
               "explaining a result must preserve the Task and its Runs without starting any new work");
     };
 
@@ -457,17 +464,17 @@ void notesAcrossConversationAndWork() {
     const auto beforeFailure = model.requests.size();
     const auto originalRequest = "Collect the missing release evidence";
     noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
-    Conversations(store).receive(localOwner, firstIntake, "unreadable-notes", originalRequest);
+    ConversationIntake(store).receive(localOwner, firstIntake, "unreadable-notes", originalRequest);
     runtime.runConversations();
     const auto failure = Conversations(store).conversation(firstIntake.botId).back().at("data");
-    check(model.requests.size() == beforeFailure && Tasks(store).tasks(firstIntake.botId).size() == 1 && failure.at("route") == "error" &&
-              failure.at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
+    check(model.requests.size() == beforeFailure && TaskList(store).tasks(firstIntake.botId).size() == 1 &&
+              failure.at("route") == "error" && failure.at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
           "an unreadable note must prompt repair without calling the model or creating work");
 
     noteReadError.reset();
-    Conversations(store).receive(localOwner, firstIntake, "repaired-notes", "Please retry", failure.at("messageId"));
+    ConversationIntake(store).receive(localOwner, firstIntake, "repaired-notes", "Please retry", failure.at("messageId"));
     runtime.runConversations();
-    const auto tasks = Tasks(store).tasks(firstIntake.botId);
+    const auto tasks = TaskList(store).tasks(firstIntake.botId);
     check(model.requests.size() == beforeFailure + 2 && tasks.size() == 2 && tasks.front().task.request.starts_with(originalRequest),
           "replying after note repair must let the Bot retry the original request");
 }
@@ -903,12 +910,12 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
         check(ready(), message);
     };
-    const auto task = Tasks(store).submit(intake);
+    const auto task = TaskIntake(store).submit(intake);
     {
         Runtime routing(store, changes, *t3, notes);
         changes.tool = "change_task";
         changes.args = {{"taskId", task}, {"doneWhen", "Confirm the output"}};
-        Conversations(store).receive(localOwner, intake, "criteria", "Completion criteria: Confirm the output");
+        ConversationIntake(store).receive(localOwner, intake, "criteria", "Completion criteria: Confirm the output");
         routing.runConversations();
     }
     check(Tasks(store).task(task).task.doneWhen == "" &&
@@ -925,7 +932,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store, changes, *t3, notes);
         changes.tool = "send_to_task";
         changes.args = {{"taskId", task}};
-        Conversations(store).receive(localOwner, intake, "follow-up", "Include the exact sample count");
+        ConversationIntake(store).receive(localOwner, intake, "follow-up", "Include the exact sample count");
         routing.runConversations();
     }
     {
@@ -937,7 +944,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     const auto runs = Tasks(store).task(task).runs;
     check(runs.size() == 2 && runs[0].run.ref.threadId == runs[1].run.ref.threadId && runs[0].run.ref.runId != runs[1].run.ref.runId,
           "the fixed demo follow-up started another Session");
-    check(std::ranges::any_of(Tasks(store).history(task),
+    check(std::ranges::any_of(TaskHistory(store).history(task),
                               [](const Json& entry) {
                                   const auto& data = entry.at("data");
                                   return entry.at("kind") == "decision" && data.at("tool") == "follow_up" &&
@@ -965,7 +972,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     const auto t3 = makeDemoT3();
     Runtime runtime(store, *demo, *t3, [](auto) { return std::string{}; });
     const Intake intake{"demo", "Measure the result", "local", "project"};
-    const auto task = Tasks(store).submit(intake);
+    const auto task = TaskIntake(store).submit(intake);
     for (int i = 0; i < 12 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
     const auto result = lastTaskEvent(store, task, "completed").at("id").get<Id>();
     const auto replyTo = [&](Id message) {
@@ -974,15 +981,15 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
         return Json(nullptr);
     };
     const auto question =
-        Conversations(store).receive(localOwner, intake, "explain", "What did it find?", result).at("messageId").get<Id>();
+        ConversationIntake(store).receive(localOwner, intake, "explain", "What did it find?", result).at("messageId").get<Id>();
     runtime.runConversations();
     const auto explanation = replyTo(question);
-    const auto again = Conversations(store)
+    const auto again = ConversationIntake(store)
                            .receive(localOwner, intake, "again", "Explain again", explanation.at("messageId").get<Id>())
                            .at("messageId")
                            .get<Id>();
     runtime.runConversations();
-    check(Tasks(store).tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
+    check(TaskList(store).tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
           "a follow-up to the fixed demo's explanation started work instead of reading the same result");
 }
 
@@ -993,14 +1000,14 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     const auto t3 = makeDemoT3();
     Runtime runtime(store, *demo, *t3, [](auto) { return std::string{}; });
     const Intake intake{"demo", "ask: Which dataset should I use?", "local", "project"};
-    const auto task = Tasks(store).submit(intake);
+    const auto task = TaskIntake(store).submit(intake);
     for (int i = 0; i < 12 && Tasks(store).task(task).task.state != TaskState::waiting; ++i) runtime.tick();
     const auto question = Tasks(store).task(task).wait.value().messageId.value();
 
-    Conversations(store).receive(localOwner, intake, "dataset-answer", "Use the release dataset", question);
+    ConversationIntake(store).receive(localOwner, intake, "dataset-answer", "Use the release dataset", question);
     runtime.runConversations();
     for (int i = 0; i < 12 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    const auto history = Tasks(store).history(task);
+    const auto history = TaskHistory(store).history(task);
     check(Tasks(store).task(task).task.state == TaskState::completed &&
               std::ranges::any_of(
                   history,
@@ -1034,7 +1041,7 @@ void botCreationCollisionIsRecoverable() {
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
     int sequence = 0;
     const auto create = [&] {
-        Conversations(store).receive(creator, Intake{"Source", "", "env", "project"}, std::to_string(++sequence), "Create a Bot");
+        ConversationIntake(store).receive(creator, Intake{"Source", "", "env", "project"}, std::to_string(++sequence), "Create a Bot");
         runtime.runConversations();
         return model.result;
     };

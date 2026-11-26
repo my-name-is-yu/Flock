@@ -18,7 +18,6 @@ namespace flockv0 {
 class Database;
 class JournalStorage;
 class Policy;
-class SecretStorage;
 class TaskEvents;
 
 class WorkflowStorage;
@@ -30,7 +29,7 @@ public:
         RunReportEntry data;
     };
 
-    RunReports(Database&, JournalStorage&, SecretStorage&, TaskEvents&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
+    RunReports(Database&, JournalStorage&, TaskEvents&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
                const std::function<Seconds()>& clock);
     static bool hasSettledRun(const TaskData&);
     void writeRunReport(TaskData&, const SettledRunReport&);
@@ -45,7 +44,6 @@ private:
 
     Database& database;
     JournalStorage& journalStorage;
-    SecretStorage& secretStorage;
     TaskEvents& taskEvents;
     WorkflowStorage& workflowStorage;
     T3& t3;

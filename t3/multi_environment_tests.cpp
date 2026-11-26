@@ -1,6 +1,9 @@
+#include "flock/conversation_intake.hpp"
+#include "flock/task_control.hpp"
+#include "flock/task_intake.hpp"
+#include "flock/task_list.hpp"
 #include "internal.hpp"
 #include "flock/tasks.hpp"
-#include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -225,7 +228,7 @@ struct Scenario {
                              {{"conversationEnvironments",
                                {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                                 {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-        Conversations(store).receive(localOwner, routing, "start-fixture", request);
+        ConversationIntake(store).receive(localOwner, routing, "start-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
               "conversation could not start the verification: " + model.startResult.dump());
@@ -251,7 +254,7 @@ struct Scenario {
             {{"conversationEnvironments",
               {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
-        Conversations(store).receive(localOwner, routing, "linked-fixture", request);
+        ConversationIntake(store).receive(localOwner, routing, "linked-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false),
               "conversation could not start linked-environment work: " + model.startResult.dump());
@@ -281,7 +284,7 @@ struct Scenario {
              {"multiCommit", model.commit},
              {"multiLinkedEnvironments", Json::array({{{"environmentId", mini.id()}, {"label", "Mini"}, {"status", "reachable"}}})}});
         const Intake routing{bot, {}, local.id(), local.project(), Json::object()};
-        Conversations(store).receive(localOwner, routing, "native-linked-fixture", request);
+        ConversationIntake(store).receive(localOwner, routing, "native-linked-fixture", request);
         runtime.runConversations();
         check(model.startResult.is_object() && model.startResult.value("ok", false) && model.nativeGatewayOptionsSeen,
               "the model must receive distinct gateway choices for the same linked target: " + model.nativeEnvironmentOptions.dump() +
@@ -336,7 +339,7 @@ struct Scenario {
         if (status == "completed") check(outcome.at("report") == endpoint.id() + " verification completed", "a success report was lost");
     }
 
-    void cancel() { Tasks(store).operate(localOwner, TaskTarget::from(task().task, 0), "cancel"); }
+    void cancel() { TaskControl(store).operate(localOwner, TaskTarget::from(task().task, 0), "cancel"); }
 };
 
 void normal(Scenario& fixture) {
@@ -347,7 +350,7 @@ void normal(Scenario& fixture) {
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both Runs should complete");
     const auto task = fixture.task();
     check(task.task.runResults().size() == 2 && task.task.runOutcome() == RunOutcome::all_completed &&
-              Tasks(fixture.store).tasks(bot).size() == 1,
+              TaskList(fixture.store).tasks(bot).size() == 1,
           "the original request must contain both outcomes");
     fixture.checkResult(fixture.local, Scenario::result(task, fixture.local), "completed", fixture.model.commit);
     fixture.checkResult(fixture.mini, Scenario::result(task, fixture.mini), "completed", fixture.model.commit);
@@ -386,7 +389,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
         {{"conversationEnvironments",
           {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
            {"mini", {{"environmentId", mini.id()}, {"projectId", local.project()}, {"gatewayEnvironmentId", local.id()}}}}}}};
-    Conversations(fixture.store).receive(localOwner, routing, "linked-send-fixture", "Send instruction to Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "linked-send-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false) && local.effects("t3_thread_send").size() == 1 &&
               mini.effects("t3_thread_send").empty() &&
@@ -394,7 +397,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
           "a saved linked-target follow-up must use the gateway credential and preserve the target Session URL");
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    Conversations(fixture.store).receive(localOwner, routing, "linked-stop-fixture", "Stop Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "linked-stop-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     fixture.advanceUntil([&](const TaskView&) { return local.effects("t3_thread_interrupt").size() == 1; },
                          "the linked target stop should dispatch through the gateway");
@@ -417,7 +420,7 @@ void linkedTargetUsesGateway(const Endpoint& local, const Endpoint& mini, const 
 
 void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini, const std::filesystem::path& directory) {
     Scenario resumed(local, mini, directory, {}, "native-linked-restart");
-    const auto tasks = Tasks(resumed.store).tasks(bot);
+    const auto tasks = TaskList(resumed.store).tasks(bot);
     check(tasks.size() == 1, "the native linked task must survive process restart");
     resumed.taskId = tasks.front().task.id;
     resumed.model.nativeTargetEnvironment = mini.id();
@@ -426,20 +429,20 @@ void resumeNativeLinkedRoute(const Endpoint& local, const Endpoint& mini, const 
     resumed.model.followUpTask = resumed.taskId;
     resumed.model.followUpGeneration = resumed.task().task.generation;
     const Intake changedContext{bot, {}, mini.id(), mini.project(), Json::object()};
-    Conversations(resumed.store)
+    ConversationIntake(resumed.store)
         .receive(localOwner, changedContext, "native-linked-wrong-gateway", "Send linked instruction through other gateway");
     resumed.runtime.runConversations();
     check(!resumed.model.wrongGatewaySendResult.value("ok", true) && local.effects("t3_thread_send").empty() &&
               mini.effects("t3_thread_send").empty(),
           "a saved target selector with a different gateway must fail without switching credentials");
-    Conversations(resumed.store).receive(localOwner, changedContext, "native-linked-restart-followup", "Send linked instruction");
+    ConversationIntake(resumed.store).receive(localOwner, changedContext, "native-linked-restart-followup", "Send linked instruction");
     resumed.runtime.runConversations();
     check(resumed.model.sendResult.value("ok", false) && local.effects("t3_thread_send").size() == 1 &&
               mini.effects("t3_thread_send").empty(),
           "after restart and a changed client context, follow-up must use the saved gateway and target");
     resumed.model.cancelTask = resumed.taskId;
     resumed.model.cancelGeneration = resumed.task().task.generation;
-    Conversations(resumed.store).receive(localOwner, changedContext, "native-linked-restart-stop", "Stop linked target");
+    ConversationIntake(resumed.store).receive(localOwner, changedContext, "native-linked-restart-stop", "Stop linked target");
     resumed.runtime.runConversations();
     resumed.advanceUntil([&](const TaskView&) { return local.effects("t3_thread_interrupt").size() == 1; },
                          "the saved linked Run should be interrupted through its original gateway");
@@ -471,7 +474,7 @@ void nativeLinkedUnknownAcceptance(const Endpoint& local, const Endpoint& mini, 
     fixture.model.cancelTask = fixture.taskId;
     fixture.model.cancelGeneration = fixture.task().task.generation;
     const Intake changedContext{bot, {}, mini.id(), mini.project(), Json::object()};
-    Conversations(fixture.store).receive(localOwner, changedContext, "native-linked-unknown-stop", "Stop linked target");
+    ConversationIntake(fixture.store).receive(localOwner, changedContext, "native-linked-unknown-stop", "Stop linked target");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false), "an uncertain linked destination must accept a local stop intent");
     const auto authGeneration = fixture.adapter->authGeneration(local.id(), Json::object());
@@ -526,14 +529,14 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
                          {{"conversationEnvironments",
                            {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                             {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-    Conversations(fixture.store)
+    ConversationIntake(fixture.store)
         .receive(localOwner, routing, "conflicting-follow-up-fixture", "Send instruction with conflicting selectors");
     fixture.runtime.runConversations();
     check(!fixture.model.conflictingResult.value("ok", true) &&
               fixture.model.conflictingResult.value("error", "").find("either by friendly name") != std::string::npos &&
               local.effects("t3_thread_send").empty() && mini.effects("t3_thread_send").empty(),
           "contradictory selector forms must be rejected without contacting either destination");
-    Conversations(fixture.store).receive(localOwner, routing, "ambiguous-follow-up-fixture", "Send instruction without destination");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "ambiguous-follow-up-fixture", "Send instruction without destination");
     fixture.runtime.runConversations();
     check(!fixture.model.ambiguousResult.value("ok", true) &&
               fixture.model.ambiguousResult.value("error", "").find("Choose a destination") != std::string::npos &&
@@ -541,12 +544,12 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
           "an omitted selector must be rejected as ambiguous without contacting either destination");
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
     Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
-    Conversations(fixture.store).receive(localOwner, routing, "policy-denied-follow-up-fixture", "Send instruction to Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "policy-denied-follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.sendResult.value("ok", true) && mini.effects("t3_thread_send").empty(),
           "saved-target follow-up must still obey the T3 send policy");
     Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
-    Conversations(fixture.store).receive(localOwner, routing, "follow-up-fixture", "Send instruction to Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "follow-up-fixture", "Send instruction to Mini");
     fixture.runtime.runConversations();
     check(fixture.model.sendResult.value("ok", false),
           "send_to_task did not deliver the selected destination message: " + fixture.model.sendResult.dump());
@@ -555,7 +558,7 @@ void sendToOneDestination(const Endpoint& local, const Endpoint& mini, const std
     check(local.effects("t3_thread_send").empty() && miniMessages.size() == 1 &&
               miniMessages.front().at("message").get<std::string>().find("Check the Mini result") != std::string::npos &&
               local.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_launch").size() == 1 &&
-              Tasks(fixture.store).tasks(bot).size() == 1 && task.task.id == fixture.taskId &&
+              TaskList(fixture.store).tasks(bot).size() == 1 && task.task.id == fixture.taskId &&
               Scenario::result(task, fixture.local) == original,
           "the instruction must go only to Mini without relaunching or changing Local's successful result");
 }
@@ -576,13 +579,13 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
     const auto miniTarget = Resource::sessionRead(mini.id(), threadId).target;
     Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, true);
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-denied-fixture", "Stop Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-mini-denied-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(!fixture.model.cancelResult.value("ok", true) && fixture.mini.effects("t3_thread_interrupt").empty(),
           "selected cancellation must obey the saved Run's T3 policy");
     Policy{fixture.store}.changeNeverRule(localOwner, Action::t3_send, miniTarget, false);
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-fixture", "Stop Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false) && fixture.model.cancelResult.value("effect", "") == "stop_requested",
           "selected cancellation should persist one destination stop intent");
@@ -596,10 +599,10 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
     check(fixture.task().task.state == TaskState::running &&
               Scenario::result(fixture.task(), fixture.mini).value("status", "") == "confirmation_pending" &&
               fixture.local.effects("t3_thread_interrupt").empty() && fixture.mini.effects("t3_thread_interrupt").empty() &&
-              Tasks(fixture.store).tasks(bot).size() == 1,
+              TaskList(fixture.store).tasks(bot).size() == 1,
           "selected cancellation must preserve the sibling and original request while settlement is pending");
     fixture.model.cancelGeneration = fixture.task().task.generation;
-    Conversations(fixture.store).receive(localOwner, routing, "cancel-mini-repeat-fixture", "Stop Mini again");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-mini-repeat-fixture", "Stop Mini again");
     fixture.runtime.runConversations();
     check(fixture.model.repeatCancelResult.value("ok", false) &&
               fixture.model.repeatCancelResult.value("effect", "") == "already_requested" &&
@@ -616,7 +619,7 @@ void cancelOneDestination(const Endpoint& local, const Endpoint& mini, const std
                          "the parent should settle after Mini's stop is confirmed");
     const auto task = fixture.task();
     check(task.task.request == request && Scenario::result(task, fixture.local).at("status") == "completed" &&
-              Scenario::result(task, fixture.mini).at("status") == "interrupted" && Tasks(fixture.store).tasks(bot).size() == 1,
+              Scenario::result(task, fixture.mini).at("status") == "interrupted" && TaskList(fixture.store).tasks(bot).size() == 1,
           "one stopped destination must not recreate the request or erase its successful sibling");
     const auto expected = Json::array({{{"threadId", threadId}, {"runId", runId}}});
     check(fixture.local.effects("t3_thread_interrupt").empty() && fixture.mini.effects("t3_thread_interrupt") == expected,
@@ -641,7 +644,7 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
                          {{"conversationEnvironments",
                            {{"local", {{"environmentId", local.id()}, {"projectId", local.project()}}},
                             {"mini", {{"environmentId", mini.id()}, {"projectId", mini.project()}}}}}}};
-    Conversations(fixture.store).receive(localOwner, routing, "cancel-unknown-mini-fixture", "Stop Mini");
+    ConversationIntake(fixture.store).receive(localOwner, routing, "cancel-unknown-mini-fixture", "Stop Mini");
     fixture.runtime.runConversations();
     check(fixture.model.cancelResult.value("ok", false), "an uncertain saved destination must accept a local stop intent");
     const auto authGeneration = fixture.adapter->authGeneration(mini.id(), Json::object());
@@ -659,12 +662,12 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
     check(Scenario::result(task, fixture.local).at("status") == "completed" &&
               Scenario::result(task, fixture.mini).at("status") == "interrupted" && task.task.state == TaskState::completed &&
               mini.effects("t3_thread_launch").size() == 1 && mini.effects("t3_thread_interrupt").size() == 1 &&
-              Tasks(fixture.store).tasks(bot).size() == 1,
+              TaskList(fixture.store).tasks(bot).size() == 1,
           "unknown acceptance must reconcile read-only after auth changes, stop the known Run, and never relaunch");
 }
 
 void independentSlots(Scenario& fixture) {
-    const auto blocker = Tasks(fixture.store).submit({"owner", holdLocal, fixture.local.id(), fixture.local.project()});
+    const auto blocker = TaskIntake(fixture.store).submit({"owner", holdLocal, fixture.local.id(), fixture.local.project()});
     fixture.start();
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.mini).value("status", "") == "running"; },
                          "the free route must start while the other project is blocked");
@@ -674,7 +677,7 @@ void independentSlots(Scenario& fixture) {
     fixture.mini.configure({{"multiStatus", "completed"}});
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.mini).value("status", "") == "completed"; },
                          "the free route must settle independently of the blocked sibling");
-    Tasks(fixture.store).operate(localOwner, TaskTarget::from(Tasks(fixture.store).task(blocker).task, 0), "cancel");
+    TaskControl(fixture.store).operate(localOwner, TaskTarget::from(Tasks(fixture.store).task(blocker).task, 0), "cancel");
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.local).value("status", "") == "running"; },
                          "the waiting route must launch once its project is free");
     fixture.local.configure({{"multiStatus", "completed"}});
@@ -709,7 +712,7 @@ void deadlines(Scenario& fixture) {
     check(stillWaiting.wait && stillWaiting.wait->id == waitId && stillWaiting.task.generation != waiting.task.generation,
           "the sibling did not advance the task while preserving the original deadline");
     const auto extension = fixture.now.load() + 120;
-    Tasks(fixture.store).operate(localOwner, TaskTarget::from(waiting.task, waitId), "extend", {{"deadline", extension}});
+    TaskControl(fixture.store).operate(localOwner, TaskTarget::from(waiting.task, waitId), "extend", {{"deadline", extension}});
     const auto extended = fixture.task();
     check(!extended.wait && Scenario::result(extended, overdue).at("deadline") == extension &&
               Scenario::result(extended, sibling).at("deadline") == (localExpiredFirst ? mini : local).at("deadline"),
@@ -724,7 +727,7 @@ void partial(Scenario& fixture) {
     fixture.start();
     fixture.awaitBothRunning();
     const auto follower =
-        Tasks(fixture.store).submit({bot, "Queued behind the local verification", fixture.local.id(), fixture.local.project()});
+        TaskIntake(fixture.store).submit({bot, "Queued behind the local verification", fixture.local.id(), fixture.local.project()});
     check(Tasks(fixture.store).task(follower).blockedBy.value().id == fixture.taskId, "the active Run should hold its project slot");
     fixture.mini.configure({{"multiDisconnected", true}});
     fixture.local.configure({{"multiStatus", "completed"}});
@@ -740,7 +743,7 @@ void partial(Scenario& fixture) {
     fixture.checkResult(fixture.local, success, "completed", fixture.model.commit);
     const auto unblocked = Tasks(fixture.store).task(follower);
     check(!unblocked.blockedBy, "an unrelated task should proceed in the settled local project's queue");
-    Tasks(fixture.store).operate(localOwner, TaskTarget::from(unblocked.task, 0), "cancel");
+    TaskControl(fixture.store).operate(localOwner, TaskTarget::from(unblocked.task, 0), "cancel");
     fixture.mini.configure({{"multiDisconnected", false}, {"multiStatus", "failed"}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::completed; }, "both outcomes should settle");
     task = fixture.task();
@@ -891,7 +894,7 @@ void single(const Endpoint& local, const Endpoint& mini, const std::filesystem::
 void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
     fixture.start(false);
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::running; }, "single Run did not start");
-    const auto next = Tasks(fixture.store).submit({bot, "Work after cancellation", fixture.local.id(), fixture.local.project()});
+    const auto next = TaskIntake(fixture.store).submit({bot, "Work after cancellation", fixture.local.id(), fixture.local.project()});
     fixture.local.configure({{"multiStatus", "cancelled"}, {"multiHoldSettlement", true}});
     fixture.cancel();
     fixture.advanceUntil(
@@ -910,7 +913,7 @@ void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
 }
 
 void recover(Scenario& fixture) {
-    const auto originals = Tasks(fixture.store).tasks(bot);
+    const auto originals = TaskList(fixture.store).tasks(bot);
     check(originals.size() == 1, "a restart must keep the original request");
     fixture.taskId = originals.at(0).task.id;
     fixture.mini.configure({{"multiHideLaunch", true}});
