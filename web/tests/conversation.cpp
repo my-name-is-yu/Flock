@@ -1117,6 +1117,7 @@ void conversationBotSetup(const std::filesystem::path& directory) {
     send("large-role", {{"soul", std::string(8193, 'a')}, {"name", "Invalid"}});
     send("bad-session", {{"workspaceStrategy", {{"type", "worktree"}}}, {"name", "Invalid"}});
     send("bad-routing", {{"projectId", "has space"}, {"name", "Invalid"}});
+    send("no-model", {{"model", ""}, {"name", "Invalid"}});
     PolicyRules{store}.changeNeverRule(localOwner, Action::bot_settings, "review*", true);
     send("denied", {{"name", "Invalid"}});
     PolicyRules{store}.changeNeverRule(localOwner, Action::bot_settings, "review*", false);

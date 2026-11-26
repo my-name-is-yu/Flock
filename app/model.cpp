@@ -329,7 +329,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
                       "When making a task decision, call this alongside your normal task action in the same response.";
         text("name", "Bot display name.", false);
         text("soul", "Complete replacement Role text, up to 8,192 bytes. Preserve unrelated rules.", false);
-        text("model", "Bot model slug, or an empty string for the default.", false);
+        text("model", "Bot model slug.", false);
         text("reasoningEffort", "Bot reasoning effort, or an empty string for Model default.", false);
         text("environmentId", "Canonical T3 environment ID, or an empty string to clear it.", false);
         text("projectId", "Canonical T3 project ID, or an empty string to clear it.", false);

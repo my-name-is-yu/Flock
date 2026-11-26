@@ -42,9 +42,10 @@ public:
                         bool replay = false);
     void accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision, std::string_view approvedInvocation = {},
                 const Json* launchDefaults = nullptr);
-    bool continueStage(const TaskData& task);
+    bool continueStage(const TaskData& task, const Json* launchDefaults = nullptr);
     bool resumeGitApproval(const TaskData& task);
 private:
+    static void applyLaunchDefaults(TaskData& task, const Json& defaults);
     void acceptReplyOrCompletion(const TaskData& snapshot, const Json& event, const TaskDecision& decision);
     void complete(TaskData& current, const Json& event, const TaskDecision& decision);
     CompletionProvenance completionProvenance(const TaskData& task, const Json& event);

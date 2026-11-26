@@ -17,6 +17,9 @@ void BotSetupStorage::validate(std::string_view bot, const Json& patch) const {
     for (auto entry = patch.begin(); entry != patch.end(); ++entry)
         if (std::ranges::find(botSetupFields, entry.key()) == std::end(botSetupFields))
             throw Conflict("This setting cannot be changed by the Bot");
+    if (const auto model = patch.find("model");
+        model != patch.end() && (!model->is_string() || model->get_ref<const std::string&>().empty()))
+        throw Conflict("Choose a model for the Bot");
     if (const auto avatar = patch.find("avatar"); avatar != patch.end()) {
         if (!avatar->is_object()) throw Conflict("Choose an avatar style");
         for (auto entry = avatar->begin(); entry != avatar->end(); ++entry)

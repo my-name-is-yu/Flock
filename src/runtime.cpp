@@ -131,7 +131,10 @@ struct Runtime::Impl {
         else if (state == TaskState::queued)
             taskScheduler.activate(std::move(task));
         else if (state == TaskState::deciding) {
-            if (!decisions.resumeGitApproval(task) && !decisions.continueStage(task)) taskTurn.decide(task);
+            if (!decisions.resumeGitApproval(task)) {
+                const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
+                if (!decisions.continueStage(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
+            }
         } else {
             if (task.activeRun && (state == TaskState::running || state == TaskState::waiting) && runs.ingest(task, runs.observe(task)))
                 return;

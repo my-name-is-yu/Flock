@@ -49,6 +49,7 @@ public:
              TaskDecisions& decisions, BotSetupStorage& botSetup, const IntakeResolver& intake);
 
     void decide(const TaskData& task);
+    std::optional<Json> launchDefaults(const TaskData& task) const;
     void persistTaskInferences();
 private:
     enum class FailureCause { Model, BotNotes, UnsupportedReasoningEffort };

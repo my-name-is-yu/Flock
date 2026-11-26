@@ -90,6 +90,13 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     return tools;
 }
 
+std::optional<Json> runtime::TaskTurn::launchDefaults(const TaskData& task) const {
+    if (task.selectedSession && !task.newSessionRequired) return std::nullopt;
+    const auto live = botSetup.liveIntake(intake, task.botId, task.intent);
+    if (!live) return std::nullopt;
+    return live->config.value("session", Json::object());
+}
+
 void runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient, FailureCause cause) {
     const auto attempts = event["failures"].get<int>() + 1;
     const auto why = bounded(secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
@@ -353,11 +360,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
             if (recordsTaskDecisionReason(decision->tool) && !validDecisionReason(decision->reason))
                 throw Conflict("This action requires a brief reason");
             if (decision->setup && !botSetup.applyForTask(task, *decision->setup, clock(), decision->attemptId)) return;
-            std::optional<Json> launchDefaults;
-            if (decision->tool == "delegate" && (!task.selectedSession || task.newSessionRequired))
-                if (const auto live = botSetup.liveIntake(intake, task.botId, task.intent))
-                    launchDefaults = live->config.value("session", Json::object());
-            decisions.accept(task, event, *decision, {}, launchDefaults ? &*launchDefaults : nullptr);
+            const auto defaults = decision->tool == "delegate" ? launchDefaults(task) : std::nullopt;
+            decisions.accept(task, event, *decision, {}, defaults ? &*defaults : nullptr);
         } catch (const Conflict& error) {
             decisions.rejectDecision(task, event, *decision, error.what());
         }

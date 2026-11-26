@@ -241,20 +241,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         }
         if (tool == "follow_up" && current.newSessionRequired) throw Conflict("Start a new Session in the current environment");
         if (work) updates.establishCriteria(current, args);
-        if (launchDefaults) {
-            auto session = current.config.value("session", Json::object());
-            if (!session.is_object()) session = Json::object();
-            for (const auto* key : {"model", "providerInstanceId", "workspaceStrategy"}) {
-                if (launchDefaults->contains(key))
-                    session[key] = launchDefaults->at(key);
-                else
-                    session.erase(key);
-            }
-            if (session.empty())
-                current.config.erase("session");
-            else
-                current.config["session"] = std::move(session);
-        }
+        if (launchDefaults) applyLaunchDefaults(current, *launchDefaults);
         updates.consumeEvent(current);
         const auto action = actionId();
         updates.recordDecision(current, event, decision, action);
@@ -273,7 +260,22 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
     });
 }
 
-bool runtime::TaskDecisions::continueStage(const TaskData& task) {
+void runtime::TaskDecisions::applyLaunchDefaults(TaskData& task, const Json& defaults) {
+    auto session = task.config.value("session", Json::object());
+    if (!session.is_object()) session = Json::object();
+    for (const auto* key : {"model", "providerInstanceId", "workspaceStrategy"}) {
+        if (defaults.contains(key))
+            session[key] = defaults.at(key);
+        else
+            session.erase(key);
+    }
+    if (session.empty())
+        task.config.erase("session");
+    else
+        task.config["session"] = std::move(session);
+}
+
+bool runtime::TaskDecisions::continueStage(const TaskData& task, const Json* launchDefaults) {
     if ((!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
@@ -287,6 +289,7 @@ bool runtime::TaskDecisions::continueStage(const TaskData& task) {
         const auto action = actionId();
         if (event.contains("id")) updates.recordDecision(current, event, decision, action);
         updates.consumeEvent(current);
+        if (launchDefaults && tool == CommandTool::delegate) applyLaunchDefaults(current, *launchDefaults);
         dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
         return true;
     });
