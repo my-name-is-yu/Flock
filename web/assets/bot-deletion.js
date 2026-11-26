@@ -1,3 +1,5 @@
+import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+
 const errors = new Map([
   ['bot_busy', 'Finish or stop this Bot’s active work, then try again.'],
   ['access_denied', 'You do not have permission to delete this Bot.'],
@@ -28,6 +30,7 @@ export function mountBotDeletion(dialog, { remove, onDeleted, focusFallback }) {
   dialog.addEventListener('cancel', (event) => {
     if (confirm.disabled) event.preventDefault();
   });
+  enableBackdropDismiss(dialog, { canDismiss: () => !confirm.disabled });
   dialog.addEventListener('close', () => {
     if (dialog.open || !target) return;
     const { origin } = target;

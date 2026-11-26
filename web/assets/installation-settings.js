@@ -1,10 +1,12 @@
 import { actionButton, element, row, rowLabel } from '/settings-ui.js';
+import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 const $ = (id) => document.getElementById(id);
 const editor = $('installation-editor');
 const feedback = $('installation-editor-status');
 let installation;
 let saving = false;
+let backdropDismissible = true;
 let returnFocus;
 
 export function postSettings(path, data) {
@@ -21,6 +23,7 @@ function showFeedback(message) {
 }
 
 function openEditor(title, description, ...content) {
+  backdropDismissible = true;
   if (!editor.open) returnFocus = document.activeElement;
   $('installation-editor-title').textContent = title;
   $('installation-editor-content').replaceChildren(
@@ -34,6 +37,7 @@ function openEditor(title, description, ...content) {
 
 $('installation-editor-close').onclick = () => { if (!saving) editor.close(); };
 editor.addEventListener('cancel', (event) => { if (saving) event.preventDefault(); });
+enableBackdropDismiss(editor, { canDismiss: () => !saving && backdropDismissible });
 editor.addEventListener('close', () => {
   $('installation-editor-content').replaceChildren();
   showFeedback('');
@@ -523,6 +527,7 @@ function showCredential(title, {person, password}, {activate} = {}) {
     ? 'Save this password. You’ll need to enter it in the next step.'
     : 'Share this password with the invited person. It will appear here only once.';
   openEditor(title, description, user, credential, actions);
+  backdropDismissible = false;
 }
 
 async function activateAdmin(password) {

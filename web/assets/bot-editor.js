@@ -6,6 +6,7 @@ import {
   showAvatar,
 } from '/avatars.js';
 import { createProjectPicker } from '/project-picker.js';
+import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 // A preset only seeds the new Bot's SOUL.md; what the Bot does is up to the user afterwards.
 const PRESETS = [
@@ -711,6 +712,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   });
   for (const btn of dialog.querySelectorAll('[data-close]')) btn.addEventListener('click', () => { if (!saving) dialog.close(); });
   dialog.addEventListener('cancel', (event) => { if (saving) event.preventDefault(); });
+  enableBackdropDismiss(dialog, { canDismiss: () => !saving });
 
   els.nameInput.addEventListener('input', () => {
     state.name = els.nameInput.value;

@@ -1,4 +1,5 @@
 import { accentColor } from '/avatars.js';
+import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 export function mountBotPause(dialog, save) {
   const title = dialog.querySelector('#bot-pause-title');
@@ -39,6 +40,7 @@ export function mountBotPause(dialog, save) {
   dialog.addEventListener('cancel', (event) => {
     if (confirm.disabled) event.preventDefault();
   });
+  enableBackdropDismiss(dialog, { canDismiss: () => !confirm.disabled });
   cancel.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => {
     if (dialog.open) return;
