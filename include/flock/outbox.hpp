@@ -41,10 +41,18 @@ struct OutboxContext {
     std::optional<std::string> peerMessageId;
 };
 
-struct SessionMemory {
-    std::int64_t version;
+template <typename Version> struct SessionContextSection {
+    Version version;
     std::string section;
     std::size_t excerptBytes;
+};
+
+using SessionRole = SessionContextSection<std::string>;
+using SessionMemory = SessionContextSection<std::int64_t>;
+
+struct SessionContext {
+    std::optional<SessionRole> role;
+    std::optional<SessionMemory> memory;
 };
 
 struct OutboxAction {
@@ -63,6 +71,6 @@ struct OutboxAction {
 
 struct Outbox : OutboxAction {
     std::string authGeneration;
-    std::optional<SessionMemory> sessionMemory;
+    SessionContext sessionContext;
 };
 }

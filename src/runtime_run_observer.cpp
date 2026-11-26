@@ -88,6 +88,9 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
         const bool connectionWait = reason == WaitReason::auth || reason == WaitReason::settings;
         const bool replanning = task.replanning;
         if (observed.kind == Observation::Kind::Finished) {
+            if (observed.cancelledBeforeStart)
+                database.exec("UPDATE runs SET cancelled_before_start=1 WHERE task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
+                              {task.id, task.activeRun->environmentId, run.threadId, run.runId});
             questions.closeQuestion(task, "run_finished");
             if (!task.actionId.empty()) {
                 const auto action = outboxStorage.outbox(task);

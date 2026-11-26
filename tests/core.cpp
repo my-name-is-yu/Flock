@@ -114,7 +114,8 @@ struct FixedT3 : T3 {
     Delivery send(const Command& cmd) override {
         if (cmd.tool == CommandTool::delegate) {
             ++launches;
-            check(!cmd.actionId.empty() && cmd.instruction.starts_with("Check main") &&
+            check(!cmd.actionId.empty() && cmd.instruction.starts_with("Standing rules from release's role:\nCheck the branch\n\n") &&
+                      cmd.instruction.find("\n\nCheck main\n\n") != std::string::npos &&
                       cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos,
                   "T3 did not receive the work instruction and its recovery identifier");
             return {Delivery::Kind::Accepted, {"thread-1", "run-1", "t3://thread-1"}, {}};

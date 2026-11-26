@@ -11,7 +11,9 @@ export function createBotRoleCard(saveRole) {
     <button type="button" class="text-button settings-soul-toggle" aria-expanded="false"
       aria-controls="settings-role-text" hidden>Show all</button>
     <form class="settings-role-form" hidden>
+      <p class="settings-role-hint" id="settings-role-hint">Guides this Bot and the Sessions it starts.</p>
       <textarea class="settings-role-input" rows="8" aria-labelledby="settings-role-label"
+        aria-describedby="settings-role-hint"
         placeholder="For example: Reviews release branches, runs the checks, and reports what blocks shipping."></textarea>
       <div class="settings-card-actions">
         <button type="button" class="dialog-button quiet">Cancel</button>

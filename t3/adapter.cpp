@@ -370,20 +370,30 @@ public:
         const auto& parent = wait.parent;
         if (!terminal(parent.status)) return std::nullopt;
         auto source = RunRef{assigned.threadId, parent.runId, assigned.link, assigned.gatewayEnvironmentId};
+        const bool assignedCancellation = parent.status == "cancelled" && parent.runId == assigned.runId;
+        if (parent.timedOut && !assignedCancellation) return std::nullopt;
+        bool cancelledBeforeStart = false;
+        if (assignedCancellation) {
+            try {
+                head = threadHead(client, assigned.threadId, 50);
+                cancelledBeforeStart = cancelledBeforeStarting(*head, assigned.runId);
+            } catch (const Failure&) {
+                if (parent.timedOut) throw;
+            }
+        }
         if (parent.timedOut) {
-            if (parent.status != "cancelled" || parent.runId != assigned.runId) return std::nullopt;
-            head = threadHead(client, assigned.threadId, 50);
-            if (!cancelledBeforeStarting(*head, assigned.runId)) return std::nullopt;
+            if (!cancelledBeforeStart) return std::nullopt;
             const auto exact = waitForRun(client, assigned);
             if (exact.runId != assigned.runId || exact.status != "cancelled" || exact.timedOut) return std::nullopt;
         } else {
             if (wait.resultRunId.empty() || !terminal(wait.resultStatus)) invalidResponse();
             if (ownsResult(client, assigned, parent.runId, wait.resultRunId)) {
                 source.runId = wait.resultRunId;
-                return RunSettlement(std::move(source), wait.resultStatus);
+                return RunSettlement(std::move(source), wait.resultStatus,
+                                     cancelledBeforeStart && wait.resultRunId == assigned.runId && wait.resultStatus == "cancelled");
             }
         }
-        return RunSettlement(std::move(source), parent.status);
+        return RunSettlement(std::move(source), parent.status, cancelledBeforeStart);
     }
 
     const RunRef& source() const { return source_; }
@@ -393,13 +403,16 @@ public:
         observed.kind = Observed::Finished;
         observed.status = status_;
         observed.resultRunId = source_.runId;
+        observed.cancelledBeforeStart = cancelledBeforeStart_;
         return observed;
     }
 private:
-    RunSettlement(RunRef source, std::string status) : source_(std::move(source)), status_(std::move(status)) {}
+    RunSettlement(RunRef source, std::string status, bool cancelledBeforeStart)
+        : source_(std::move(source)), status_(std::move(status)), cancelledBeforeStart_(cancelledBeforeStart) {}
 
     RunRef source_;
     std::string status_;
+    bool cancelledBeforeStart_;
 };
 
 std::set<std::string> pending(Client& client, const std::string& threadId) {

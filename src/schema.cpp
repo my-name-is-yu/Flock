@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 17;
+constexpr Id schemaVersion = 18;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -78,11 +78,14 @@ CREATE TABLE outbox(
   session_participation_id INTEGER, stop_operation TEXT, instruction TEXT NOT NULL,
   instruction_deferred INTEGER NOT NULL DEFAULT 0 CHECK(instruction_deferred IN (0,1)),
   memory_version INTEGER, memory_section TEXT, memory_excerpt_bytes INTEGER,
-  CHECK((memory_version IS NULL)=(memory_section IS NULL) AND (memory_version IS NULL)=(memory_excerpt_bytes IS NULL)));
+  role_hash TEXT, role_section TEXT, role_excerpt_bytes INTEGER,
+  CHECK((memory_version IS NULL)=(memory_section IS NULL) AND (memory_version IS NULL)=(memory_excerpt_bytes IS NULL)),
+  CHECK((role_hash IS NULL)=(role_section IS NULL) AND (role_hash IS NULL)=(role_excerpt_bytes IS NULL)));
 CREATE INDEX outbox_task ON outbox(task_id);
 CREATE TABLE runs(
   action_id TEXT PRIMARY KEY REFERENCES outbox(id), task_id INTEGER NOT NULL REFERENCES tasks(id),
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,
+  cancelled_before_start INTEGER NOT NULL DEFAULT 0 CHECK(cancelled_before_start IN (0,1)),
   UNIQUE(environment_id,thread_id,run_id));
 CREATE INDEX runs_task ON runs(task_id,action_id);
 CREATE TABLE session_read_refs(
@@ -432,7 +435,7 @@ CREATE VIEW automation_before_dispatch AS
 SELECT task.id FROM tasks task
 WHERE task.project_id<>'' AND task.trigger_data IS NOT NULL AND task.active_run IS NULL AND task.last_run IS NULL
   AND NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
-  AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id);
+  AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id AND phase IN ('started','accepted'));
 CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id

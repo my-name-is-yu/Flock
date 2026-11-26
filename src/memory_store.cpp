@@ -3,8 +3,6 @@
 #include "conversation_turns.hpp"
 #include "memory_storage.hpp"
 #include "flock/outbox.hpp"
-#include "flock/session_prompt.hpp"
-#include "flock/t3_command.hpp"
 
 #include "conversation_storage.hpp"
 #include "database.hpp"
@@ -19,10 +17,10 @@
 #include "flock/person.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
-#include "flock/outbox.hpp"
 #include "json_fields.hpp"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,6 +28,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <sqlite3.h>
 
 namespace flockv0 {
@@ -84,6 +83,76 @@ Json revisionView(const Statement& row) {
             {"createdAt", row.number(5)},
             {"revertedFrom", row.number(6) ? Json(row.number(6)) : Json(nullptr)}};
 }
+
+std::string roleHash(std::string_view text) {
+    std::array<unsigned char, 32> digest{};
+    unsigned int size = 0;
+    if (EVP_Digest(text.data(), text.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1 || size != digest.size())
+        throw Conflict("Could not hash the Bot's Role");
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(digest.size() * 2);
+    for (const auto byte : digest) {
+        hex += digits[byte >> 4];
+        hex += digits[byte & 15];
+    }
+    return hex;
+}
+
+SessionContext lastSessionContext(Database& database, const SessionContextTarget& target) {
+    SessionContext context;
+    if (target.threadId.empty()) return context;
+    auto prior = database.query(R"SQL(
+SELECT t.bot_id,r.cancelled_before_start,
+       o.role_hash,o.role_section,o.role_excerpt_bytes,o.memory_version,o.memory_section,o.memory_excerpt_bytes
+FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+WHERE r.environment_id=? AND r.thread_id=?
+ORDER BY r.rowid DESC
+)SQL",
+                                {target.environmentId, target.threadId});
+    while ((!context.role || !context.memory) && prior.next()) {
+        if (prior.string(0) != target.bot) break;
+        if (prior.number(1)) continue;
+        if (!context.role && !prior.null(2))
+            context.role = SessionRole{prior.string(2), prior.string(3), static_cast<std::size_t>(prior.number(4))};
+        if (!context.memory && !prior.null(5))
+            context.memory = SessionMemory{prior.number(5), prior.string(6), static_cast<std::size_t>(prior.number(7))};
+    }
+    return context;
+}
+
+struct SessionSectionText {
+    std::string heading;
+    std::string_view cleared, truncated;
+};
+
+template <typename Version>
+std::optional<SessionContextSection<Version>> sessionExcerpt(Version version, std::string_view content, const SessionSectionText& text,
+                                                             const std::optional<SessionContextSection<Version>>& prior,
+                                                             std::size_t budget) {
+    constexpr std::string_view separator = "\n\n";
+    if (content.find_first_not_of(" \t\r\n") == content.npos) {
+        if (!prior) return std::nullopt;
+        content = text.cleared;
+    }
+    const auto overhead = text.heading.size() + separator.size();
+    if (budget <= overhead) return std::nullopt;
+    auto excerptBytes = budget - overhead;
+    const bool truncated = content.size() > excerptBytes;
+    if (truncated) {
+        if (excerptBytes <= text.truncated.size()) return std::nullopt;
+        excerptBytes -= text.truncated.size();
+    }
+    const auto excerpt = bounded(content, excerptBytes);
+    if (excerpt.empty()) return std::nullopt;
+    auto section = text.heading + excerpt;
+    if (prior && prior->version == version && prior->excerptBytes >= excerpt.size() && prior->section.starts_with(section))
+        return std::nullopt;
+    if (truncated) section += text.truncated;
+    section += separator;
+    if (prior && prior->section == section) return std::nullopt;
+    return SessionContextSection<Version>{std::move(version), std::move(section), excerpt.size()};
+}
 }
 
 MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Policy& permissions,
@@ -108,45 +177,26 @@ BotNotes MemoryStorage::loadNotes(std::string_view bot, const SoulLoader& soul, 
     return notes;
 }
 
-std::optional<SessionMemory> MemoryStorage::sessionMemory(const Command& command, Seconds now) {
-    if (command.instruction.size() >= limits::session_prompt::maxBytes) return std::nullopt;
-    const auto& bot = command.ownerBotId;
+SessionContext MemoryStorage::sessionContext(const SessionContextTarget& target, const SoulLoader& soul, const SecretRedactor& scrub,
+                                             std::size_t bytes, Seconds now) {
+    if (bytes == 0) return {};
+    const auto bot = target.bot;
+    const auto role = soul ? scrub.text(soul(bot)) : std::string{};
     const auto key = privateKey(bot);
     const auto doc = findMemory(database_.db, key);
     const auto version = doc ? doc->version : Id{0};
-    const auto scrub = secretStorage_.redactor(bot);
-    auto excerpt = doc ? scrub.text(doc->content) : seedPrivateMemory(key, bot, scrub, now);
-    if (excerpt.find_first_not_of(" \t\r\n") == excerpt.npos) return std::nullopt;
-    const auto marker = sessionPrompt(command.actionId, {});
-    const auto bytes = std::min(limits::memory::maxDocumentBytes, limits::session_prompt::maxBytes - command.instruction.size());
-    const auto label = field(command.config, "botDisplayName");
-    const auto heading = "\n\nNotes from " + bounded(scrub.text(label.empty() ? bot : label), 128) + "'s memory:\n";
-    constexpr std::string_view truncation = "\n[Bot memory truncated]";
-    const bool truncated = heading.size() + excerpt.size() > bytes;
-    if (truncated) {
-        if (bytes <= heading.size() + truncation.size()) return std::nullopt;
-        excerpt = bounded(excerpt, bytes - heading.size() - truncation.size());
-        if (excerpt.empty()) return std::nullopt;
-    }
-    auto section = heading + excerpt;
-    if (truncated) section += truncation;
-    if (command.tool == CommandTool::follow_up) {
-        auto prior = database_.query(R"SQL(
-SELECT o.memory_section,o.memory_excerpt_bytes
-FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
-WHERE r.environment_id=? AND r.thread_id=? AND t.bot_id=?
-  AND o.memory_version=?
-)SQL",
-                                     {command.environmentId, command.target.threadId, bot, version});
-        const auto prefix = std::string_view(section).substr(0, heading.size() + excerpt.size());
-        while (prior.next()) {
-            const auto saved = prior.string(0);
-            if (saved == section || (prior.number(1) >= static_cast<Id>(excerpt.size()) && saved.starts_with(prefix))) return std::nullopt;
-        }
-    }
-    const auto base = command.instruction.substr(0, command.instruction.size() - marker.size());
-    if (scrub.containsProtectedText(base + section + marker)) return std::nullopt;
-    return SessionMemory{version, std::move(section), excerpt.size()};
+    const auto memory = doc ? scrub.text(doc->content) : seedPrivateMemory(key, bot, scrub, now);
+    const auto prior = lastSessionContext(database_, target);
+    const auto name = bounded(scrub.text(target.displayName.empty() ? bot : target.displayName), 128);
+    SessionContext context;
+    context.role =
+        sessionExcerpt(roleHash(role), role, {"Standing rules from " + name + "'s role:\n", "No standing rules.", "\n[Bot role truncated]"},
+                       prior.role, std::min(maxBotRoleBytes, bytes));
+    if (context.role) bytes -= context.role->section.size();
+    context.memory =
+        sessionExcerpt(version, memory, {"Notes from " + name + "'s memory:\n", "No memory notes.", "\n[Bot memory truncated]"},
+                       prior.memory, std::min(limits::memory::maxDocumentBytes, bytes));
+    return context;
 }
 
 void MemoryStorage::createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now) {

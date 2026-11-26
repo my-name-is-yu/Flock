@@ -61,8 +61,8 @@ Json payload() {
 }
 
 Json storedAction() {
-    return Json::array(
-        {"follow_up", "environment", "project", 13, 18, "stop-action", "Continue the work", 0, 0, "Session notes", 21, payload()});
+    return Json::array({"follow_up", "environment", "project", 13, 18, "stop-action", "Continue the work", 0, 0, "Session notes", 21,
+                        "role-hash", "Standing rules", 14, payload()});
 }
 
 Outbox decode(Json columns, std::string_view phase = "ready", std::string_view auth = authGeneration) {
@@ -71,7 +71,7 @@ Outbox decode(Json columns, std::string_view phase = "ready", std::string_view a
     const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
     check(opened == SQLITE_OK, "Could not open the outbox row fixture");
     columns.insert(columns.begin(), {id, phase, auth});
-    Statement row(db.get(), "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?", columns);
+    Statement row(db.get(), "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?", columns);
     check(row.next(), "Outbox row fixture returned no rows");
     return decodeOutboxRow(row);
 }
@@ -94,16 +94,18 @@ void roundTripPhases() {
         check(row.stop && row.stop->run && row.stop->run->runId == "stop-run" && row.stop->approval &&
                   row.stop->approval->scope == "task/11" && row.stop->operation == "stop-action",
               "Outbox lost its stop request");
-        check(row.sessionMemory && row.sessionMemory->version == 0 && row.sessionMemory->section == "Session notes" &&
-                  row.sessionMemory->excerptBytes == 21,
+        const auto& [role, memory] = row.sessionContext;
+        check(memory && memory->version == 0 && memory->section == "Session notes" && memory->excerptBytes == 21,
               "Outbox lost its version-zero memory snapshot");
+        check(role && role->version == "role-hash" && role->section == "Standing rules" && role->excerptBytes == 14,
+              "Outbox lost its Role snapshot");
         const auto encoded = outboxColumnValues(row);
         check(encoded == stored, "Outbox columns and payload changed on round-trip. Diff " + Json::diff(stored, encoded).dump());
         const auto wire = outboxActionJson(row);
         check(wire.at("tool") == "follow_up" && wire.at("environmentId") == "environment" && wire.at("projectId") == "project" &&
                   wire.at("revisionId") == 13 && wire.at("sessionParticipationId") == 18 && wire.at("stopRequested") == true &&
                   wire.at("stopOperation") == "stop-action" && wire.at("instruction") == "Continue the work" &&
-                  !wire.contains("sessionMemory"),
+                  !wire.contains("sessionContext") && !wire.contains("sessionRole") && !wire.contains("sessionMemory"),
               "Stored columns changed the outbox action projection");
     }
 }
@@ -121,7 +123,8 @@ void roundTripDeferredAndAnswerCommands() {
               wire.at("instructionBase") == "Start the work",
           "A deferred launch projected a concrete target, revision or instruction");
     check(row.instructionBase == deferred.instructionBase && !row.revisionId && row.command.target.threadId.empty() &&
-              !row.command.candidate && !row.stop && !row.sessionMemory && outboxColumnValues(row) == stored,
+              !row.command.candidate && !row.stop && !row.sessionContext.role && !row.sessionContext.memory &&
+              outboxColumnValues(row) == stored,
           "A deferred launch did not round-trip");
 
     deferred.command.tool = CommandTool::start_in_session;
@@ -176,6 +179,9 @@ void rejectsInvalidRows() {
     invalid = stored;
     invalid.at(10) = -1;
     expectDecodeError(invalid, "sessionMemory.excerptBytes");
+    invalid = stored;
+    invalid.at(13) = -1;
+    expectDecodeError(invalid, "sessionRole.excerptBytes");
     invalid = stored;
     invalid.back()["answers"]["checks"] = Json::array({"unit", false});
     expectDecodeError(invalid, "answers.checks");

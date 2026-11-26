@@ -108,6 +108,10 @@ void runtime::TaskScheduler::activate(TaskData task) {
     updates.change(task, [&](TaskData& current) {
         auto turn = database.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
         if (!turn.next()) return false;
+        if (!current.actionId.empty()) {
+            current.state = TaskState::sending;
+            return true;
+        }
         if (current.workflow && !current.lastRun) {
             dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object());
             return true;

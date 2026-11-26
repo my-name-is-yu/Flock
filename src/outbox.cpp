@@ -159,8 +159,9 @@ void writeStopPayload(Json& data, const OutboxStop& stop) {
 }
 
 constexpr std::string_view outboxColumns = "tool,environment_id,project_id,revision_id,session_participation_id,stop_operation,"
-                                           "instruction,instruction_deferred,memory_version,memory_section,memory_excerpt_bytes,data";
-constexpr std::string_view outboxBindings = "(?,?,?,?,?,?,?,?,?,?,?,?)";
+                                           "instruction,instruction_deferred,memory_version,memory_section,memory_excerpt_bytes,"
+                                           "role_hash,role_section,role_excerpt_bytes,data";
+constexpr std::string_view outboxBindings = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 const auto outboxUpdate = "UPDATE outbox SET (" + std::string(outboxColumns) + ")=" + std::string(outboxBindings);
 }
 
@@ -319,13 +320,14 @@ Json outboxActionJson(const OutboxAction& outbox) {
 
 Json outboxColumnValues(const Outbox& outbox) {
     const auto& command = outbox.command;
-    const auto& memory = outbox.sessionMemory;
+    const auto& [role, memory] = outbox.sessionContext;
     return Json::array({commandToolName(command.tool), command.environmentId, command.projectId, nullableId(outbox.revisionId),
                         nullableId(outbox.sessionParticipationId), outbox.stop ? Json(outbox.stop->operation) : Json(nullptr),
                         outbox.instructionBase ? *outbox.instructionBase : command.instruction,
                         static_cast<int>(outbox.instructionBase.has_value()), memory ? Json(memory->version) : Json(nullptr),
                         memory ? Json(memory->section) : Json(nullptr), memory ? Json(memory->excerptBytes) : Json(nullptr),
-                        outboxPayload(outbox)});
+                        role ? Json(role->version) : Json(nullptr), role ? Json(role->section) : Json(nullptr),
+                        role ? Json(role->excerptBytes) : Json(nullptr), outboxPayload(outbox)});
 }
 
 Outbox decodeOutboxRow(const Statement& columns) {
@@ -333,7 +335,7 @@ Outbox decodeOutboxRow(const Statement& columns) {
     const RecordDecoder row("outbox", id);
     const auto storedPhase = enumValue(outboxPhases, columns.string(1));
     if (!storedPhase) row.fail("phase", "unknown outbox phase");
-    const auto data = row.parse(columns.string(14));
+    const auto data = row.parse(columns.string(17));
     row.object(data);
 
     const auto tool = commandToolFromName(columns.string(3));
@@ -374,7 +376,12 @@ Outbox decodeOutboxRow(const Statement& columns) {
     if (!columns.null(11)) {
         const auto excerptBytes = columns.number(13);
         if (!std::in_range<std::size_t>(excerptBytes)) row.fail("sessionMemory.excerptBytes", "integer out of range");
-        outbox.sessionMemory = SessionMemory{columns.number(11), columns.string(12), static_cast<std::size_t>(excerptBytes)};
+        outbox.sessionContext.memory = SessionMemory{columns.number(11), columns.string(12), static_cast<std::size_t>(excerptBytes)};
+    }
+    if (!columns.null(14)) {
+        const auto excerptBytes = columns.number(16);
+        if (!std::in_range<std::size_t>(excerptBytes)) row.fail("sessionRole.excerptBytes", "integer out of range");
+        outbox.sessionContext.role = SessionRole{columns.string(14), columns.string(15), static_cast<std::size_t>(excerptBytes)};
     }
     outbox.stop = readStop(data, row, columns.null(8) ? std::nullopt : std::optional{columns.string(8)});
     return outbox;
@@ -390,8 +397,8 @@ std::optional<Outbox> OutboxStorage::outbox(const TaskData& task, std::string_vi
 }
 
 void OutboxStorage::insertOutbox(Id task, const Outbox& action) {
-    static const auto sql =
-        "INSERT INTO outbox(" + std::string(outboxColumns) + ",id,task_id,phase,auth_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    static const auto sql = "INSERT INTO outbox(" + std::string(outboxColumns) +
+                            ",id,task_id,phase,auth_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
     auto values = outboxColumnValues(action);
     values.push_back(action.command.actionId);
     values.push_back(task);
