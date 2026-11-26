@@ -20,17 +20,14 @@ class ConversationStorage;
 class BotLifecycleStorage;
 class Database;
 class GitHost;
-class InboxStorage;
 class JournalStorage;
 class SecretStorage;
 class TaskRecords;
 struct Decision;
 struct GitContext;
 struct GitOpenPr;
-struct GitPullRequest;
 struct GitRepository;
 struct GitWebhook;
-struct InboxTarget;
 struct TaskData;
 struct WebIdentityState;
 
@@ -42,13 +39,13 @@ class PolicyApprovals;
 class SessionParticipationStorage;
 class GitStorage {
 public:
-    GitStorage(Database& database, SecretStorage& secretStorage, InboxStorage& inboxStorage, TaskRecords& taskRecords,
-               JournalStorage& journalStorage, const WebIdentityState& webIdentity, Policy& permissions,
-               ConversationStorage& conversationTurns, const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
+    GitStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, JournalStorage& journalStorage,
+               const WebIdentityState& webIdentity, Policy& permissions, ConversationStorage& conversationTurns,
+               const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
                SessionParticipationStorage& sessionParticipationStorage)
-        : database(database), secretStorage(secretStorage), inboxStorage(inboxStorage), taskRecords(taskRecords),
-          journalStorage(journalStorage), webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns),
-          policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
+        : database(database), secretStorage(secretStorage), taskRecords(taskRecords), journalStorage(journalStorage),
+          webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns), policyApprovals(policyApprovals),
+          sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
 
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -59,7 +56,6 @@ public:
     void deliverGitWebhooks();
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
     bool receiveGitWebhook(const GitWebhook&);
-    void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const TaskData&);
 
     struct GitPrFollowup {
         enum class Status { available, attempted };
@@ -86,16 +82,16 @@ private:
 
     static Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
     Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
-    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent, std::string_view reason);
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent, std::optional<Id> prNumber,
+                   std::string_view reason);
     Id latestGitWebhookId() const;
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     enum class GitWatchResult { attached, taskEnded, unavailable };
-    GitWatchResult watchGitPr(const TaskData&, const Json& run, Id deliveryCursor, const GitPullRequest&);
-    void gitInboxItem(const TaskData&, std::string_view key, std::string_view url, std::string_view title, std::string_view prompt);
+    GitWatchResult watchGitPr(const TaskData&, const Json& run, Id deliveryCursor, const GitRepository&, Id pr, std::string_view url,
+                              std::string_view headSha);
 
     Database& database;
     SecretStorage& secretStorage;
-    InboxStorage& inboxStorage;
     TaskRecords& taskRecords;
     JournalStorage& journalStorage;
     const WebIdentityState& webIdentity;

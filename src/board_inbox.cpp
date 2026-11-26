@@ -1,9 +1,7 @@
 #include "policy_internal.hpp"
-#include "git_storage.hpp"
 #include "flock/decision_errors.hpp"
 #include "inbox_storage.hpp"
 #include "task_operations.hpp"
-#include "journal_peer.hpp"
 #include "task_storage.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/types.hpp"
@@ -17,7 +15,6 @@
 #include "flock/policy.hpp"
 #include "policy_approvals.hpp"
 #include "secret_storage.hpp"
-#include "journal_storage.hpp"
 #include "task_records.hpp"
 #include "flock/task_target.hpp"
 
@@ -34,9 +31,10 @@
 namespace flockv0 {
 namespace {
 using enum InboxKind;
-constexpr std::pair<InboxKind, std::string_view> kinds[] = {
-    {user_question, "user_question"}, {unknown_delivery, "unknown_delivery"},   {protected_input, "protected_input"},
-    {pr_review, "pr_review"},         {pr_reconciliation, "pr_reconciliation"}, {policy_approval, "policy_approval"}};
+constexpr std::pair<InboxKind, std::string_view> kinds[] = {{user_question, "user_question"},
+                                                            {unknown_delivery, "unknown_delivery"},
+                                                            {protected_input, "protected_input"},
+                                                            {policy_approval, "policy_approval"}};
 
 Json key(const InboxTarget& item) {
     return {{"botId", item.botId},
@@ -74,10 +72,8 @@ bool validDecision(InboxKind kind, std::string_view decision) {
     case user_question: return decision == "answer";
     case unknown_delivery: return decision == "reconcile";
     case protected_input: return decision == "supply";
-    case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
     case policy_approval:
         return decision == "allow_once" || decision == "always_allow" || decision == "deny" || decision == "allow_next_time";
-    case pr_review: return decision == "approve" || decision == "request_changes";
     }
     return false;
 }
@@ -127,20 +123,6 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_creations UNION
         if (policy.allows(actor, Action::bot_view, id)) result.push_back(std::move(id));
     }
     return result;
-}
-
-Statement InboxStorage::actionablePrReviews(std::string_view bot) const {
-    static const auto sql = R"SQL(
-SELECT p.id,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id,)SQL" +
-                            taskProjection() + R"SQL(
-FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
-LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
-AND j.pr_review_item_id=p.id AND p.operation_id IS NULL
-WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
-    p.target_revision=coalesce(t.current_revision,0)
-    AND NOT t.replanning)) ORDER BY p.id DESC
-)SQL";
-    return database.query(sql.c_str(), {bot});
 }
 
 Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
@@ -211,19 +193,6 @@ ORDER BY p.id DESC
         while (inputs.next())
             addProtectedInput(protected_input, inputs.number(0), "Protected input", inputs.string(2),
                               "Supply a value for " + inputs.string(1), inputs.number(3));
-        auto reviews = actionablePrReviews(id);
-        while (reviews.next()) {
-            const auto task = taskRecords.readTask(reviews, 7);
-            const auto kind = reviews.number(4) ? pr_reconciliation : pr_review;
-            add({id, kind, reviews.number(0), 0, task.id, task.currentRevision.value_or(0), task.generation},
-                {{"requestTitle", taskTitle(task)},
-                 {"request", task.request},
-                 {"prompt", reviews.string(3)},
-                 {"prTitle", reviews.string(2)},
-                 {"prUrl", reviews.string(1)},
-                 {"candidates", reviews.json(5)}},
-                reviews.number(6));
-        }
     }
     snapshot.commit();
     return result;
@@ -293,7 +262,7 @@ WHERE d.bot_id=? ORDER BY d.id DESC LIMIT 100
     return result;
 }
 
-void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
+void InboxStorage::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
     std::lock_guard lock(database.mutex);
     policyApprovals.settlePolicyApprovals(policyApprovals.now());
     Transaction transaction(database.db);
@@ -312,28 +281,6 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
         policy_storage::fulfillSecret(database, policy, secretStorage, *this, actor, item.botId, item.itemId, textInput("value"));
-    } else if (kind == pr_review || kind == pr_reconciliation) {
-        if (!policy.allows(actor, Action::bot_decide, item.botId)) throw DecisionDenied{};
-        if (!database.query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?", {item.taskId, item.botId}).next()) throw RequestChanged{};
-        const auto task = taskRecords.load(item.taskId);
-        auto review = database.query("SELECT target_revision,status,operation_id IS NOT NULL"
-                                     " FROM pr_review_items WHERE id=? AND task_id=?",
-                                     {item.itemId, item.taskId});
-        if (!review.next()) throw RequestChanged{};
-        if (review.string(1) != "pending") throw DecisionUnavailable{};
-        if (review.number(2) != (kind == pr_reconciliation) || item.waitId || task.currentRevision.value_or(0) != item.targetRevision ||
-            task.generation != item.targetGeneration)
-            throw RequestChanged{};
-        if (kind == pr_review && (review.number(0) != item.targetRevision || task.replanning)) throw RequestChanged{};
-        if (kind == pr_reconciliation)
-            git.decideGitPr(item, decision, data, task);
-        else {
-            database.exec("UPDATE pr_review_items SET status=? WHERE id=?",
-                          {decision == "approve" ? "approved" : "changes_requested", item.itemId});
-            database.exec("DELETE FROM git_review_receipts WHERE inbox_key=(SELECT git_key FROM pr_review_items WHERE id=?)",
-                          {item.itemId});
-        }
-        recordInboxDecision(actor, item, decision);
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};
         auto args = Json::object();
@@ -347,23 +294,6 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
     transaction.commit();
 }
 
-void InboxStorage::insertPrReview(const TaskData& task, std::string_view url, std::string_view title, std::string_view prompt,
-                                  std::string_view gitKey, std::string_view operationId, const Json& candidates) {
-    if (!(url.starts_with("https://") || url.starts_with("http://")) || url.find_first_of(" \t\r\n") != url.npos ||
-        url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 || prompt.empty() || prompt.size() > 8000)
-        throw Conflict("A PR review needs a URL, title, and prompt");
-    const auto scrub = secretStorage.sharedRedactor();
-    scrub.requirePublic({url, candidates});
-    const auto savedTitle = scrub.text(title);
-    const auto savedPrompt = scrub.text(prompt);
-    database.exec("INSERT INTO pr_review_items(task_id,target_revision,url,title,prompt,git_key,operation_id,candidates)"
-                  " VALUES(?,?,?,?,?,?,?,?)",
-                  {task.id, task.currentRevision.value_or(0), url, savedTitle, savedPrompt, gitKey.empty() ? Json(nullptr) : Json(gitKey),
-                   operationId.empty() ? Json(nullptr) : Json(operationId), candidates});
-    if (operationId.empty())
-        journalStorage.journal(task.id, PrReviewRequestedEntry{database.last(), savedTitle, savedPrompt, std::string(url)});
-}
-
 Json Inbox::inbox(const Person& actor, std::string_view bot) const {
     return inbox_.inbox(actor, bot);
 }
@@ -373,6 +303,6 @@ Json Inbox::decisionHistory(const Person& actor, std::string_view bot) const {
 }
 
 void Inbox::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision, const Json& data) {
-    inbox_.decideInbox(git_, actor, item, decision, data);
+    inbox_.decideInbox(actor, item, decision, data);
 }
 }

@@ -518,6 +518,17 @@ void sessionInvitations() {
         bool inviteOnly = false;
 
         ModelTurn decide(const ModelInput& input) override {
+            if (!input.event.contains("sessionWake") && !input.event.contains("sessionInvitation")) return decideSession(input);
+            const auto& steps = input.event.at("turn");
+            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(), "A Session event offered a memory write");
+            if (steps.empty()) return {{{"write_memory", {{"baseVersion", 0}, {"content", "Injected"}, {"summary", "Injected"}}, {}}}};
+            check(steps.front().at("result").at("ok") == false, "A Session event performed a memory write");
+            auto remaining = input;
+            remaining.event["turn"].erase(remaining.event["turn"].begin());
+            return decideSession(remaining);
+        }
+
+        ModelTurn decideSession(const ModelInput& input) {
             const auto& event = input.event;
             const auto bot = input.config.at("botDisplayName").get<std::string>();
             const auto& steps = event.at("turn");
@@ -1302,8 +1313,9 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     ConversationIntake(*db).receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
     runtime->runConversations();
     auto sharedTools = model.ask.webTools;
-    check(std::erase(sharedTools, "review_preference") == 1 && sharedTools == model.ask.sessionTools,
-          "A Session ask should receive the Web Bot's tools except automatic memory");
+    check(std::erase(sharedTools, "write_memory") == 1 && std::erase(sharedTools, "revert_memory_edit") == 1 &&
+              sharedTools == model.ask.sessionTools,
+          "A Session ask should receive the Web Bot's tools except memory changes");
     check(participationState(database, "triage") == "left" && effects().at("t3_thread_send").size() == 4 &&
               model.ask.send.at("error") == "This Bot's participation in the Session has stopped",
           "A send reactivated a Bot that left");

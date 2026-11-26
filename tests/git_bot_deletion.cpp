@@ -6,7 +6,6 @@
 #include "fake_git.hpp"
 #include "fake_git_sessions.hpp"
 #include "flock/tasks.hpp"
-#include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
@@ -155,9 +154,6 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         for (int i = 0; i < 8 && Tasks(store).task(retired).task.state != TaskState::external_waiting; ++i) runtime.tick();
         check(Tasks(store).task(retired).task.state == TaskState::external_waiting && host->createCalls == 1,
               "The original PR task did not wait");
-        const auto pending = Inbox(store).inbox(localOwner, "owner");
-        check(pending.size() == 1 && pending.at(0).at("prTitle") == "Pull request awaiting review",
-              "Expected a pending review on the waiting task");
         bool busy = false;
         try {
             BotLifecycle(store).deleteBot(localOwner, "owner");
@@ -165,7 +161,6 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
             busy = true;
         }
         check(busy && !BotLifecycle(store).botDeleted("owner"), "An open PR task did not block Bot deletion");
-        Inbox(store).decideInbox(localOwner, target(pending.at(0)), "approve");
 
         sibling = TaskIntake(store).submit(intake("sibling", "sibling-project"));
         auto siblingArgs = openArgs("sibling-change");
@@ -217,20 +212,9 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
                                                            {1},
                                                            newHead,
                                                            "Requested Bob separately",
-                                                           0,
-                                                           {},
-                                                           "Bob"}) &&
-                       GitEvents(store).receiveGitWebhook({hostName,
-                                                           "matching-review",
-                                                           repoName,
-                                                           "pull_request",
-                                                           "review_requested",
-                                                           {1},
-                                                           newHead,
-                                                           "Requested Alice",
-                                                           0,
-                                                           {},
-                                                           "Alice"});
+                                                           0}) &&
+                       GitEvents(store).receiveGitWebhook(
+                           {hostName, "matching-review", repoName, "pull_request", "review_requested", {1}, newHead, "Requested Alice", 0});
             };
             webhookQueued->set_value(
                 GitEvents(store).receiveGitWebhook({hostName,
@@ -306,19 +290,6 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
                   history.find("after-handoff-explicit") != std::string::npos &&
                   history.find("after-handoff-commit") != std::string::npos && history.find("before-handoff") == std::string::npos,
               "The replacement watch lost new activity or replayed an old event after restart");
-        if (requestsReview) {
-            const auto inbox = Inbox(store).inbox(localOwner, "replacement");
-            const auto matching =
-                std::ranges::find_if(inbox, [](const Json& item) { return item.at("prompt") == "Review requested on the Git host."; });
-            check(history.find("matching-review") != std::string::npos && history.find("unrelated-review") != std::string::npos &&
-                      inbox.size() == 2 && matching != inbox.end(),
-                  "The review request lost a conversation event or created a duplicate inbox item");
-            Inbox(store).decideInbox(localOwner, target(*matching), "approve");
-            const auto remaining = Inbox(store).inbox(localOwner, "replacement");
-            check(remaining.size() == 1 && remaining.front().at("prompt") == "Requested Bob separately",
-                  "Review-request correlation removed an unrelated inbox item");
-        }
-
         const auto calls = host->hostCalls;
         const auto blocked = model.runTool(store, runtime, "sibling", "reclaim-active-watch", mutation(sibling));
         check(blocked.at("ok") == false && host->hostCalls == calls, "A competing task could claim the replacement's watch");

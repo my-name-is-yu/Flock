@@ -474,9 +474,10 @@ void conversationReadParity() {
     SecretRequests secretRequests{*f.store};
     const auto secret = secretRequests.requestSecret("alpha", {"fixture-token"});
     secretRequests.submitSecret(localOwner, "alpha", secret, "fixture-protected-value");
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Private notes"}});
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
-                            {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                            {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Private notes"}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                            {{"docId", sharedDoc}, {"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Shared playbook"}});
     for (const auto& read : {call("find_tasks", {{"taskId", task}}), call("read_result", {{"messageId", result}}),
                              call("workflow_status", {{"workflowId", workflow}}), call("list_schedules"), call("list_secrets"),
                              call("list_connections"), call("read_memory"), call("memory_history"),
@@ -509,8 +510,8 @@ void gatedRead(std::string_view tool, bool batch, bool allow, bool restart) {
     const bool events = tool == "flock_session_events";
     const auto read = events ? sessionEvents(f) : call(std::string(tool), {{"docId", sharedDoc}});
     if (!events)
-        Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
-                                {{"docId", sharedDoc}, {"baseVersion", 0}, {"content", "Shared playbook"}});
+        Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                                {{"docId", sharedDoc}, {"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Shared playbook"}});
     f.requireApproval(events ? Resource::sessionRead("env", "fixture-thread") : Resource{Action::shared_memory_read, sharedDoc});
     f.receive(batch ? std::vector{search, read} : std::vector{read});
     f.runtime->runConversations();

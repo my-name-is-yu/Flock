@@ -1838,7 +1838,8 @@ void learningNoticeEndpoints(const std::filesystem::path& path) {
     undo(data, 200);
     check(browser.get("/api/memory?bot=release").at("content") == "Initial convention", "Undo did not restore the prior memory exactly");
     const auto newer = learn("learning-again").at("data");
-    browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", newer.at("version")}, {"content", "A later edit"}});
+    browser.post("/api/memory/write",
+                 {{"botId", "release"}, {"baseVersion", newer.at("version")}, {"content", "A later edit"}, {"summary", "A later edit"}});
     undo(newer, 409);
     check(browser.get("/api/memory?bot=release").at("content") == "A later edit", "Stale Undo reverted a later edit");
 }
@@ -1858,37 +1859,24 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/memory?bot=release"), 401);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
     check(browser.get("/api/memory?bot=release").at("content") == "Initial convention", "Web memory seed missing");
-    const auto proposal = browser
-                              .post("/api/memory/propose",
-                                    {{"botId", "release"}, {"baseVersion", 0}, {"content", "New convention"}, {"rationale", "Use staging"}})
-                              .at("proposalId");
-    const auto revision =
-        browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", 0}, {"proposalId", proposal}}).at("revisionId").get<Id>();
-    browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", 0}, {"content", "Stale"}}, 409);
+    const auto edit = [&](int version, std::string_view content, int status = 200) {
+        return browser.post("/api/memory/write",
+                            {{"botId", "release"}, {"baseVersion", version}, {"content", content}, {"summary", "Set convention"}}, status);
+    };
+    const auto revision = edit(0, "New convention").at("revisionId").get<Id>();
+    edit(0, "Stale", 409);
     const auto detail = browser.get("/api/memory/history?bot=release&revisionId=" + std::to_string(revision));
     check(detail.at("previousContent") == "Initial convention" && detail.at("newContent") == "New convention",
           "Web revision did not expose the diff");
     browser.post("/api/memory/revert", {{"botId", "release"}, {"baseVersion", 1}, {"revisionId", revision}});
     check(browser.get("/api/memory?bot=release").at("content") == "Initial convention", "Web revert failed");
-    const auto pending =
-        browser
-            .post("/api/memory/propose",
-                  {{"botId", "release"}, {"baseVersion", 2}, {"content", "Pending convention"}, {"rationale", "Original proposal"}})
-            .at("proposalId");
-    for (int i = 0; i < 20; ++i) {
-        const auto newer =
-            browser
-                .post("/api/memory/propose",
-                      {{"botId", "release"}, {"baseVersion", 2}, {"content", "Newer convention"}, {"rationale", "Subsequent proposal"}})
-                .at("proposalId");
-        browser.post("/api/memory/reject", {{"botId", "release"}, {"proposalId", newer}});
-    }
+    for (int i = 0; i < 20; ++i) edit(i + 2, "Convention " + std::to_string(i));
     const auto firstPage = browser.get("/api/memory/history?bot=release");
     const auto older =
-        browser.get("/api/memory/history?bot=release&proposalsBefore=" + std::to_string(firstPage.at("proposalsBefore").get<Id>()))
-            .at("proposals");
-    check(firstPage.at("proposals").size() == 20 && older.at(0).at("id") == pending && older.at(0).at("status") == "pending",
-          "Newer proposals hid a pending proposal");
+        browser.get("/api/memory/history?bot=release&before=" + std::to_string(firstPage.at("before").get<Id>())).at("revisions");
+    check(firstPage.at("revisions").size() == 20 && older.size() == 2 && older.at(0).at("revertedFrom") == revision &&
+              older.at(1).at("author") == "person:owner",
+          "Memory history did not paginate revisions with their authors and undo links");
 
     const auto reminder = browser
                               .post("/api/schedules",
@@ -1934,7 +1922,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     BotAccess{store}.setMember(localOwner, "release", "reader", false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy", headers, webhook("event-1", "main"), "application/json"), 403);
     BotAccess{store}.setMember(localOwner, "release", "reader", true);
-    browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", 2}, {"content", "Unauthorized"}}, 403);
+    browser.post("/api/memory/write", {{"botId", "release"}, {"baseVersion", 2}, {"content", "Unauthorized"}}, 403);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
     const auto accepted = send(webhook("event-1", "main")), replayed = send(webhook("event-1", "main"));
     check(accepted.at("duplicate") == false && replayed.at("duplicate") == true && accepted.at("tasks").size() == 1 &&

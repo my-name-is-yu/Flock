@@ -1329,8 +1329,9 @@ void eventStream(const std::filesystem::path& path) {
                 args.update({{"taskId", task}, {"title", "Review the draft"}});
                 return {{{"git_open_pr", std::move(args), "Prepare the review fixture"}}};
             }
-            check(turn.front().at("result").at("status") == "created", "could not open the fixture PR");
-            return {{{"reply", {{"text", "Ready for review."}}, "Report the pull request"}}};
+            const auto& result = turn.front().at("result");
+            check(result.at("status") == "created", "could not open the fixture PR");
+            return {{{"reply", {{"text", "Opened " + result.at("url").get<std::string>()}}, "Report the pull request"}}};
         }
     } model;
     FixedT3 t3;
@@ -1338,67 +1339,43 @@ void eventStream(const std::filesystem::path& path) {
         store, model, t3, [](std::string_view) { return std::string{}; }, git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
     unsigned changes = 0;
     Id releaseTask = 0;
-    Json botsBeforeApproval;
-    Json approval;
-    bool approved = false;
-    readChanges(
-        stream, "/api/events?bot=release",
-        [&](const Json& change) {
-            if (changes >= 3) {
-                if (changes == 3) {
-                    check(change == Json{{"list", true}}, "another Bot invalidated the selected view");
-                    model.task = releaseTask;
-                    ConversationIntake(cli).receive(localOwner, web.intake("release", "unused"), "pr-review",
-                                                    "Open a pull request for review.");
-                    runtime.runConversations();
-                } else if (changes == 4) {
-                    check(change == Json{{"list", true}, {"bot", "release"}}, "the PR review source did not invalidate its conversation");
-                    const auto items = browser.get("/api/inbox?bot=release").at("items");
-                    check(items.size() == 1 && items.at(0).at("itemKind") == "pr_review",
-                          "the update did not expose the pending PR review");
-                    const auto events = browser.get("/api/view?bot=release").at("events");
-                    check(std::ranges::any_of(events,
-                                              [&](const auto& event) {
-                                                  return event.at("id") == items.at(0).at("conversationEventId") &&
-                                                         event.at("kind") == "pr_review_requested" &&
-                                                         event.at("data") == Json{{"itemId", items.at(0).at("itemId")},
-                                                                                  {"title", "Pull request awaiting review"},
-                                                                                  {"text", "Review the draft"},
-                                                                                  {"prUrl", "https://github.com/org/flock/pull/1"}};
-                                              }),
-                          "the PR review did not have an exact reply source in the Web view");
-                    approval = items.at(0);
-                    approval["decision"] = "approve";
-                } else {
-                    if (!approved) return true;
-                    check(change == Json{{"list", true}}, "an inbox-only approval invalidated the selected view");
-                    check(browser.get("/api/bots") == botsBeforeApproval && browser.get("/api/inbox?bot=release").at("items").empty(),
-                          "the Inbox-only invalidation did not remove the approved review");
-                    return false;
-                }
-                ++changes;
-                return true;
-            }
-            check(change == Json{{"list", true}, {"bot", "release"}}, "unexpected SSE invalidation scope or payload");
-            if (changes == 0) {
-                releaseTask = TaskIntake(cli).submit(web.intake("release", "CLI write"));
-            } else if (changes == 1) {
-                tick(runtime, 3);
+    readChanges(stream, "/api/events?bot=release", [&](const Json& change) {
+        if (changes >= 3) {
+            if (changes == 3) {
+                check(change == Json{{"list", true}}, "another Bot invalidated the selected view");
+                model.task = releaseTask;
+                ConversationIntake(cli).receive(localOwner, web.intake("release", "unused"), "pr-review",
+                                                "Open a pull request for review.");
+                runtime.runConversations();
             } else {
-                check(browser.get("/api/view?bot=release").at("presence") == "working",
-                      "a state-only Runtime change did not reach the view");
-                TaskIntake(cli).submit(web.intake("triage", "Other Bot"));
+                check(change == Json{{"list", true}, {"bot", "release"}}, "The Bot's PR reply did not invalidate its conversation");
+                check(browser.get("/api/inbox?bot=release").at("items").empty() &&
+                          browser.get("/api/inbox/history?bot=release").at("decisions").empty(),
+                      "Opening a PR appeared in Needs you or History");
+                const auto events = browser.get("/api/view?bot=release").at("events");
+                check(std::ranges::any_of(events,
+                                          [](const auto& event) {
+                                              return event.at("kind") == "conversation_reply" &&
+                                                     event.at("data").value("text", "") == "Opened https://github.com/org/flock/pull/1";
+                                          }),
+                      "The Bot's PR link did not appear in the Web conversation");
+                return false;
             }
             ++changes;
             return true;
-        },
-        [&] {
-            if (!approval.empty() && !approved) {
-                botsBeforeApproval = browser.get("/api/bots");
-                browser.post("/api/inbox/decide", approval);
-                approved = true;
-            }
-        });
+        }
+        check(change == Json{{"list", true}, {"bot", "release"}}, "unexpected SSE invalidation scope or payload");
+        if (changes == 0) {
+            releaseTask = TaskIntake(cli).submit(web.intake("release", "CLI write"));
+        } else if (changes == 1) {
+            tick(runtime, 3);
+        } else {
+            check(browser.get("/api/view?bot=release").at("presence") == "working", "a state-only Runtime change did not reach the view");
+            TaskIntake(cli).submit(web.intake("triage", "Other Bot"));
+        }
+        ++changes;
+        return true;
+    });
 }
 
 void conversationPermissions(const std::filesystem::path& path) {

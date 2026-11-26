@@ -176,7 +176,7 @@ std::string watchedPrUrl(const std::filesystem::path& db) {
     return url;
 }
 
-void freshPrReviewSchema() {
+void freshPrSchema() {
     Directory directory;
     const auto path = directory.path / "fresh.db";
     Store store(path);
@@ -185,18 +185,14 @@ void freshPrReviewSchema() {
     std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(raw, sqlite3_close);
     sqlite3_stmt* stmt = nullptr;
     const auto prepared = sqlite3_prepare_v2(raw, R"SQL(
-SELECT (SELECT count(*) FROM pragma_table_info('pr_review_items')
-        WHERE name IN ('operation_id','git_key','candidates'))=3
-   AND NOT EXISTS (SELECT 1 FROM pragma_table_info('pr_review_items') WHERE name='target_generation')
-   AND EXISTS (SELECT 1 FROM pragma_index_list('pr_review_items')
-               WHERE name='pending_pr_reconciliation' AND "unique"=1 AND partial=1)
-   AND (SELECT group_concat(name) FROM pragma_index_info('pending_pr_reconciliation'))='operation_id'
+SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE name IN ('pr_review_items','git_review_receipts'))
+   AND NOT EXISTS (SELECT 1 FROM pragma_table_info('journal') WHERE name='pr_review_item_id')
+   AND EXISTS (SELECT 1 FROM pragma_table_info('git_pr_operations') WHERE name='candidates')
 )SQL",
                                              -1, &stmt, nullptr);
-    check(prepared == SQLITE_OK, "could not query fresh PR review schema: " + std::string(sqlite3_errmsg(raw)));
+    check(prepared == SQLITE_OK, "could not query fresh PR schema: " + std::string(sqlite3_errmsg(raw)));
     std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
-    check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1,
-          "Fresh DB has incorrect PR review columns or reconciliation index");
+    check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1, "Fresh DB has incorrect PR operation or journal storage");
 }
 
 void runner() {
@@ -220,7 +216,7 @@ void runner() {
         check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
         check(recordedMutationReason(TaskHistory(store).history(task), "git_open_pr"), "PR creation lost its rationale in task history");
         check(historyCount(store, task, "report") == 1, "Session result missing");
-        check(Inbox(store).inbox(localOwner, "owner").at(0).at("prTitle") == "Pull request awaiting review", "PR awaiting review missing");
+        check(Inbox(store).inbox(localOwner, "owner").empty(), "Opening a PR appeared in Needs you");
         check(GitEvents(store).receiveGitWebhook(
                   {hostName, "ci-before-restart", repoName, "ci", "completed", {1}, sha, "test job failed", 81}),
               "CI event was rejected before restart");
@@ -251,15 +247,8 @@ void runner() {
               "scan rejected");
         runtime.runConversations();
         runtime.runConversations();
-        const auto inbox = Inbox(store).inbox(localOwner, "owner");
-        check(inbox.size() == 3 && inbox.dump().find("Pull request review submitted") != std::string::npos &&
-                  inbox.dump().find("Code scanning result") != std::string::npos,
-              "Git inbox decisions missing");
-        const auto review = target(inbox.at(0));
-        Inbox(store).decideInbox(localOwner, review, "request_changes");
-        check(Inbox(store).inbox(localOwner, "owner").size() == 2 &&
-                  Inbox(store).decisionHistory(localOwner, "owner").at(0).at("decision") == "request_changes",
-              "Git inbox decision did not update and record");
+        check(Inbox(store).inbox(localOwner, "owner").empty() && Inbox(store).decisionHistory(localOwner, "owner").empty(),
+              "Review or code scanning appeared in Needs you or History");
         check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3, "webhooks were delivered more than once");
 
         const auto sibling = TaskIntake(store).submit(intake());
@@ -384,42 +373,6 @@ void pausedGitNotifications() {
     }
 }
 
-void reviewAfterTaskProgress() {
-    Directory directory;
-    Store store(directory.path / "state.db");
-    auto host = std::make_shared<FakeHost>();
-    Script script;
-    Sessions sessions;
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = TaskIntake(store).submit(intake());
-    for (int i = 0; i < 4 && Tasks(store).task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
-    check(Tasks(store).task(task).task.currentRevision.value_or(0) > 0, "task has no initial revision");
-
-    auto args = openArgs();
-    args["taskId"] = task;
-    check(invoke(store, runtime, script, "open-review-pr", "git_open_pr", args).at("status") == "created",
-          "fixture did not open a PR awaiting review");
-    const auto gitReview = target(Inbox(store).inbox(localOwner, "owner").at(0));
-
-    check(invoke(store, runtime, script, "send-instruction", "send_to_task",
-                 {{"taskId", task}, {"generation", gitReview.targetGeneration}, {"instruction", "Include the test results"}})
-                  .at("ok") == true,
-          "fixture did not update the task within its revision");
-    const auto inbox = Inbox(store).inbox(localOwner, "owner");
-    check(inbox.size() == 1, "Git review was lost after a Task generation change");
-    const auto latest = target(inbox.at(0));
-    check(latest.itemId == gitReview.itemId && latest.targetRevision == gitReview.targetRevision &&
-              latest.targetGeneration > gitReview.targetGeneration,
-          "Git review did not follow the Task within its revision");
-    try {
-        Inbox(store).decideInbox(localOwner, gitReview, "approve");
-        throw std::runtime_error("A PR review decision with an invalid generation was accepted");
-    } catch (const RequestChanged&) {
-    }
-    Inbox(store).decideInbox(localOwner, latest, "approve");
-    check(Inbox(store).inbox(localOwner, "owner").empty(), "Refreshed Git review decision did not close the item");
-}
-
 void webhookDeliveryResumesAfterAnIdlePoll() {
     Directory directory;
     const auto path = directory.path / "state.db";
@@ -453,56 +406,66 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
     check(historyCount(store, task, "git_webhook") == queued + 1, "Delivery lost or repeated events across connections or batches");
 }
 
-void reconciliationAfterTaskRevision() {
+void selectCandidateInSameTurn() {
+    class CandidateModel final : public Model {
+    public:
+        Script fallback;
+        FakeHost& host;
+        Json args = openArgs();
+        std::string linkedUrl;
+        unsigned calls = 0;
+
+        explicit CandidateModel(FakeHost& host) : host(host) {}
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn") return fallback.decide(input);
+            const auto& steps = input.event.at("turn");
+            ++calls;
+            if (steps.size() == 1) {
+                check(steps.back().at("result").at("candidates").empty(), "The lost response reported unverified candidates");
+                auto extra = host.prs.front();
+                extra.pr.number = 2;
+                extra.pr.url = "https://github.com/org/flock/pull/2";
+                host.prs.push_back(std::move(extra));
+            }
+            if (steps.size() == 2) {
+                const auto& candidates = steps.back().at("result").at("candidates");
+                check(candidates.size() == 2 && candidates.at(1) == Json{{"prNumber", 2}, {"url", host.prs.at(1).pr.url}, {"headSha", sha}},
+                      "The Bot did not receive verified candidate details");
+                args["prNumber"] = 99;
+            }
+            if (steps.size() == 3) {
+                const auto& invalid = steps.back().at("result");
+                check(invalid.at("ok") == false && invalid.at("error") == "The PR is not a verified candidate for this operation",
+                      "The Bot linked a number outside the candidates");
+                args["prNumber"] = steps.at(1).at("result").at("candidates").at(1).at("prNumber");
+            }
+            if (steps.size() == 4) {
+                const auto& result = steps.back().at("result");
+                check(result.at("ok") == true && result.at("prNumber") == 2, "The Bot could not link the verified candidate");
+                linkedUrl = result.at("url").get<std::string>();
+                return {{{"reply", {{"text", "Opened " + linkedUrl}}, {}}}};
+            }
+            auto call = args;
+            call["reason"] = fixtureReason;
+            return decodeCall(app::responseRequest(input), "git_open_pr", call);
+        }
+    };
     Directory directory;
     const auto path = directory.path / "state.db";
     Store store(path);
     auto host = std::make_shared<FakeHost>();
     host->create = FakeHost::Create::lostResponse;
-    Script script;
+    CandidateModel model(*host);
     Sessions sessions;
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = TaskIntake(store).submit(intake());
-    for (int i = 0; i < 4 && Tasks(store).task(task).task.currentRevision.value_or(0) == 0; ++i) runtime.tick();
-    const auto before = taskJson(Tasks(store).task(task));
-    check(before.value("currentRevision", Id{0}) > 0, "task has no initial revision");
-
-    auto args = openArgs();
-    args["taskId"] = task;
-    const auto lost = invoke(store, runtime, script, "lose-pr-response", "git_open_pr", args);
-    check(lost.at("status") == "ambiguous", "fixture did not create an ambiguous operation");
-    auto extra = host->prs.front();
-    extra.pr.number = 2;
-    extra.pr.url = "https://github.com/org/flock/pull/2";
-    host->prs.push_back(std::move(extra));
-    check(invoke(store, runtime, script, "find-two-prs", "git_open_pr", args).at("status") == "ambiguous",
-          "fixture did not leave two verified candidates");
-    const auto initial = Inbox(store).inbox(localOwner, "owner").at(0);
-    check(initial.at("candidates").size() == 2, "fixture failed to put candidates in the inbox");
-    const auto changed = invoke(store, runtime, script, "revise-task", "change_task",
-                                {{"taskId", task},
-                                 {"generation", before.at("generation")},
-                                 {"revisionId", before.at("currentRevision")},
-                                 {"instruction", "Update the success criteria"},
-                                 {"doneWhen", "Verify the new completion criteria"}});
-    check(changed.at("ok") == true && Tasks(store).task(task).task.replanning, "fixture did not revise the active task");
-    check(invoke(store, runtime, script, "retry-after-replan", "git_open_pr", args).at("status") == "ambiguous",
-          "fixture did not keep the PR creation unresolved");
-    const auto latest = Inbox(store).inbox(localOwner, "owner").at(0);
-    check(latest.at("itemId") == initial.at("itemId") && latest.at("targetRevision") != initial.at("targetRevision") &&
-              latest.at("targetRevision") == Tasks(store).task(task).task.currentRevision.value() &&
-              latest.at("targetGeneration") == Tasks(store).task(task).task.generation &&
-              latest.at("candidates") == initial.at("candidates"),
-          "Reconciliation lost its current target or verified candidates");
-    try {
-        Inbox(store).decideInbox(localOwner, target(initial), "reject_pr");
-        throw std::runtime_error("A stale reconciliation decision was accepted after task revision");
-    } catch (const RequestChanged&) {
-    }
-    Inbox(store).decideInbox(localOwner, target(latest), "link_pr", {{"prNumber", 2}});
-    const auto saved = persistence(path, lost.at("operationId").get<std::string>());
-    check(saved.at("status") == "created" && saved.at("prNumber") == 2 && host->createCalls == 1,
-          "The current reconciliation target could not link the original operation");
+    Runtime runtime(store, model, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    model.args["taskId"] = TaskIntake(store).submit(intake());
+    ConversationIntake(store).receive(localOwner, intake(), "open-and-link", "Open a PR");
+    runtime.runConversations();
+    check(model.calls == 5 && host->createCalls == 1 && host->lookupCalls == 1 && watchedPrUrl(path) == model.linkedUrl &&
+              Conversations(store).conversation("owner").dump().find(model.linkedUrl) != std::string::npos,
+          "Ambiguous creation did not resolve in the originating turn");
+    check(Inbox(store).inbox(localOwner, "owner").empty() && Inbox(store).decisionHistory(localOwner, "owner").empty(),
+          "Ambiguous creation appeared in Needs you or History");
 }
 
 void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = false, bool wrongCorrelation = false) {
@@ -515,7 +478,6 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
     Script script;
     Id task;
     std::string operationId;
-    InboxTarget initial{};
     {
         Store store(path);
         task = TaskIntake(store).submit(intake());
@@ -532,20 +494,17 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         const auto lost = invoke(store, runtime, script, "lost", "git_open_pr", args);
         check(lost.at("status") == "ambiguous" && persistence(path, operationId).at("status") == "ambiguous",
               "lost response was not recorded unresolved");
-        initial = target(Inbox(store).inbox(localOwner, "owner").at(0));
     }
     host->inspect = {};
     const auto repo = GitRepository::parse(hostName, repoName);
-    host->prs.push_back({{{repo, repo, "main", "unrelated"}, 4, "https://github.com/org/flock/pull/4", operationId, sha, true},
-                         "Change",
-                         FakeHost::State::open});
-    host->prs.push_back({{{repo, repo, "old", "change"}, 5, "https://github.com/org/flock/pull/5", operationId, sha, false},
-                         "Change",
-                         FakeHost::State::closed});
+    host->prs.push_back(
+        {{{repo, repo, "main", "unrelated"}, 4, "https://github.com/org/flock/pull/4", operationId, sha}, "Change", FakeHost::State::open});
+    host->prs.push_back(
+        {{{repo, repo, "old", "change"}, 5, "https://github.com/org/flock/pull/5", operationId, sha}, "Change", FakeHost::State::closed});
     for (const auto collisionState : {FakeHost::State::open, FakeHost::State::closed, FakeHost::State::merged}) {
         const auto number = static_cast<Id>(host->prs.size() + 10);
         host->prs.push_back(
-            {{{repo, repo, "main", "change"}, number, "https://github.com/org/flock/pull/" + std::to_string(number), "", sha, false},
+            {{{repo, repo, "main", "change"}, number, "https://github.com/org/flock/pull/" + std::to_string(number), "", sha},
              "Change",
              collisionState});
     }
@@ -565,43 +524,49 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         check(host->createCalls == 1 && host->lookupCalls == 1, "retry attempted a second create");
         if (losesRequest || multipleMatches || wrongCorrelation) {
             check(recovered.at("status") == "ambiguous" && !recovered.contains("prNumber"), "unverified PR was adopted");
-            const auto items = Inbox(store).inbox(localOwner, "owner");
-            check(items.size() == 1 && items.at(0).at("itemKind") == "pr_reconciliation", "reconciliation item missing or duplicated");
-            const auto decision = target(items.at(0));
-            const auto candidates = items.at(0).at("candidates");
+            const auto& candidates = recovered.at("candidates");
             if (multipleMatches) {
                 check(candidates.size() == 2, "Only exact correlations should be candidates");
-                try {
-                    Inbox(store).decideInbox(localOwner, initial, "reject_pr");
-                    throw std::runtime_error("An outdated reconciliation decision was accepted");
-                } catch (const DecisionUnavailable&) {
-                }
-                try {
-                    Inbox(store).decideInbox(localOwner, decision, "link_pr", {{"prNumber", 4}});
-                    throw std::runtime_error("An unverified candidate was accepted");
-                } catch (const Conflict&) {
-                }
-                Inbox(store).decideInbox(localOwner, decision, "link_pr", {{"prNumber", 1}});
-                check(persistence(path, operationId).at("prNumber") == 1, "Selecting a verified PR did not link it");
-                check(watchedPrUrl(path) == "https://github.com/org/flock/pull/1", "Selected PR was not watched");
+                args["prNumber"] = 1;
+                const auto repoTarget = repo.resource();
+                PolicyRules rules(store);
+                rules.changeRule(localOwner, RuleKind::never, Action::repository_pr, repoTarget, true);
+                check(invoke(store, runtime, script, "denied-selection", "git_open_pr", args).at("error") == "Repository access denied",
+                      "A verified candidate bypassed current repository policy");
+                rules.changeRule(localOwner, RuleKind::never, Action::repository_pr, repoTarget, false);
+
+                const auto other = TaskIntake(store).submit(intake());
+                check(invoke(store, runtime, script, "claim-candidate", "git_request_review",
+                             {{"host", hostName}, {"repo", repoName}, {"taskId", other}, {"prNumber", 1}, {"reviewers", {"alice"}}})
+                              .at("watchAttached") == true,
+                      "The competing task could not watch the candidate");
+                check(invoke(store, runtime, script, "already-watched", "git_open_pr", args).at("error") ==
+                          "The PR already belongs to another task",
+                      "A verified candidate was linked after another task acquired its watch");
+                args["prNumber"] = 6;
+                rules.setMode(localOwner, "supervised");
+                rules.changeRule(localOwner, RuleKind::ask, Action::repository_pr, repoTarget, true);
+                check(invoke(store, runtime, script, "link-candidate", "git_open_pr", args).at("prNumber") == 6 &&
+                          persistence(path, operationId).at("prNumber") == 6 && host->createCalls == 1 && host->lookupCalls == 1,
+                      "Selecting a verified PR did not link the original operation");
+                check(invoke(store, runtime, script, "repeat-selection", "git_open_pr", args).at("prNumber") == 6 &&
+                          host->createCalls == 1 && host->lookupCalls == 1,
+                      "Repeating a selection did not return the linked PR");
             } else {
-                check(candidates.empty(), "Title collision was offered for manual linking");
-                Inbox(store).decideInbox(localOwner, decision, "reject_pr");
-                check(Inbox(store).inbox(localOwner, "owner").empty() && persistence(path, operationId).at("status") == "rejected",
-                      "Rejecting reconciliation did not close the decision");
-                check(invoke(store, runtime, script, "retry-rejected", "git_open_pr", args).at("status") == "rejected" &&
-                          host->createCalls == 1,
-                      "Rejected unknown operation was resent");
+                check(candidates.empty(), "A ref or title collision was offered for linking");
             }
         } else {
             check(recovered.at("status") == "created" && recovered.at("prNumber") == 1 &&
                       recovered.at("url") == "https://github.com/org/flock/pull/1" && recovered.at("operationId") == operationId &&
                       persistence(path, operationId).at("prNumber") == 1,
                   "the original PR was not recovered");
-            check(Inbox(store).inbox(localOwner, "owner").dump().find("pr_reconciliation") == std::string::npos,
-                  "resolved reconciliation still pending");
             check(watchedPrUrl(path) == recovered.at("url").get<std::string>(), "recovered pull request is not watched");
+            args["prNumber"] = 1;
+            check(invoke(store, runtime, script, "select-unoffered-pr", "git_open_pr", args).at("ok") == false,
+                  "A PR that was never offered as a candidate could be selected");
         }
+        check(Inbox(store).inbox(localOwner, "owner").empty() && Inbox(store).decisionHistory(localOwner, "owner").empty(),
+              "PR recovery appeared in Needs you or History");
     }
 }
 
@@ -1110,7 +1075,7 @@ void notificationCannotControlASession() {
     args["taskId"] = task;
     check(invoke(store, runtime, script, "create-watch", "git_open_pr", args).at("ok") == true, "Could not create watch");
 
-    Json result;
+    Json results;
     script.rawNotification = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) {
@@ -1119,14 +1084,19 @@ void notificationCannotControlASession() {
                             {{"taskId", task}, {"generation", Tasks(store).task(task).task.generation}, {"text", "Act on the webhook"}},
                             {}};
         }
-        result = steps.at(0).at("result");
+        if (steps.size() == 1) {
+            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(), "Memory write was offered in a notification");
+            return Decision{"write_memory", {{"baseVersion", 0}, {"content", "Injected"}, {"summary", "Injected"}}, {}};
+        }
+        results = steps;
         return Decision{"reply", {{"text", "Git notification received."}}, {}};
     };
     check(GitEvents(store).receiveGitWebhook({hostName, "session-effect", repoName, "comment", "created", {1}, sha, "A comment", 0}),
           "Could not enqueue comment");
     runtime.runConversations();
-    check(result.value("ok", true) == false && sessions.sessionSends.empty(),
-          "A generic model executed a Session write that the turn did not offer");
+    check(results.size() == 2 && results.at(0).at("result").at("ok") == false && results.at(1).at("result").at("ok") == false &&
+              sessions.sessionSends.empty(),
+          "A generic model executed a Session or memory write that the notification did not offer");
 }
 
 void notificationEvidenceAndRevocation() {
@@ -1232,15 +1202,14 @@ int main(int argc, char** argv) {
     try {
         if (argc == 5 && std::string_view(argv[1]) == mutationChildFlag) return taskMutationChild(argv[2], argv[3], argv[4]);
         executable = argv[0];
-        freshPrReviewSchema();
+        freshPrSchema();
         schemas();
         runner();
         invalidWebhookMetadata();
         webhookHeadPeriods();
         pausedGitNotifications();
-        reviewAfterTaskProgress();
         webhookDeliveryResumesAfterAnIdlePoll();
-        reconciliationAfterTaskRevision();
+        selectCandidateInSameTurn();
         recovery(FakeHost::State::open, false);
         recovery(FakeHost::State::closed, false);
         recovery(FakeHost::State::merged, false);

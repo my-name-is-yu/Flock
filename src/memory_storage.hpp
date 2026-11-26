@@ -5,10 +5,8 @@
 #include "flock/json.hpp"
 #include "flock/types.hpp"
 
-#include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace flockv0 {
 class Policy;
@@ -18,7 +16,6 @@ class Database;
 class SecretRedactor;
 class SecretStorage;
 struct BotNotes;
-struct ModelInput;
 struct Person;
 struct SessionContext;
 struct TaskData;
@@ -36,16 +33,14 @@ public:
 
     BotNotes loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now);
     SessionContext sessionContext(const SessionContextTarget&, const SoulLoader&, const SecretRedactor&, std::size_t bytes, Seconds now);
-    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now, bool fromBot = false);
-    bool canReviewPreference(const conversation::Message&);
-    bool preferenceReviewPending(Id message, int step) const;
-    std::optional<ModelInput> preferenceReviewInput(const conversation::Message&, std::vector<std::string>, std::string feedback,
-                                                    Seconds now);
-    Json rememberPreference(const conversation::Message&, int step, const Json&, Seconds now);
+    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds now);
+    Json conversationMemory(const conversation::Message&, std::string_view operation, const Json&, Seconds now);
+    bool canEditFrom(const conversation::Message&);
     bool canLearnFrom(const TaskData&);
     void learnFromWork(const TaskData&, Id completion, Id report, std::string_view runId, const Json&, Seconds now);
-    void projectMemoryNotice(std::string_view bot, Json& data) const;
+    void projectMemoryNotice(std::string_view bot, Json& data, const Person* viewer) const;
 private:
+    Json accessMemory(std::string_view bot, const Person&, std::string_view operation, const Json&, Seconds, Id sourceMessage);
     void createMemory(std::string_view key, std::string_view bot, std::string_view id, std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
 

@@ -111,19 +111,9 @@ struct Store::Impl {
     WorkflowStorage workflowStorage{database,      taskRecords,       taskEvents,     journalStorage,
                                     secretStorage, conversationTurns, taskOperations, taskRouting};
     WebIdentityState webIdentity;
-    InboxStorage inboxStorage{database,       secretStorage, taskRecords,    waitStorage,
-                              journalStorage, permissions,   taskOperations, policyApprovals};
-    GitStorage gitStorage{database,
-                          secretStorage,
-                          inboxStorage,
-                          taskRecords,
-                          journalStorage,
-                          webIdentity,
-                          permissions,
-                          conversationTurns,
-                          botLifecycle,
-                          policyApprovals,
-                          sessionParticipationStorage};
+    InboxStorage inboxStorage{database, secretStorage, taskRecords, waitStorage, permissions, taskOperations, policyApprovals};
+    GitStorage gitStorage{database,    secretStorage,     taskRecords,  journalStorage,  webIdentity,
+                          permissions, conversationTurns, botLifecycle, policyApprovals, sessionParticipationStorage};
     ChannelStorage channelStorage{database, path, permissions, webIdentity, journalStorage, conversationTurns, policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{database,    secretStorage,     webIdentity,  taskRecords,    waitStorage,

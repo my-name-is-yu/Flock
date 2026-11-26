@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace flockv0 {
+struct Person;
 class Store;
 struct TaskView;
 }
@@ -17,8 +18,8 @@ std::string externalSessionLink(const Json& run);
 Json botList(Store&, const Json&);
 Json botSettings(const Json&);
 void projectMemoryHistoryLinks(Json&);
-Json botView(Store&, const Json&, const std::vector<TaskView>* changedSessionTasks = nullptr, std::string_view viewer = {});
-Json conversation(Store&, std::string_view bot, Id before, std::string_view viewer = {});
+Json botView(Store&, const Json&, const std::vector<TaskView>* changedSessionTasks = nullptr, const Person* viewer = nullptr);
+Json conversation(Store&, std::string_view bot, Id before, const Person* viewer = nullptr);
 Json peerConversation(Store&, std::string_view bot, std::string_view peer, Id before, Id anchor = 0, std::string_view viewer = {});
 Json sessions(Store&, std::string_view bot, Id before);
 Json sessionGroups(const std::vector<TaskView>& tasks);

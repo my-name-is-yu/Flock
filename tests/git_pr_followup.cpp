@@ -107,12 +107,11 @@ private:
 };
 
 GitWebhook failure(std::string id, std::string head = sha) {
-    return {hostName,        std::move(id),  repoName, "ci", "completed", {1},
-            std::move(head), "Check failed", 81,       {},   {},          GitFollowup::failedCheck};
+    return {hostName, std::move(id), repoName, "ci", "completed", {1}, std::move(head), "Check failed", 81, {}, GitFollowup::failedCheck};
 }
 
 GitWebhook review(std::string id) {
-    return {hostName, std::move(id), repoName, "review", "submitted", {1}, sha, feedback, 0, {}, {}, GitFollowup::changesRequested};
+    return {hostName, std::move(id), repoName, "review", "submitted", {1}, sha, feedback, 0, {}, GitFollowup::changesRequested};
 }
 
 struct Fixture {

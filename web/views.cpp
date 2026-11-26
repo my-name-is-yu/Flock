@@ -180,7 +180,8 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     else if (kind == "user_answer")
         copyFields(details, data, {"text", "waitId", "question"});
     else if (kind == "memory_remembered" || kind == "memory_learned") {
-        copyFields(details, data, {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary"});
+        copyFields(details, data,
+                   {"text", "revisionId", "version", "canUndo", "undone", "taskTitle", "requestEventId", "diffSummary", "docId"});
         if (kind == "memory_learned")
             for (const auto* key : {"added", "removed"}) details[key] = data.at(key);
     } else if (kind == "bot_setup_updated") {
@@ -189,9 +190,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         if (data.at("before").contains("soul")) details["before"] = {{"soul", data.at("before").at("soul")}};
         if (auto avatar = details["after"].find("avatar"); avatar != details["after"].end() && avatar->is_object())
             *avatar = avatarView(*avatar, {});
-    } else if (kind == "pr_review_requested")
-        copyFields(details, data, {"itemId", "title", "text", "prUrl"});
-    else if (kind == "completed") {
+    } else if (kind == "completed") {
         copyFields(details, data, {"text", "revisionId", "runOutcome", "requestedCommit"});
         if (data.contains("source")) {
             const auto& source = data.at("source");
@@ -263,7 +262,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const auto kind = field(*event, "kind");
         const auto& data = event->at("data");
         const auto wait = kind == "waiting" ? std::optional{TaskHistory::waitingEvent(*event)} : std::nullopt;
-        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
+        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
                               (wait && (wait->reason() == WaitReason::user_question || wait->reason() == WaitReason::model_failure));
         auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage")) text = field(data.at("forwardedMessage"), "text");
@@ -479,7 +478,7 @@ Json botList(Store& store, const Json& bots) {
     return result;
 }
 
-Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
+Json conversation(Store& store, std::string_view bot, Id before, const Person* viewer) {
     auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
     const auto redactor = Policy{store}.secretRedactor(bot);
     for (auto& event : events)
@@ -538,7 +537,7 @@ Json sessionGroups(const std::vector<TaskView>& tasks) {
     return groups;
 }
 
-Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, std::string_view viewer) {
+Json botView(Store& store, const Json& bot, const std::vector<TaskView>* changedSessionTasks, const Person* viewer) {
     const auto id = field(bot, "id");
     auto result = conversation(store, id, 0, viewer);
     const auto activeTasks = TaskList(store).activeTasks(id);

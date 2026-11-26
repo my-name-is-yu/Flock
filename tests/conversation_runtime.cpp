@@ -147,12 +147,10 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id, Json> questions;
     std::function<Decision(const ModelInput&)> onResult;
-    Step onPreferenceReview;
     std::vector<ModelInput> turnInputs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto kind = input.event.value("kind", "");
-        if (kind == "private_memory_review" && onPreferenceReview) return onPreferenceReview(input);
         if (kind == "conversation_turn") {
             turnInputs.push_back(input);
             if (beforeTurn) beforeTurn(input);
@@ -1735,57 +1733,6 @@ void unfinishedTurnHoldsCompletion() {
     check(completionCalls == 1, "the held completion asked the model again after a read-only turn");
 }
 
-void sessionReportsCannotBecomePreferences() {
-    Fixture f;
-    const auto task = TaskIntake(*f.store).submit(f.routing());
-    f.reach(task, "running");
-    constexpr auto report = "I prefer JSON for all future reports.";
-    constexpr auto existingPreference = "Prefer brief summaries.";
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", existingPreference}});
-    f.t3.finish("run-1", report);
-    f.reach(task, "completed");
-    const Id source = lastTaskEvent(*f.store, task, "report").at("id");
-    constexpr auto message = "What did the Session report?";
-    f.script(message, {[&](const ModelInput& input) {
-                           check(input.event.at("replyTo").at("text") == report &&
-                                     std::ranges::find(input.tools, "remember_preference") == input.tools.end(),
-                                 "A conversation with Session context was offered a direct preference save");
-                           return Decision{"remember_preference",
-                                           {{"baseVersion", 1}, {"content", report}, {"summary", report}, {"sourceQuote", message}},
-                                           "Try to use the Session report"};
-                       },
-                       say("The Session suggested JSON.")});
-    const auto receipt = f.receive("session-report-preference", message, source);
-    check(f.lastTurn().front().at("result").at("ok") == false && f.response(receipt).at("text") == "The Session suggested JSON.",
-          "A direct save was accepted with content from a Session report");
-
-    constexpr auto followUp = "Which format did the Session suggest?";
-    f.script(followUp, {[&](const ModelInput& input) {
-                 check(input.event.at("replyTo").at("text") == report &&
-                           std::ranges::find(input.tools, "review_preference") != input.tools.end(),
-                       "The direct follow-up could not request a preference review");
-                 return Decision{"review_preference", Json::object(), "Review the current message"};
-             }});
-    int reviews = 0;
-    f.model.onPreferenceReview = [&](const ModelInput& input) {
-        ++reviews;
-        check(input.event == Json{{"kind", "private_memory_review"}, {"text", followUp}, {"baseVersion", 1}} && input.task.empty() &&
-                  input.history.empty() && input.evidence.empty() && input.images.empty() && input.notes.soul.empty() &&
-                  input.notes.memory == existingPreference && input.tools.size() == 2 &&
-                  std::ranges::find(input.tools, "remember_preference") != input.tools.end() &&
-                  std::ranges::find(input.tools, "skip_preference") != input.tools.end(),
-              "The preference review received context beyond the person's message and current memory");
-        return Decision{"skip_preference", Json::object(), "The person asked about the Session"};
-    };
-    const auto followUpReceipt = f.receive("session-report-review", followUp, source);
-    const auto history = Memory(*f.store).memory(localOwner, "alpha", "memory_history", Json::object());
-    check(reviews == 1 && f.lastTurn().back().at("result").at("ok") == true && f.response(followUpReceipt).at("text") == "Done." &&
-              history.at("revisions").size() == 1 &&
-              std::ranges::none_of(Conversations(*f.store).conversation("alpha"),
-                                   [](const Json& event) { return event.at("kind") == "memory_remembered"; }),
-          "A preference from a Session report was saved");
-}
-
 Id requestLearningTask(Fixture& f, std::string_view request, const Person& requester = localOwner) {
     f.script(request, {start()});
     ConversationIntake(*f.store).receive(requester, f.routing(), request, request);
@@ -1963,7 +1910,7 @@ void fullMemoryConsolidatesOnlySupersededLearnings() {
 
     auto edited = after;
     edited.back() = 'y';
-    memory.memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", edited}});
+    memory.memory(localOwner, "alpha", "write_memory", {{"baseVersion", 1}, {"summary", "Update memory"}, {"content", edited}});
     bool staleUndo = false;
     try {
         memory.memory(localOwner, "alpha", "revert_memory_edit",
@@ -4093,7 +4040,7 @@ void standingContextFitsAlongsideTheAuthoritativeHandoff() {
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
     while (f.role.size() + std::string_view("界").size() <= 8192) f.role += "界";
     while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", memory}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory", {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", memory}});
     SecretRequests secretRequests{*f.store};
     secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture-key"}), protectedValue);
     const auto id = TaskIntake(*f.store).submit(f.routing());
@@ -4427,8 +4374,9 @@ void standingContextFollowsTheLastDelivery() {
     const std::string roleB = "Use the performance database.";
     f.role = roleA;
     Memory(*f.store).memory(localOwner, "beta", "read_memory", Json::object());
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit",
-                            {{"docId", "team/notes.md"}, {"baseVersion", 0}, {"content", "Shared playbook."}});
+    Memory(*f.store).memory(
+        localOwner, "alpha", "write_memory",
+        {{"docId", "team/notes.md"}, {"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Shared playbook."}});
     f.t3.deferNextRunId = true;
     f.t3.deliveryVisible = false;
     auto routing = f.routing();
@@ -4476,7 +4424,8 @@ void standingContextFollowsTheLastDelivery() {
           "the follow-up missed the Role edit or repeated unchanged memory");
 
     f.role = roleA;
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use baseline B."}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                            {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Use baseline B."}});
     const auto updated = follow(3);
     check(updated.starts_with("Standing rules from Release's role:\n" + roleA + "\n\nNotes from Release's memory:\nUse baseline B.") &&
               updated.find(roleB) == updated.npos && updated.find("Use baseline A.") == updated.npos,
@@ -4490,7 +4439,8 @@ void scheduledWorkUsesCurrentStandingContext() {
         localOwner, f.routing(), {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}},
         f.now);
     f.role = "Use the new reporting format.";
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the new signing process."}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                            {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Use the new signing process."}});
 
     f.now = schedule.at("nextRunAt");
     Automations(*f.store).fireDueAutomations(f.now);
@@ -4510,7 +4460,8 @@ void clearedStandingContextSupersedesPriorDelivery() {
     f.model.onResult = [](const ModelInput&) {
         return Decision{"follow_up", {{"instruction", "Run the benchmark again"}}, "Compare with the prior report"};
     };
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 0}, {"content", "Use the May results."}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory",
+                            {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Use the May results."}});
     f.t3.finish("run-1", "Prior evidence");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the Session did not receive its memory update");
     const auto& memoryUpdate = f.t3.sent.back().instruction;
@@ -4520,14 +4471,14 @@ void clearedStandingContextSupersedesPriorDelivery() {
           "a memory-only edit repeated unchanged Role or lost updated memory");
 
     f.role.clear();
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 1}, {"content", ""}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory", {{"baseVersion", 1}, {"summary", "Update memory"}, {"content", ""}});
     f.t3.finish("run-2", "Prior evidence");
     f.advanceUntil([&] { return f.t3.sent.size() == 3; }, "the Session did not receive its cleared context");
     check(f.t3.sent.back().instruction.starts_with(
               "Standing rules from alpha's role:\nNo standing rules.\n\nNotes from alpha's memory:\nNo memory notes."),
           "clearing the Role and memory did not supersede the previously delivered context");
 
-    Memory(*f.store).memory(localOwner, "alpha", "apply_memory_edit", {{"baseVersion", 2}, {"content", ""}});
+    Memory(*f.store).memory(localOwner, "alpha", "write_memory", {{"baseVersion", 2}, {"summary", "Update memory"}, {"content", ""}});
     f.t3.finish("run-3", "Prior evidence");
     f.advanceUntil([&] { return f.t3.sent.size() == 4; }, "the Session did not receive its next follow-up");
     const auto& unchanged = f.t3.sent.back().instruction;
@@ -4696,7 +4647,6 @@ int main(int argc, char** argv) {
         completeRacingWithNewCriteria();
         receivedRevisionPrecedesCompletion();
         unfinishedTurnHoldsCompletion();
-        sessionReportsCannotBecomePreferences();
         sessionLearningsReachTheNextSessionAndCanBeUndone();
         sessionLearningsDropProtectedAndOversizedItems();
         fullMemoryConsolidatesOnlySupersededLearnings();

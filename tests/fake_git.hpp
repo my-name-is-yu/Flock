@@ -93,8 +93,8 @@ public:
         if (create == Create::rejected) throw GitRejected("Branch does not exist");
         if (create == Create::lostRequest) throw Conflict("No response");
         const auto number = static_cast<Id>(prs.size() + 1);
-        GitPullRequest pr{request.target,      number, "https://" + request.target.base.resource() + "/pull/" + std::to_string(number),
-                          request.operationId, sha,    state == State::open};
+        GitPullRequest pr{request.target, number, "https://" + request.target.base.resource() + "/pull/" + std::to_string(number),
+                          request.operationId, sha};
         prs.push_back({pr, request.title, state});
         if (create == Create::lostResponse) throw Conflict("Lost response");
         return pr;
