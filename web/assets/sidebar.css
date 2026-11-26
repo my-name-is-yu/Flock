@@ -37,7 +37,6 @@
 }
 .sidebar-head { height: var(--header-height); padding: 0 var(--space-3) 0 1.35rem; display: flex; align-items: center; gap: var(--space-2); flex: none; }
 .sidebar-title { font-size: var(--text-md); font-weight: 600; letter-spacing: -.01em; }
-/* Line the toggle up with the conversation header's Show Bot list button. */
 .sidebar-head .toggle-chat-sidebar { margin-inline-start: calc(clamp(.75rem, 2vw, 1.25rem) - 1.35rem); }
 .new-bot-button { margin-left: auto; }
 .sidebar-scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 0 .7rem var(--space-4); flex: 1; }
