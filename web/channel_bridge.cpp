@@ -1,3 +1,4 @@
+#include "flock/local_machines.hpp"
 #include "flock/channel_bridge_settings.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
@@ -186,10 +187,10 @@ void validateChannelBridgeSettings(const Json& config) {
 
 void configureManagedChannelBridges(Store& store, const Json& config, WebCallbacks& callbacks) {
     auto setup = channelSetup(config);
-    if (setup.slack) store.connectChannel(std::move(*setup.slack));
-    if (setup.imessage) store.connectChannel(std::move(*setup.imessage));
-    store.artifactBaseUrl(std::move(setup.artifactBaseUrl));
-    for (auto& [id, person] : setup.machines) store.connectLocalMachine(id, hostLocalMachine(std::move(person)));
+    if (setup.slack) Channels(store).connectChannel(std::move(*setup.slack));
+    if (setup.imessage) Channels(store).connectChannel(std::move(*setup.imessage));
+    Channels(store).artifactBaseUrl(std::move(setup.artifactBaseUrl));
+    for (auto& [id, person] : setup.machines) LocalMachines(store).connectLocalMachine(id, hostLocalMachine(std::move(person)));
     if (!setup.sessionAuthorization.empty()) {
         callbacks.authenticateSessionBridge = [credential = std::move(setup.sessionAuthorization)](std::string_view supplied) {
             return sameCredential(supplied, credential);

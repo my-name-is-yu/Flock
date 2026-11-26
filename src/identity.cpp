@@ -1,4 +1,7 @@
 #include "flock/identity.hpp"
+#include "database.hpp"
+#include "local_machine_storage.hpp"
+#include "web_identity_state.hpp"
 #include "flock/types.hpp"
 #include "flock/person.hpp"
 #include "flock/store.hpp"
@@ -7,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -19,6 +23,19 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
+void WebIdentity::setWebIdentityResolver(WebIdentityResolver resolver, bool liveInteractiveRoles) {
+    std::lock_guard lock(database_.mutex);
+    identity_ = {std::move(resolver), liveInteractiveRoles};
+}
+
+void WebIdentity::setRootPeople(std::vector<std::string> ids) {
+    machines_.setRootPeople(std::move(ids));
+}
+
+void WebIdentity::setWebOrigin(std::string origin) {
+    machines_.setWebOrigin(std::move(origin));
+}
+
 ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& path) {
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     struct Close {
@@ -59,7 +76,7 @@ ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& p
             throw Conflict("Invalid Web identity");
         }
     }
-    store.setRootPeople(std::move(roots));
+    WebIdentity(store).setRootPeople(std::move(roots));
     ConfiguredIdentities configured;
     for (const auto& [person, admin] : identities) configured.users.push_back({person, admin});
     configured.resolveRoot = [identities = std::move(identities)](std::string_view person) -> std::optional<bool> {
@@ -72,7 +89,7 @@ ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& p
         if (!root) return std::nullopt;
         return Person{std::string(id), *root};
     };
-    store.setWebIdentityResolver(configured.resolveRoot);
+    WebIdentity(store).setWebIdentityResolver(configured.resolveRoot);
     configured.authenticate = [people = std::move(people)](std::string_view authorization) -> Person {
         auto found = people.find(authorization);
         return found == people.end() ? Person{} : found->second;

@@ -1,3 +1,5 @@
+#include "local_machine_storage.hpp"
+#include "web_identity_state.hpp"
 #include "flock/conversations.hpp"
 #include "database.hpp"
 #include "flock/policy.hpp"
@@ -42,11 +44,6 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
     if (row.string(1) != text || row.number(2) != replyTo) throw Conflict("This client message ID already has different content");
     return {{"messageId", row.number(0)}, {"status", "received"}};
 }
-}
-
-void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveInteractiveRoles) {
-    std::lock_guard lock(p_->mutex);
-    p_->webIdentity = {std::move(resolver), liveInteractiveRoles};
 }
 
 bool ConversationStorage::conversationPending(std::string_view bot) const {

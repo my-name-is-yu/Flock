@@ -1,3 +1,4 @@
+#include "flock/workflows.hpp"
 #include "conversation_turns.hpp"
 #include "workflow_storage.hpp"
 #include "task_operations.hpp"
@@ -203,13 +204,13 @@ Json WorkflowStorage::workflowStatus(Id id, std::string_view bot, Seconds now) c
     return result;
 }
 
-Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
-    Transaction tx(p_->db, Transaction::Mode::read);
+Json Workflows::workflows(std::string_view bot, Id before, unsigned limit) const {
+    std::lock_guard lock(database_.mutex);
+    Transaction tx(database_.db, Transaction::Mode::read);
     Json result = Json::array();
-    auto rows = p_->query("SELECT id FROM workflows WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
-                          {bot, before, before, std::min(limit, 50u)});
-    while (rows.next()) result.push_back(p_->workflowStorage.workflowStatus(rows.number(0), bot, unixTime()));
+    auto rows = database_.query("SELECT id FROM workflows WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
+                                {bot, before, before, std::min(limit, 50u)});
+    while (rows.next()) result.push_back(workflows_.workflowStatus(rows.number(0), bot, unixTime()));
     tx.commit();
     return result;
 }

@@ -1,3 +1,5 @@
+#include "flock/identity.hpp"
+#include "flock/local_machines.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/conversations.hpp"
@@ -353,7 +355,7 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    store.setRootPeople({localOwner.id});
+    WebIdentity(store).setRootPeople({localOwner.id});
     const auto id = task(store, "Prepare a local Session");
     execution.reach(store, id, "running");
     const auto run = Tasks(store).task(id).task.activeRun.value().ref;
@@ -368,7 +370,7 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     execution.model.conversation = [&](const ModelInput& input) {
         if (turn(input).empty()) {
             check(std::ranges::find(input.tools, request.tool) == input.tools.end(), "The tool was offered before connecting");
-            store.connectLocalMachine("fixture-machine", hostLocalMachine(localOwner.id));
+            LocalMachines(store).connectLocalMachine("fixture-machine", hostLocalMachine(localOwner.id));
             return request;
         }
         rejected = turn(input).at(0).at("result").at("ok") == false;
@@ -376,7 +378,7 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     };
     receive(store, "unoffered", "Check whether local access can be requested.");
     execution.runtime.runConversations();
-    check(rejected && store.localConnections(localOwner).empty(), "The unoffered call created a connection request");
+    check(rejected && LocalMachines(store).localConnections(localOwner).empty(), "The unoffered call created a connection request");
 
     execution.model.conversation = [&](const ModelInput& input) {
         if (!turn(input).empty()) return say("Requested local access.");
@@ -385,7 +387,7 @@ void missingToolCannotBeAddedAfterInferenceStarts() {
     };
     receive(store, "offered", "Request local access now.");
     execution.runtime.runConversations();
-    check(store.localConnections(localOwner).size() == 1, "The offered call did not create a connection request");
+    check(LocalMachines(store).localConnections(localOwner).size() == 1, "The offered call did not create a connection request");
 }
 
 void protectedArgumentKeyCannotReachTaskIntake() {

@@ -1,3 +1,4 @@
+#include "flock/local_machines.hpp"
 #include "storage.hpp"
 #include "web_identity_state.hpp"
 #include "task_records.hpp"
@@ -310,32 +311,24 @@ void LocalMachineStorage::disconnectLocalConnection(const Person& actor, Id id) 
                   {actor.id, unixTime(), id});
     tx.commit();
 }
-void Store::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> machine) {
-    p_->localMachineStorage.connectLocalMachine(std::move(id), std::move(machine));
+void LocalMachines::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> machine) {
+    machines_.connectLocalMachine(std::move(id), std::move(machine));
 }
 
-void Store::setRootPeople(std::vector<std::string> ids) {
-    p_->localMachineStorage.setRootPeople(std::move(ids));
+Json LocalMachines::runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun, std::string_view machineId,
+                                             std::string_view operation, const std::filesystem::path& path) {
+    return machines_.runLocalMachineOperation(environment, authenticatedRun, machineId, operation, path);
 }
 
-void Store::setWebOrigin(std::string origin) {
-    p_->localMachineStorage.setWebOrigin(std::move(origin));
+Json LocalMachines::localConnections(const Person& actor) const {
+    return machines_.localConnections(actor);
 }
 
-Json Store::runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun, std::string_view machineId,
-                                     std::string_view operation, const std::filesystem::path& path) {
-    return p_->localMachineStorage.runLocalMachineOperation(environment, authenticatedRun, machineId, operation, path);
+void LocalMachines::decideLocalConnection(const Person& actor, Id id, bool approve) {
+    machines_.decideLocalConnection(actor, id, approve);
 }
 
-Json Store::localConnections(const Person& actor) const {
-    return p_->localMachineStorage.localConnections(actor);
-}
-
-void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
-    p_->localMachineStorage.decideLocalConnection(actor, id, approve);
-}
-
-void Store::disconnectLocalConnection(const Person& actor, Id id) {
-    p_->localMachineStorage.disconnectLocalConnection(actor, id);
+void LocalMachines::disconnectLocalConnection(const Person& actor, Id id) {
+    machines_.disconnectLocalConnection(actor, id);
 }
 }

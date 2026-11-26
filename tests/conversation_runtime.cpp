@@ -1,3 +1,5 @@
+#include "flock/identity.hpp"
+#include "flock/notifications.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
@@ -517,7 +519,7 @@ void linkedResultStartsANewSession() {
     f.reach(original, "completed");
     const auto earlier = f.event(original, "completed");
     const Id resultId = lastTaskEvent(*f.store, original, "completed").at("id");
-    f.store->setWebIdentityResolver(
+    WebIdentity(*f.store).setWebIdentityResolver(
         [](std::string_view person) -> std::optional<bool> { return person == localOwner.id ? std::optional{true} : std::nullopt; });
     f.script("Which Session produced the plan?", {[](const ModelInput& input) {
                  check(input.event.at("sessionOrigin").at("threadId") == "origin", "The result reply lost the Session origin");
@@ -894,7 +896,7 @@ void directChoiceRechecksWebAuthority() {
     const auto receipt =
         Conversations(*f.store).receiveWeb({"web-root", true}, f.routing(), "queued-web-choice", "Maple", wait.at("messageId"));
     int lookups = 0;
-    f.store->setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+    WebIdentity(*f.store).setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
         if (person == "web-root" && ++lookups == 1) return true;
         return std::nullopt;
     });
@@ -2375,12 +2377,12 @@ void savedDestinationFollowupStopTargetsOnlyItsRun(const std::string& stopStatus
               destinationRunFor(f.task(id), "other").at("status") == "running",
           "the target-specific stop missed the live follow-up or affected its sibling");
 
-    const auto cursor = f.store->notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
+    const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
     const auto otherRun = destinationRunFor(f.task(id), "other").at("runId").get<std::string>();
     f.t3.finish(followupRun.runId, "Stopped by request", true, stopStatus);
     f.t3.finish(otherRun, "Unexpectedly stopped", true, stopStatus);
     f.advanceUntil([&] { return f.task(id).at("state") == "completed"; }, "the stopped Runs did not settle");
-    const auto alerts = f.store->notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope);
+    const auto alerts = Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope);
     const auto history = Tasks(*f.store).history(id, cursor.through, 100);
     const auto hasFailureAlert = [&](const std::string& runId) {
         const auto report = std::ranges::find_if(
@@ -2951,17 +2953,17 @@ void savedSessionSendAfterAccessLoss(std::string_view sendState, std::string_vie
             ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
         };
         f.store->policy().setMember(localOwner, "alpha", accessMember.id, true);
-        f.store->connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack),
-                                 [](std::string_view credential, std::string_view workspace) {
-                                     return credential == "fixture-auth" && workspace == "workspace";
-                                 },
-                                 [accessMember](std::string_view workspace, std::string_view sender) -> std::optional<ChannelSender> {
-                                     if (workspace == "workspace" && sender == "channel-user")
-                                         return ChannelSender{"alpha", accessMember.id};
-                                     return std::nullopt;
-                                 },
-                                 std::make_shared<Transport>()});
-        receipt = f.store->receiveChannel(
+        Channels(*f.store).connectChannel(
+            {ChannelKind::slack, channelCapabilities(ChannelKind::slack),
+             [](std::string_view credential, std::string_view workspace) {
+                 return credential == "fixture-auth" && workspace == "workspace";
+             },
+             [accessMember](std::string_view workspace, std::string_view sender) -> std::optional<ChannelSender> {
+                 if (workspace == "workspace" && sender == "channel-user") return ChannelSender{"alpha", accessMember.id};
+                 return std::nullopt;
+             },
+             std::make_shared<Transport>()});
+        receipt = Channels(*f.store).receiveChannel(
             ChannelKind::slack, "fixture-auth",
             {{"workspaceId", "workspace"},
              {"threadRef", "access-loss-thread"},
@@ -3423,13 +3425,13 @@ void queuedDestinationStopsReleaseSlots() {
         const auto follower = oneLinkedDestinationTask(f, "after-queued", "Run after the queued cancellation");
         const auto sentBeforeStop = f.t3.sent.size();
         stopDestinationByName(f, destination, "stop-behind-slot", "Stop the queued cloud destination");
-        const auto cursor = f.store->notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
+        const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
         f.tick();
         check(f.t3.sent.size() == sentBeforeStop && f.t3.interrupted.empty() &&
                   destinationResult(f.task(destination), "cloud").at("status") == "cancelled" &&
                   destinationResult(f.task(destination), "other").at("status") == "running",
               "a ready queued stop dispatched T3 or failed to settle locally");
-        check(f.store->notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope).events.empty(),
+        check(Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope).events.empty(),
               "an unsent cancelled destination emitted a failure notification");
         f.t3.finish("run-1", "Project slot released");
         f.reach(blocker, "completed");
@@ -3986,12 +3988,12 @@ void interruptLeavesTheTaskOpen() {
               f.event(id, "cancel_requested").is_null() && f.task(id)["state"] != "cancelling" &&
               f.response(message)["status"] == "stopping",
           "an interrupt request cancelled the task or missed the Run");
-    const auto cursor = f.store->notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
+    const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
     f.t3.finish(run, "Interrupted");
     f.t3.observations.at(run).status = "interrupted";
     f.reach(id, "deciding");
     check(f.event(id, "report").at("status") == "interrupted" &&
-              f.store->notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope).events.empty(),
+              Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, cursor.through, cursor.scope).events.empty(),
           "the explicitly interrupted Run emitted a failure alert");
 }
 

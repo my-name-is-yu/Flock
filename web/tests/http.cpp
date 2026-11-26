@@ -1,3 +1,4 @@
+#include "flock/peer_conversations.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/git_events.hpp"
@@ -655,7 +656,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
 
     const auto recipient = Conversations(store).conversation("triage", 0, 200);
-    const auto sender = store.peerConversation("release", "triage", 0, 200);
+    const auto sender = PeerConversations(store).peerConversation("release", "triage", 0, 200);
     check(sender.size() == 72, "historical DM fixture did not span multiple pages");
     const auto& target = sender.at(24);
     const auto targetId = target.at("id").get<Id>();

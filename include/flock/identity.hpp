@@ -21,4 +21,21 @@ struct ConfiguredIdentities {
 // Installs the resolved identities for access checks on persisted requests.
 ConfiguredIdentities loadIdentities(Store&, const std::filesystem::path&);
 
+class Database;
+class LocalMachineStorage;
+struct WebIdentityState;
+
+class WebIdentity {
+public:
+    explicit WebIdentity(Store&);
+
+    void setRootPeople(std::vector<std::string> ids);
+    void setWebIdentityResolver(WebIdentityResolver, bool liveInteractiveRoles = false);
+    void setWebOrigin(std::string origin);
+private:
+    Database& database_;
+    LocalMachineStorage& machines_;
+    WebIdentityState& identity_;
+};
+
 }

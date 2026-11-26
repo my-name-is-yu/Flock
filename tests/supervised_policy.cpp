@@ -1,3 +1,4 @@
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
@@ -261,7 +262,7 @@ void turns(const std::filesystem::path& path) {
     const Person delegatedAdmin{"delegated-admin", true};
     bool isAdmin = true;
     policy.requireWebIdentity();
-    store.setWebIdentityResolver(
+    WebIdentity(store).setWebIdentityResolver(
         [&](std::string_view person) -> std::optional<bool> {
             if (person == delegatedAdmin.id) return isAdmin;
             if (person == localOwner.id) return true;
@@ -276,7 +277,7 @@ void turns(const std::filesystem::path& path) {
     check(card() == item && policy.rules() == existingRules, "a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
-    store.setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
+    WebIdentity(store).setWebIdentityResolver([](std::string_view) -> std::optional<bool> { return false; });
     check(Inbox(store).inbox(delegatedAdmin).at(0).at("canSaveRule") == true,
           "the queued role replaced the host administrator's interactive authority");
     Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow");
@@ -424,7 +425,7 @@ void channel(const std::filesystem::path& path) {
     policy.setOwner(requester, "release");
     policy.setMember(requester, "release", member.id, true);
     policy.setMode(localOwner, "supervised");
-    store.setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
         if (id == requester.id) return false;
         return std::nullopt;
     });
@@ -440,19 +441,19 @@ void channel(const std::filesystem::path& path) {
         ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
     };
     auto transport = std::make_shared<Transport>();
-    store.artifactBaseUrl("https://previews.example.com");
-    store.connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack), [](auto, auto) { return true; },
-                          [](auto, auto sender) -> std::optional<ChannelSender> {
-                              return ChannelSender{"release", sender == "linked" ? requester.id : member.id};
-                          },
-                          transport});
+    Channels(store).artifactBaseUrl("https://previews.example.com");
+    Channels(store).connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack), [](auto, auto) { return true; },
+                                    [](auto, auto sender) -> std::optional<ChannelSender> {
+                                        return ChannelSender{"release", sender == "linked" ? requester.id : member.id};
+                                    },
+                                    transport});
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     const Decision publish{"publish_artifact", {{"title", "Status"}, {"html", "<p>Status</p>"}}, "Publish"};
     model.action = publish;
     auto receive = [&](std::string_view id, std::string_view text, std::string_view sender = "external") {
-        store.receiveChannel(
+        Channels(store).receiveChannel(
             ChannelKind::slack, "fixture",
             {{"workspaceId", "workspace"}, {"threadRef", "thread"}, {"externalMessageId", id}, {"senderId", sender}, {"text", text}},
             [](auto, auto) { return intake; });

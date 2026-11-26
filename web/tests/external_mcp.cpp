@@ -1,5 +1,6 @@
 #include "../views.hpp"
 #include "http_fixture.hpp"
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/external_mcp.hpp"
@@ -352,7 +353,7 @@ void peerCompletion(const std::optional<std::string>& peerUrl, const Json& expec
     TestDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     constexpr auto requester = "peer-requester";
-    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
         if (person == requester) return false;
         return std::nullopt;
     });

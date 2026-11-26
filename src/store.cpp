@@ -1,3 +1,10 @@
+#include "flock/notifications.hpp"
+#include "flock/policy.hpp"
+#include "flock/peer_conversations.hpp"
+#include "flock/channels.hpp"
+#include "flock/local_machines.hpp"
+#include "flock/identity.hpp"
+#include "flock/workflows.hpp"
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "git_storage.hpp"
@@ -182,6 +189,21 @@ Tasks::Tasks(Store& store)
     : database_(Database::of(store)), outbox_(store.p_->outboxStorage), operations_(store.p_->taskOperations),
       records_(store.p_->taskRecords), waits_(store.p_->waitStorage) {}
 
+Channels::Channels(Store& store) : channels_(store.p_->channelStorage) {}
+
+LocalMachines::LocalMachines(Store& store) : machines_(store.p_->localMachineStorage) {}
+
+WebIdentity::WebIdentity(Store& store)
+    : database_(Database::of(store)), machines_(store.p_->localMachineStorage), identity_(store.p_->webIdentity) {}
+
+Workflows::Workflows(Store& store) : database_(Database::of(store)), workflows_(store.p_->workflowStorage) {}
+
+Notifications::Notifications(Store& store)
+    : database_(Database::of(store)), secrets_(store.p_->secretStorage), channels_(store.p_->channelStorage),
+      permissions_(store.p_->permissions) {}
+
+PeerConversations::PeerConversations(Store& store) : database_(Database::of(store)) {}
+
 const std::filesystem::path& Store::path() const {
     return p_->path;
 }
@@ -213,15 +235,15 @@ ORDER BY 1,2
     return changes;
 }
 
-Store::NotificationEvents Store::notificationEventsSince(const Person& viewer, const std::vector<std::string>& bots,
-                                                         std::optional<Id> after, const std::map<std::string, Id>& previousScope) const {
+Notifications::NotificationEvents Notifications::notificationEventsSince(const Person& viewer, const std::vector<std::string>& bots,
+                                                                         std::optional<Id> after,
+                                                                         const std::map<std::string, Id>& previousScope) const {
     NotificationEvents result{after.value_or(0), Json::array(), {}, false};
-    std::lock_guard lock(p_->mutex);
-    Transaction snapshot(p_->db, Transaction::Mode::read);
-    const auto& policy = p_->permissions;
+    std::lock_guard lock(database_.mutex);
+    Transaction snapshot(database_.db, Transaction::Mode::read);
     std::map<std::string, Id> established, newlyVisible;
     for (const auto& bot : bots) {
-        if (!policy.allows(viewer, Action::bot_view, bot)) continue;
+        if (!permissions_.allows(viewer, Action::bot_view, bot)) continue;
         const auto previous = previousScope.find(bot);
         if (after && previous != previousScope.end()) {
             result.scope.emplace(bot, previous->second);
@@ -264,14 +286,14 @@ WHERE j.conversation_bot_id IS NULL AND (
     // The global page cursor advances only over events delivered for already visible Bots.
     if (!newlyVisible.empty()) {
         static const auto baselines = notificationEvents + " SELECT bot,max(id) FROM events GROUP BY bot";
-        auto rows = p_->query(baselines.c_str(), Json::array({newlyVisible}));
+        auto rows = database_.query(baselines.c_str(), Json::array({newlyVisible}));
         while (rows.next()) {
             result.scope.at(rows.string(0)) = rows.number(1);
             if (!after) result.through = std::max(result.through, rows.number(1));
         }
     }
     static const auto page = notificationEvents + " SELECT id,bot,kind FROM events ORDER BY id LIMIT ?2";
-    auto rows = p_->query(page.c_str(), Json::array({established, pageSize + 1}));
+    auto rows = database_.query(page.c_str(), Json::array({established, pageSize + 1}));
     while (rows.next()) {
         if (result.events.size() == pageSize) {
             result.more = true;
@@ -283,11 +305,11 @@ WHERE j.conversation_bot_id IS NULL AND (
     return result;
 }
 
-std::optional<Store::BotViewStamp> Store::botViewStamp() const {
-    std::lock_guard lock(p_->mutex);
-    if (p_->channelStorage.hasConnectors() || p_->query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next())
+std::optional<Notifications::BotViewStamp> Notifications::botViewStamp() const {
+    std::lock_guard lock(database_.mutex);
+    if (channels_.hasConnectors() || database_.query("SELECT 1 FROM protected_inputs WHERE status='fulfilled' LIMIT 1").next())
         return std::nullopt;
-    return BotViewStamp{changeStamp(), p_->secretStorage.gitCredentialCount()};
+    return BotViewStamp{database_.changeStamp(), secrets_.gitCredentialCount()};
 }
 
 Id Tasks::submit(const Intake& item, const Person* requester) {
@@ -616,9 +638,9 @@ ORDER BY page.id DESC)SQL",
     return result;
 }
 
-Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
-                             std::string_view viewer) const {
-    std::lock_guard lock(p_->mutex);
+Json PeerConversations::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
+                                         std::string_view viewer) const {
+    std::lock_guard lock(database_.mutex);
     const auto sql = std::string(R"SQL(
 SELECT j.id,j.task_id,j.time,j.kind,j.data,m.text,original.time
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
@@ -628,7 +650,7 @@ LEFT JOIN messages m ON ?5<>'' AND m.id=j.forwarded_source_message_id
 LEFT JOIN journal original ON original.id=m.id AND original.kind='conversation_message'
 WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
 )SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4" : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
-    auto rows = p_->query(sql.c_str(), {bot, peer, from ? from : before, std::clamp(limit, 1u, 200u), viewer});
+    auto rows = database_.query(sql.c_str(), {bot, peer, from ? from : before, std::clamp(limit, 1u, 200u), viewer});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
@@ -642,10 +664,10 @@ WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recip
     return result;
 }
 
-Id Store::peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const {
-    std::lock_guard lock(p_->mutex);
+Id PeerConversations::peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const {
+    std::lock_guard lock(database_.mutex);
     // Each participant has a journal row. The shared DM displays the sender task's copy.
-    auto row = p_->query(R"SQL(
+    auto row = database_.query(R"SQL(
 SELECT j.id
 FROM journal source
 JOIN peer_exchanges p ON p.id=source.exchange_id
@@ -656,13 +678,13 @@ WHERE source.id=?3 AND source.kind='bot_message' AND source.task_id IN (p.sender
   AND ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
 LIMIT 1
 )SQL",
-                         {bot, peer, event});
+                               {bot, peer, event});
     return row.next() ? row.number(0) : 0;
 }
 
-std::vector<std::pair<std::string, std::string>> Store::peerExchangePairs() const {
-    std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+std::vector<std::pair<std::string, std::string>> PeerConversations::peerExchangePairs() const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
 SELECT DISTINCT sender.bot_id,recipient.bot_id
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 )SQL");
@@ -671,16 +693,16 @@ FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks re
     return result;
 }
 
-bool Store::hasPeerExchange(std::string_view bot, std::string_view peer) const {
-    std::lock_guard lock(p_->mutex);
-    return p_
-        ->query(R"SQL(
+bool PeerConversations::hasPeerExchange(std::string_view bot, std::string_view peer) const {
+    std::lock_guard lock(database_.mutex);
+    return database_
+        .query(R"SQL(
 SELECT 1
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 WHERE (sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1)
 LIMIT 1
 )SQL",
-                {bot, peer})
+               {bot, peer})
         .next();
 }
 } // namespace flockv0

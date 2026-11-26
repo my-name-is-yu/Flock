@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/board_inbox.hpp"
@@ -456,7 +457,7 @@ void webSendParticipation() {
           "A Web send reopened the stopped participation");
     check(participationState(dir.path / "flock.sqlite3", "release") == "removed", "A Web send changed the removed participation");
     const Person admin{"ops-admin", true};
-    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
         if (id == alice.id || id == admin.id) return true;
         return {};
     });
@@ -1015,7 +1016,7 @@ void inviteIntoPeerLaunch() {
     tick(runtime, 5);
     check(t3.launches["bot-project"] == 1, "Triage did not launch its peer work");
     const Person other{"other-admin", true};
-    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
         if (id == localOwner.id || id == other.id) return true;
         return {};
     });
@@ -1050,7 +1051,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     const auto database = dir.path / "flock.sqlite3";
     const auto makeStore = [&] {
         auto store = std::make_unique<Store>(database);
-        store->setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
+        WebIdentity(*store).setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
             if (id == alice.id) return true;
             if (id == bob.id) return false;
             return {};

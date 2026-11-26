@@ -1,5 +1,6 @@
 #include "fake_git.hpp"
 #include "model.hpp"
+#include "flock/identity.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/git_events.hpp"
@@ -138,7 +139,7 @@ struct Fixture {
         T3Connections connections(store);
         const auto bearer = connections.connect("sandbox", testRequester.id, 48123);
         if (fromSession) {
-            store.setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
+            WebIdentity(store).setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
                 return id == testRequester.id ? std::optional<bool>(false) : std::nullopt;
             });
             sessionConnection = connections.authenticate(bearer);

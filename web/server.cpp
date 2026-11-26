@@ -1,3 +1,7 @@
+#include "flock/identity.hpp"
+#include "flock/notifications.hpp"
+#include "flock/peer_conversations.hpp"
+#include "flock/workflows.hpp"
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"
@@ -243,7 +247,7 @@ public:
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake) throw std::invalid_argument("Invalid Flock Web listener settings");
         if (callbacks_.authenticate && !callbacks_.identityRequired) {
             store_.policy().requireWebIdentity();
-            store_.setWebIdentityResolver(callbacks_.resolveIdentity);
+            WebIdentity(store_).setWebIdentityResolver(callbacks_.resolveIdentity);
         }
         GitEvents(store_).protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4, 8, 32); };
@@ -339,8 +343,8 @@ public:
                     const auto before = queryId(req, "before", true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req, res, known, actor, id, before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {
-                        const auto items =
-                            req.path == "/api/compactions" ? Conversations(store_).compactions(id, before) : store_.workflows(id, before);
+                        const auto items = req.path == "/api/compactions" ? Conversations(store_).compactions(id, before)
+                                                                          : Workflows(store_).workflows(id, before);
                         return json(res, 200, store_.policy().redactSecrets(id, items));
                     }
                     if (req.path == "/api/view") {
@@ -416,7 +420,7 @@ public:
         changes_.stop();
         server_.stop();
         worker_.join();
-        store_.setWebOrigin({});
+        WebIdentity(store_).setWebOrigin({});
     }
     unsigned port() const override { return port_; }
 private:
@@ -632,7 +636,7 @@ private:
 
     bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
         if (configured && (hasPeerPermission(bot, peer) || hasPeerPermission(peer, bot))) return true;
-        return store_.hasPeerExchange(bot, peer);
+        return PeerConversations(store_).hasPeerExchange(bot, peer);
     }
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
@@ -647,7 +651,7 @@ private:
             configured.push_back(id);
             names.emplace(id, web::field(bot, "name"));
         }
-        auto page = store_.notificationEventsSince(person, configured, after, scope);
+        auto page = Notifications(store_).notificationEventsSince(person, configured, after, scope);
         for (const auto& [bot, cursor] : page.scope) names.at(bot) = web::field(redactBot(bot, {{"name", names.at(bot)}}), "name");
         auto inbox = Json::array();
         for (const auto& item : Inbox(store_).inbox(person, {})) {
@@ -674,13 +678,14 @@ private:
     }
 
     ChangeFeed::Projection snapshot(const Person& person, const ChangeFeed::BotView& view) const {
-        const auto stamp = store_.botViewStamp();
+        const auto stamp = Notifications(store_).botViewStamp();
         if (!store_.policy().allows(person, Action::bot_view, view.bot)) return Json(nullptr);
         auto bot = findBot(view.bot);
         if (bot.is_null()) return bot;
         auto data = withConversationAccess(person, view.bot,
                                            store_.policy().redactSecrets(view.bot, web::botView(store_, bot, nullptr, person.id)));
-        if (stamp && stamp == store_.botViewStamp()) return {std::move(data), ChangeFeed::BotVersion{*stamp, std::move(bot)}};
+        if (stamp && stamp == Notifications(store_).botViewStamp())
+            return {std::move(data), ChangeFeed::BotVersion{*stamp, std::move(bot)}};
         return data;
     }
 
@@ -689,9 +694,9 @@ private:
         if (const auto cached = changes_.cachedBotView(person, id, bot)) {
             // Workflow deadlines advance without a write. Session deltas belong to the request's cursor.
             std::optional<Json> workflows, sessions;
-            if (!cached->data.at("workflows").empty()) workflows = policy.redactSecrets(id, store_.workflows(id));
+            if (!cached->data.at("workflows").empty()) workflows = policy.redactSecrets(id, Workflows(store_).workflows(id));
             if (changedSessionTasks) sessions = policy.redactSecrets(id, web::sessionGroups(*changedSessionTasks));
-            if (store_.botViewStamp() == cached->botVersion->stamp) {
+            if (Notifications(store_).botViewStamp() == cached->botVersion->stamp) {
                 auto view = cached->data;
                 if (workflows) view["workflows"] = std::move(*workflows);
                 if (sessions) {
@@ -722,7 +727,7 @@ private:
         if (list.empty()) return list;
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot, "id"));
-        auto pairs = store_.peerExchangePairs();
+        auto pairs = PeerConversations(store_).peerExchangePairs();
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
@@ -764,7 +769,7 @@ private:
         Id anchor = 0;
         if (req.has_param("anchor")) {
             if (req.has_param("before")) return error(res, 400, "invalid_cursor");
-            anchor = store_.peerMessageAnchor(bot, peer, queryId(req, "anchor", false));
+            anchor = PeerConversations(store_).peerMessageAnchor(bot, peer, queryId(req, "anchor", false));
             if (!anchor) return error(res, 404, "peer_message_not_found");
         }
         const auto history =
@@ -837,7 +842,7 @@ private:
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks, std::function<void(unsigned)> afterBind) {
     auto server = std::make_unique<LoopbackServer>(store, port, std::move(callbacks), afterBind);
-    store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
+    WebIdentity(store).setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
     return server;
 }
 } // namespace flockv0

@@ -1,3 +1,5 @@
+#include "flock/identity.hpp"
+#include "flock/local_machines.hpp"
 #include "flock/tasks.hpp"
 #include "flock/conversations.hpp"
 #include "flock/channels.hpp"
@@ -168,8 +170,9 @@ void connect(Store& store, const std::shared_ptr<RecordedTransport>& transport) 
         if (workspace == "workspace" && identity == "linked-user") return ChannelSender{"release", owner.id};
         return std::nullopt;
     };
-    store.connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack), authenticate, sender, transport});
-    store.connectChannel({ChannelKind::imessage, {true, false, false, false, {"image/png"}, 100}, authenticate, sender, transport});
+    Channels(store).connectChannel({ChannelKind::slack, channelCapabilities(ChannelKind::slack), authenticate, sender, transport});
+    Channels(store).connectChannel(
+        {ChannelKind::imessage, {true, false, false, false, {"image/png"}, 100}, authenticate, sender, transport});
 }
 
 Json event(std::string thread, std::string id, std::string text) {
@@ -229,36 +232,36 @@ void channels(const std::filesystem::path& database) {
         Store store(database);
         connect(store, transport);
         shareBot(store, "release");
-        rejects([&] { store.receiveChannel(slack, "bad", screenshot, intake); });
+        rejects([&] { Channels(store).receiveChannel(slack, "bad", screenshot, intake); });
         const auto target = channelPolicyTarget({slack, "workspace", "", ""});
         store.policy().changeNeverRule(root, Action::channel_read, target, true);
-        rejects([&] { store.receiveChannel(slack, "fixture-auth", screenshot, intake); });
+        rejects([&] { Channels(store).receiveChannel(slack, "fixture-auth", screenshot, intake); });
         store.policy().changeNeverRule(root, Action::channel_read, target, false);
-        const auto a = store.receiveChannel(slack, "fixture-auth", screenshot, intake);
-        const auto b = store.receiveChannel(imessage, "fixture-auth", linkedText, intake);
+        const auto a = Channels(store).receiveChannel(slack, "fixture-auth", screenshot, intake);
+        const auto b = Channels(store).receiveChannel(imessage, "fixture-auth", linkedText, intake);
         check(a != b, "Channel keys collided");
         Runtime runtime(store, model, t3, notes);
         runtime.runConversations();
         check(calls == 2 && transport->effects.size() == 2, "Expected one reply in each channel");
-        check(store.receiveChannel(slack, "fixture-auth", screenshot, intake) == a &&
-                  store.receiveChannel(imessage, "fixture-auth", linkedText, intake) == b,
+        check(Channels(store).receiveChannel(slack, "fixture-auth", screenshot, intake) == a &&
+                  Channels(store).receiveChannel(imessage, "fixture-auth", linkedText, intake) == b,
               "Replay changed receipts");
         auto changed = screenshot;
         changed["attachments"][0]["name"] = "other.png";
-        rejects([&] { store.receiveChannel(slack, "fixture-auth", changed, intake); });
+        rejects([&] { Channels(store).receiveChannel(slack, "fixture-auth", changed, intake); });
         runtime.runConversations();
         check(calls == 2 && transport->effects.size() == 2, "Replay ran model or sent another reply");
         const auto history = Conversations(store).conversation("release");
         check(history.size() == 4 && history[0]["data"]["channel"]["threadRef"] == "slack-thread",
               "Channel events did not enter conversation history");
-        check(store.attachment(owner, attachment)->bytes == image && !store.attachment({"outsider", false}, attachment),
+        check(Channels(store).attachment(owner, attachment)->bytes == image && !Channels(store).attachment({"outsider", false}, attachment),
               "Attachment missing or exposed to another person");
         for (const auto& effect : transport->effects) check(effect["payload"]["suggestions"].size() == 2, "Channel reply lost suggestions");
     }
     std::this_thread::sleep_for(std::chrono::seconds(5));
     Store store(database);
     connect(store, transport);
-    store.artifactBaseUrl("https://previews.example.com");
+    Channels(store).artifactBaseUrl("https://previews.example.com");
     Runtime runtime(store, model, t3, notes);
     runtime.runConversations();
     check(transport->reconciliations == 1 && transport->effects.size() == 2, "Lost reply was not reconciled on restart");
@@ -286,7 +289,7 @@ void channels(const std::filesystem::path& database) {
         }
     };
     const auto unsupported = event("imessage-thread", "unsupported", "Try the channel actions");
-    store.receiveChannel(imessage, "fixture-auth", unsupported, intake);
+    Channels(store).receiveChannel(imessage, "fixture-auth", unsupported, intake);
     runtime.runConversations();
     check(transport->effects.size() == 8, "Expected five limitation notices and a normal reply");
     for (std::size_t i = 2; i < transport->effects.size(); ++i) {
@@ -296,7 +299,7 @@ void channels(const std::filesystem::path& database) {
             check(effect["payload"]["text"].get<std::string>().find("normal follow-up") != std::string::npos,
                   "No available alternative was offered");
     }
-    store.receiveChannel(imessage, "fixture-auth", unsupported, intake);
+    Channels(store).receiveChannel(imessage, "fixture-auth", unsupported, intake);
     runtime.runConversations();
     check(transport->effects.size() == 8, "Unsupported notices were repeated on replay");
 
@@ -321,12 +324,12 @@ void channels(const std::filesystem::path& database) {
         }
         }
     };
-    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "actions", "Perform the supported actions"), intake);
+    Channels(store).receiveChannel(slack, "fixture-auth", event("slack-thread", "actions", "Perform the supported actions"), intake);
     runtime.runConversations();
     check(transport->effects.size() == 13 && transport->effects[10]["payload"]["contentBase64"] == encodeAttachment(image),
           "Supported actions or attachment payload missing");
     const auto artifactId = artifact.substr(artifact.find_last_of('/') + 1);
-    check(artifact.starts_with("https://previews.example.com/") && store.artifact(artifactId)->bytes == "<p>Preview</p>",
+    check(artifact.starts_with("https://previews.example.com/") && Channels(store).artifact(artifactId)->bytes == "<p>Preview</p>",
           "Artifact publication needs an absolute URL and persisted HTML");
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& earlier = input.event.at("earlierAttachments");
@@ -354,11 +357,11 @@ void channels(const std::filesystem::path& database) {
             return reply("I can still see the screenshot.");
         }
     };
-    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "followup", "Look at the screenshot again"), intake);
+    Channels(store).receiveChannel(slack, "fixture-auth", event("slack-thread", "followup", "Look at the screenshot again"), intake);
     runtime.runConversations();
     check(transport->effects.size() == 16, "Non-reply edits or screenshot follow-up did not reach the originating thread");
     store.policy().changeNeverRule(root, Action::channel_read, channelPolicyTarget({slack, "workspace", "", ""}), true);
-    check(!store.attachment(owner, attachment), "Attachment download ignored revocation");
+    check(!Channels(store).attachment(owner, attachment), "Attachment download ignored revocation");
     bool denied = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& results = input.event.at("turn");
@@ -366,11 +369,11 @@ void channels(const std::filesystem::path& database) {
         denied = results[0]["result"]["ok"] == false;
         return reply("The screenshot is unavailable.");
     };
-    store.receiveChannel(slack, "fixture-auth", event("slack-thread", "revoked", "Forward the screenshot"), intake);
+    Channels(store).receiveChannel(slack, "fixture-auth", event("slack-thread", "revoked", "Forward the screenshot"), intake);
     runtime.runConversations();
     check(denied && transport->effects.size() == 17, "Bot attachment reference ignored revocation");
     store.policy().changeNeverRule(root, Action::channel_use, channelPolicyTarget({slack, "workspace", "", ""}), true);
-    check(!store.artifact(artifactId), "Public preview survived source channel revocation");
+    check(!Channels(store).artifact(artifactId), "Public preview survived source channel revocation");
     check(ChannelOrigin{slack, "a:b", "c", "d"}.key() != ChannelOrigin{slack, "a", "b:c", "d"}.key(), "Dedupe delimiters collide");
 }
 
@@ -409,8 +412,9 @@ void markdownDelivery(const std::filesystem::path& database) {
         connect(store, transport);
         shareBot(store, "release");
         store.policy().setMode(root, "full");
-        store.receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-markdown", "slack-markdown", "hello"), intake);
-        store.receiveChannel(ChannelKind::imessage, "fixture-auth", event("imessage-markdown", "imessage-markdown", "hello"), intake);
+        Channels(store).receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-markdown", "slack-markdown", "hello"), intake);
+        Channels(store).receiveChannel(ChannelKind::imessage, "fixture-auth", event("imessage-markdown", "imessage-markdown", "hello"),
+                                       intake);
         Runtime runtime(store, model, t3, notes);
         runtime.runConversations();
         check(transport->effects.size() == 2, "Channel replies were not both attempted");
@@ -478,7 +482,8 @@ void markdownFallbackDelivery(const std::filesystem::path& database) {
     connect(store, transport);
     shareBot(store, "release");
     store.policy().setMode(root, "full");
-    store.receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-code-fallback", "slack-code-fallback", "hello"), intake);
+    Channels(store).receiveChannel(ChannelKind::slack, "fixture-auth", event("slack-code-fallback", "slack-code-fallback", "hello"),
+                                   intake);
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     runtime.runConversations();
     check(transport->effects.size() == 1 && transport->effects[0].at("payload").at("text") == expected &&
@@ -497,7 +502,7 @@ void taskUpdates(const std::filesystem::path& database) {
     shareBot(store, "release");
     const auto channel = ChannelKind::slack;
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
-    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+    WebIdentity(store).setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
         if (person == owner.id) return false;
         return std::nullopt;
     });
@@ -514,7 +519,7 @@ void taskUpdates(const std::filesystem::path& database) {
         if (input.event.at("turn").empty()) return {"start_task", {{"request", "A private release task"}}, {}};
         return reply("Task started.");
     };
-    store.receiveChannel(channel, "fixture-auth", publish, intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", publish, intake);
     runtime.runConversations();
     check(transport->effects.size() == 2 && transport->effects.at(0).at("action") == "reply" &&
               transport->effects.at(0).at("payload").at("text").get<std::string>().find("preview URL") != std::string::npos,
@@ -533,13 +538,13 @@ void taskUpdates(const std::filesystem::path& database) {
         inspected = true;
         return reply("I need approval to inspect it.");
     };
-    store.receiveChannel(channel, "fixture-auth", screenshot, intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", screenshot, intake);
     runtime.runConversations();
     check(inspected && transport->effects.size() == 3, "Image approval was not exercised");
     store.policy().changeRule(root, RuleKind::ask, Action::channel_read, channelTarget, false);
     store.policy().setMode(root, "full");
     model.decideNext = std::move(taskModel);
-    const auto receipt = store.receiveChannel(channel, "fixture-auth", original, intake);
+    const auto receipt = Channels(store).receiveChannel(channel, "fixture-auth", original, intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     const Id taskId = Tasks(store).activeTasks("release").at(0).task.id;
     check(Tasks(store).task(taskId).task.activeRun.has_value(), "Channel task did not start a Session");
@@ -582,7 +587,7 @@ void taskUpdates(const std::filesystem::path& database) {
         check(steps.at(0).at("result").at("ok") == false, "Another thread could address a private task by ID");
         return reply("No task in this thread.");
     };
-    store.receiveChannel(channel, "fixture-auth", event("other-thread", "ask", "What is the release target?"), intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", event("other-thread", "ask", "What is the release target?"), intake);
     runtime.runConversations();
     check(Tasks(store).task(taskId).task.state == TaskState::waiting, "Another thread cancelled a private task");
 
@@ -595,7 +600,7 @@ void taskUpdates(const std::filesystem::path& database) {
         return reply("Answer received.");
     };
     const auto answer = event("private-origin", "answer", "Preview");
-    store.receiveChannel(channel, "fixture-auth", answer, intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
     check(Inbox(store).decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
@@ -604,8 +609,8 @@ void taskUpdates(const std::filesystem::path& database) {
               transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
               transport->effects.back().at("payload").at("text") == "Private release completed.",
           "Task completion was not delivered to the originating thread");
-    check(store.receiveChannel(channel, "fixture-auth", original, intake) == receipt, "Task-start event changed on replay");
-    store.receiveChannel(channel, "fixture-auth", answer, intake);
+    check(Channels(store).receiveChannel(channel, "fixture-auth", original, intake) == receipt, "Task-start event changed on replay");
+    Channels(store).receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
     check(transport->effects.size() == 8, "Task replay repeated a channel update");
 }
@@ -662,7 +667,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>() && !steps.at(1).at("result").at("ok").get<bool>();
         return reply("Channel reply");
     };
-    store.receiveChannel(channel, "fixture-auth", event("scope", "probe", "What is in my context?"), intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", event("scope", "probe", "What is in my context?"), intake);
     runtime.runConversations();
     check(channelContextIsolated, "Channel called Web tools by ID or received Web context");
 }
@@ -681,7 +686,7 @@ void sessionEvidence(const std::filesystem::path& database) {
         if (input.event.at("turn").empty()) return {"start_task", {{"request", "Private task"}}, {}};
         return reply("Started");
     };
-    store.receiveChannel(channel, "fixture-auth", event("private-origin", "start", "Start work"), intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", event("private-origin", "start", "Start work"), intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     check(t3.launches == 1, "Expected a Session in the originating thread");
 
@@ -714,7 +719,7 @@ void sessionEvidence(const std::filesystem::path& database) {
     };
     const auto call = [&](std::string thread, std::string id, std::string request) {
         result = nullptr;
-        store.receiveChannel(channel, "fixture-auth", event(std::move(thread), std::move(id), std::move(request)), intake);
+        Channels(store).receiveChannel(channel, "fixture-auth", event(std::move(thread), std::move(id), std::move(request)), intake);
         runtime.runConversations();
         check(result.is_object(), "Expected Session evidence tool result");
         return result;
@@ -769,12 +774,12 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         return reply("Task started.");
     };
     const auto start = [&](const std::string& project) {
-        store.receiveChannel(channel, "fixture-auth", event("choice-thread", project, project),
-                             [&](std::string_view bot, std::string_view text) {
-                                 auto route = intake(bot, text);
-                                 route.projectId = project;
-                                 return route;
-                             });
+        Channels(store).receiveChannel(channel, "fixture-auth", event("choice-thread", project, project),
+                                       [&](std::string_view bot, std::string_view text) {
+                                           auto route = intake(bot, text);
+                                           route.projectId = project;
+                                           return route;
+                                       });
         for (int i = 0; i < 8; ++i) runtime.tick();
         const auto task = taskJson(Tasks(store).task(Tasks(store).activeTasks("release").at(0).task.id));
         check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes", "No"}),
@@ -790,7 +795,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     answer["replyToExternalMessageId"] = firstPost;
     auto wrongThread = answer;
     wrongThread["threadRef"] = "another-thread";
-    rejects([&] { store.receiveChannel(channel, "fixture-auth", wrongThread, intake); });
+    rejects([&] { Channels(store).receiveChannel(channel, "fixture-auth", wrongThread, intake); });
 
     const auto recordedChoice = [&](const Json& task, const Json& receipt) {
         return std::ranges::any_of(Tasks(store).history(task.at("id"), 0, 200), [&](const Json& event) {
@@ -804,13 +809,13 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         if (input.event.at("turn").size() == 1) return answerQuestion(first, "Yes");
         return reply("Done.");
     };
-    const auto receipt = store.receiveChannel(channel, "fixture-auth", answer, intake);
+    const auto receipt = Channels(store).receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
     check(recordedChoice(first, receipt) && taskJson(Tasks(store).task(second.at("id"))).at("wait") == second.at("wait"),
           "Only the selected question should receive the exact choice");
-    check(store.receiveChannel(channel, "fixture-auth", answer, intake) == receipt, "Choice replay changed the receipt");
+    check(Channels(store).receiveChannel(channel, "fixture-auth", answer, intake) == receipt, "Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
-    rejects([&] { store.receiveChannel(channel, "fixture-auth", answer, intake); });
+    rejects([&] { Channels(store).receiveChannel(channel, "fixture-auth", answer, intake); });
 
     auto clarification = event("choice-thread", "clarify-second", "What happens if I say yes?");
     clarification["replyToExternalMessageId"] = secondPost;
@@ -819,7 +824,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         clarification.args["continuesQuestion"] = true;
         return clarification;
     };
-    store.receiveChannel(channel, "fixture-auth", clarification, intake);
+    Channels(store).receiveChannel(channel, "fixture-auth", clarification, intake);
     runtime.runConversations();
     auto followup = event("choice-thread", "answer-clarification", "Yes");
     followup["replyToExternalMessageId"] = transport->effects.back().at("externalMessageId");
@@ -828,7 +833,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         if (input.event.at("turn").empty()) return answerQuestion(second, "Yes");
         return reply("Done.");
     };
-    const auto followed = store.receiveChannel(channel, "fixture-auth", followup, intake);
+    const auto followed = Channels(store).receiveChannel(channel, "fixture-auth", followup, intake);
     runtime.runConversations();
     check(recordedChoice(second, followed) && taskJson(Tasks(store).task(second.at("id"))).at("wait").is_null(),
           "Reply to a Bot clarification could not answer its original question");
@@ -838,7 +843,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     Store store(database);
     shareBot(store, "release");
     shareBot(store, "peer");
-    store.connectLocalMachine("laptop", hostLocalMachine(owner.id));
+    LocalMachines(store).connectLocalMachine("laptop", hostLocalMachine(owner.id));
     Script model;
     SessionAdapter t3;
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
@@ -861,7 +866,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         return Decision{"request_local_machine_connection", data, {}};
     };
     const auto operation = [&](const RunRef& run, std::string_view op, const std::string& file) {
-        return store.runLocalMachineOperation("env", run, "laptop", op, file);
+        return LocalMachines(store).runLocalMachineOperation("env", run, "laptop", op, file);
     };
     unsigned count = 0;
     const auto turn = [&](auto bot, const Decision& action, bool success) {
@@ -880,8 +885,8 @@ void local(const std::filesystem::path& database, const std::string& path) {
     };
     const auto environments = store.policy().rules();
     turn("release", request(a), true);
-    const auto id = store.localConnections(owner).at(0).at("id").get<Id>();
-    rejects([&] { store.decideLocalConnection(root, id, true); });
+    const auto id = LocalMachines(store).localConnections(owner).at(0).at("id").get<Id>();
+    rejects([&] { LocalMachines(store).decideLocalConnection(root, id, true); });
     rejects([&] { operation(a, "read_file", path); });
     const auto originalRun = a;
     t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
@@ -894,7 +899,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         if (active && active->ref.threadId == originalRun.threadId) a = active->ref;
     }
     check(a.runId != originalRun.runId, "Fixture did not start a follow-up Run in Session A");
-    store.decideLocalConnection(owner, id, true);
+    LocalMachines(store).decideLocalConnection(owner, id, true);
     rejects([&] { operation(originalRun, "read_file", path); });
     check(operation(a, "read_file", path).at("text") == "fixture text", "Wrong machine data");
     rejects([&] { operation(a, "read_file", path + ".forbidden"); });
@@ -908,10 +913,10 @@ void local(const std::filesystem::path& database, const std::string& path) {
     rejects([&] { operation(a, "read_file", path); });
     std::filesystem::remove(path);
     std::filesystem::rename(original, path);
-    store.disconnectLocalConnection(owner, id);
+    LocalMachines(store).disconnectLocalConnection(owner, id);
     rejects([&] { operation(a, "read_file", path); });
     turn("release", request(b), true);
-    store.decideLocalConnection(owner, store.localConnections(owner).at(0).at("id"), false);
+    LocalMachines(store).decideLocalConnection(owner, LocalMachines(store).localConnections(owner).at(0).at("id"), false);
     rejects([&] { operation(b, "read_file", path); });
     check(store.policy().rules() == environments, "Local approval created reusable policy rules");
     bool unchanged = false;

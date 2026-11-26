@@ -1,5 +1,6 @@
 #include "settings_access.hpp"
 #include "../src/database.hpp"
+#include "flock/identity.hpp"
 #include "flock/base64.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/json.hpp"
@@ -141,7 +142,7 @@ SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const
         store_.policy().requireWebIdentity();
         transaction.commit();
     }
-    store_.setWebIdentityResolver(identities().resolveRoot, !external_.authenticate);
+    WebIdentity(store_).setWebIdentityResolver(identities().resolveRoot, !external_.authenticate);
 }
 
 bool SettingsAccess::canManageInstallation(const Person& actor) const {

@@ -1,3 +1,5 @@
+#include "flock/identity.hpp"
+#include "flock/peer_conversations.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/board_inbox.hpp"
@@ -916,7 +918,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
             expectedNote.replace(found, peerAmpSecret.size(), "[redacted]");
         if (const auto found = expectedReview.find(peerMarkdownSecret); found != expectedReview.npos)
             expectedReview.replace(found, peerMarkdownSecret.size(), "[redacted]");
-        const auto stored = store.peerConversation("ernest", "reviewer", 0, 20, 0);
+        const auto stored = PeerConversations(store).peerConversation("ernest", "reviewer", 0, 20, 0);
         check(stored.size() == 2 && stored.front().at("data").at("text") == note && stored.back().at("data").at("text") == review,
               "peer response redaction must preserve canonical journal text");
     }
@@ -1709,7 +1711,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
 
         const auto racing = send(browser, retained, "Demoted during model call");
         model.demoteDuringCall = [&] {
-            store.setWebIdentityResolver(
+            WebIdentity(store).setWebIdentityResolver(
                 [](std::string_view person) -> std::optional<bool> { return person == "retained" ? std::optional{false} : std::nullopt; });
         };
         runtime.runConversations();
