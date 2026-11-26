@@ -8,10 +8,11 @@ import {
   confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
 import { showAvatar } from '/avatars.js';
-import { actionButton, element, row, rowLabel, settingsNavigation } from '/settings-ui.js';
+import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
 import { quietSavedStatus } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
+const setStatus = (text, isError = false) => setSettingsStatus($('status'), text, isError);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
 let canManagePolicy = false;
@@ -61,7 +62,7 @@ function reflectNotifications() {
 notificationsToggle.onclick = async () => {
   notificationsToggle.disabled = true;
   try { await setBrowserNotifications(!browserNotificationsEnabled()); }
-  catch { $('status').textContent = 'Couldn’t change notifications.'; }
+  catch { setStatus('Couldn’t change notifications.', true); }
   finally {
     reflectNotifications();
     notificationsToggle.disabled = false;
@@ -112,7 +113,10 @@ async function load() {
 
 const navigation = settingsNavigation();
 quietSavedStatus(document.getElementById('status'));
+let initializedSection = false;
 function showSection() {
+  if (initializedSection) setStatus('');
+  initializedSection = true;
   const active = navigation.get(location.hash.slice(1)) ?? navigation.get('appearance');
   const section = active.dataset.section;
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== section;
@@ -128,22 +132,43 @@ function showSection() {
 addEventListener('hashchange', showSection);
 showSection();
 
+function ruleTargetPlaceholder(action = '') {
+  if (action.startsWith('repository.')) return 'github.com/acme/app';
+  if (action.startsWith('channel.')) return 'slack:workspace-id';
+  if (action.startsWith('mcp.')) return 'server-name';
+  if (action.startsWith('skill.')) return 'skill-name';
+  if (action.startsWith('web.')) return 'example.com';
+  if (action.startsWith('environment.') || action.startsWith('session.') || action.startsWith('t3.')) return 'environment-id';
+  if (action.startsWith('workspace.')) return '/path/or/glob';
+  if (action.startsWith('secret.')) return 'SECRET_NAME';
+  return '* or target';
+}
+function syncRuleTargetPlaceholder() {
+  const form = $('rule-form');
+  if (form?.elements.target) form.elements.target.placeholder = ruleTargetPlaceholder($('rule-action').value);
+}
 function populateRuleActions(personOnlyActions) {
   const select = $('rule-action');
-  if (select.options.length) return;
-  for (const [action, label] of Object.entries(actionLabels)) {
-    if (personOnlyActions.includes(action)) continue;
-    const option = document.createElement('option');
-    option.value = action;
-    option.textContent = label;
-    select.append(option);
+  if (!select.options.length) {
+    for (const [action, label] of Object.entries(actionLabels)) {
+      if (personOnlyActions.includes(action)) continue;
+      const option = document.createElement('option');
+      option.value = action;
+      option.textContent = label;
+      select.append(option);
+    }
   }
+  syncRuleTargetPlaceholder();
 }
+$('rule-action').onchange = syncRuleTargetPlaceholder;
 $('rule-form').onsubmit = async (event) => {
   event.preventDefault();
   const form = event.target;
   const data = Object.fromEntries(new FormData(form));
-  if (await submit('rule', { ...data, target: data.target.trim(), add: true })) form.reset();
+  if (await submit('rule', { ...data, target: data.target.trim(), add: true })) {
+    form.reset();
+    syncRuleTargetPlaceholder();
+  }
 };
 
 function link(label, href, name) {
@@ -214,10 +239,10 @@ async function signIn(reconsent, control, switchAccount = false) {
   } catch {
     watchingSignIn = false;
     control.disabled = false;
-    $('status').textContent = 'Couldn’t start ChatGPT sign-in.';
+    setStatus('Couldn’t start ChatGPT sign-in.', true);
     return;
   }
-  $('status').textContent = '';
+  setStatus('');
   renderModel({signingIn: true});
   await refreshModel();
 }
@@ -231,8 +256,8 @@ async function signOut() {
     if (!response.ok) throw new Error('Couldn’t sign out of ChatGPT. Try again.');
     const {revocationConfirmed} = await response.json();
     await refreshModel();
-    $('status').textContent = revocationConfirmed ? 'Signed out of ChatGPT.'
-      : 'Signed out on this Flock. ChatGPT did not confirm revoking the previous session.';
+    setStatus(revocationConfirmed ? 'Signed out of ChatGPT.'
+      : 'Signed out on this Flock. ChatGPT did not confirm revoking the previous session.');
   } finally {
     signingOut = false;
   }
@@ -397,7 +422,12 @@ async function changeT3(action) {
 }
 
 function disconnectButton(item, label, environmentId, environmentLabel) {
-  const control = actionButton(item, label, () => void disconnectT3(environmentId, environmentLabel));
+  const title = environmentId ? `Disconnect ${environmentLabel}?` : 'Remove Flock from coding agents?';
+  const description = environmentId
+    ? 'Bots using this T3 environment will need it reconnected before starting new work there.'
+    : 'Codex and Claude Code on this computer will stop listing Flock.';
+  const control = actionButton(item, label, () => confirmSetting(
+    title, description, label, () => disconnectT3(environmentId, environmentLabel)));
   control.classList.add('quiet-danger');
 }
 
@@ -406,10 +436,10 @@ function disconnectT3(environmentId, label) {
     let saved = false;
     try { saved = (await postSettings('t3-disconnect', {environmentId})).ok; } catch {}
     const refreshed = await refreshConnections();
-    $('status').textContent = saved
+    setStatus(saved
       ? (refreshed ? (environmentId ? `Disconnected ${label}.` : 'Removed Flock from coding agents.')
                    : 'Saved. Reload to see the current connections.')
-      : 'Couldn’t finish disconnecting. Check the current connection status.';
+      : 'Couldn’t finish disconnecting. Check the current connection status.', !saved);
   });
 }
 
@@ -426,13 +456,13 @@ function startT3(target) {
         if (response.status !== 409 || (await response.json()).error !== 'connect_pending') throw new Error();
       }
       t3Setup = {running: true};
-      $('status').textContent = '';
+      setStatus('');
       await refreshConnections();
     } catch {
       releaseApprovalTab();
-      $('status').textContent = target.source === 'url'
+      setStatus(target.source === 'url'
         ? 'Couldn’t start the T3 connection. Check the connection URL.'
-        : 'Couldn’t start the T3 connection.';
+        : 'Couldn’t start the T3 connection.', true);
     }
   });
 }
@@ -456,10 +486,10 @@ async function submit(path, data) {
   if (saved && path === 'mode') currentMode = data.mode;
   try {
     await load();
-    $('status').textContent = saved ? 'Saved.' : 'Couldn’t save this change.';
+    setStatus(saved ? 'Saved.' : 'Couldn’t save this change.', !saved);
   } catch {
     reflectMode(currentMode);
-    $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Couldn’t reload settings.';
+    setStatus(saved ? 'Saved. Reload to see the current settings.' : 'Couldn’t reload settings.', !saved);
   } finally {
     savingPolicy = false;
     updatePolicyControls();
@@ -478,4 +508,4 @@ updatePolicyControls();
 load().then(() => {
   if (canManagePolicy) return loadInstallation();
   showInstallationUnavailable();
-}).catch(() => { $('status').textContent = 'Couldn’t load Flock settings.'; });
+}).catch(() => { setStatus('Couldn’t load Flock settings.', true); });

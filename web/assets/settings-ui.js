@@ -22,6 +22,12 @@ export function quietSavedStatus(status) {
   sync();
 }
 
+export function setSettingsStatus(statusEl, text, isError = false) {
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.classList.toggle('error', Boolean(isError && text));
+}
+
 export function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text) node.textContent = text;

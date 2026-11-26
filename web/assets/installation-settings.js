@@ -1,4 +1,4 @@
-import { actionButton, element, row, rowLabel } from '/settings-ui.js';
+import { actionButton, element, row, rowLabel, setSettingsStatus } from '/settings-ui.js';
 import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -121,9 +121,9 @@ async function saveInstallation(section, payload, note = 'Saved.') {
   const response = await postSettings('installation/' + section, payload);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.message || 'Could not save this change. Check your input and try again.');
-  if (note) $('status').textContent = note;
+  if (note) setSettingsStatus($('status'), note);
   try { await loadInstallation(); }
-  catch { $('status').textContent = 'Saved. Reload to see the current settings.'; }
+  catch { setSettingsStatus($('status'), 'Saved. Reload to see the current settings.'); }
   return data;
 }
 
@@ -304,12 +304,7 @@ function editChannel(type, entry = {}) {
   ];
   if (editing) fields[0].querySelector('input').readOnly = true;
   const actions = [];
-  if (editing) {
-    const cancel = element('button', 'Cancel edit', 'button');
-    cancel.type = 'button';
-    cancel.onclick = () => editChannel(type);
-    actions.push(cancel);
-  }
+  if (editing) actions.push(cancelEditButton(() => editChannel(type)));
   const form = buildForm(fields, editing ? 'Save bridge' : 'Add bridge', ({id, port, credential}) => {
     const body = {action: 'saveBridge', type, id: id.trim(), port: Number(port)};
     if (credential) body.credential = credential;
@@ -317,6 +312,13 @@ function editChannel(type, entry = {}) {
   }, actions);
   openEditor(title, 'Register a bridge on the computer running Flock. Choose which Bot replies from its Access page.',
     list, checkResult, form);
+}
+
+function cancelEditButton(onReset) {
+  const cancel = element('button', 'Cancel edit', 'button');
+  cancel.type = 'button';
+  cancel.onclick = onReset;
+  return cancel;
 }
 
 function editMachines(entry = {}) {
@@ -337,11 +339,12 @@ function editMachines(entry = {}) {
   });
   const name = settingField('id', 'Machine name', {required: true, value: entry.id});
   if (editing) name.querySelector('input').readOnly = true;
+  const actions = editing ? [cancelEditButton(() => editMachines())] : [];
   const form = buildForm([
     name,
     settingField('personId', 'Owner’s person ID', {required: true, value: entry.personId, placeholder: 'local-owner'}),
   ], editing ? 'Save machine' : 'Add machine', ({id, personId}) =>
-    saveInstallation('channels', {action: 'saveMachine', id: id.trim(), personId: personId.trim()}));
+    saveInstallation('channels', {action: 'saveMachine', id: id.trim(), personId: personId.trim()}), actions);
   openEditor('Local machines', 'Let approved requests read files on the computer running Flock.', list, form);
 }
 
@@ -398,6 +401,7 @@ function editMcp(entry = {}) {
   const name = settingField('id', 'Connection name', {required: true, value: entry.id});
   if (editing) name.querySelector('input').readOnly = true;
   const actions = [];
+  if (editing) actions.push(cancelEditButton(() => editMcp()));
   if (entry.tokenSet) actions.push(removeButton('Remove token', () => confirmSetting(
     'Remove access token?', `Flock will connect to ${entry.id} without this token after restart.`, 'Remove token',
     () => saveInstallation('tools', {action: 'saveMcp', id: entry.id, url: entry.url, token: null}),
@@ -431,11 +435,12 @@ function editSkill(entry = {}) {
   });
   const name = settingField('id', 'Skill name', {required: true, value: entry.id});
   if (editing) name.querySelector('input').readOnly = true;
+  const actions = editing ? [cancelEditButton(() => editSkill())] : [];
   const form = buildForm([
     name,
     settingField('path', 'Skill folder', {required: true, value: entry.path, placeholder: 'writing'}),
   ], editing ? 'Save skill' : 'Add skill', ({id, path}) =>
-    saveInstallation('tools', {action: 'saveSkill', id: id.trim(), path: path.trim()}));
+    saveInstallation('tools', {action: 'saveSkill', id: id.trim(), path: path.trim()}), actions);
   openEditor('Skills', 'Register a skill folder from the managed skills directory on the computer running Flock.', list, form);
 }
 
@@ -540,14 +545,14 @@ async function activateAdmin(password) {
 async function prepareAccess(event) {
   const control = event.currentTarget;
   control.disabled = true;
-  $('status').textContent = '';
+  setSettingsStatus($('status'), '');
   try {
     const data = await saveInstallation('access', {operation: 'prepare'}, '');
     showCredential('Administrator password', data.credential, {
       activate: {label: 'Enable sharing', commit: activateAdmin},
     });
   } catch (error) {
-    $('status').textContent = error.message;
+    setSettingsStatus($('status'), error.message, true);
   } finally {
     control.disabled = false;
   }

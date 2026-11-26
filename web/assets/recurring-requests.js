@@ -205,6 +205,7 @@ export function createRecurringRequests(bot, api) {
 
   let read;
   let signature;
+  let loaded = false;
   async function refresh() {
     if (signal.aborted) return;
     read?.abort();
@@ -212,6 +213,8 @@ export function createRecurringRequests(bot, api) {
     try {
       const data = await readSchedules(api, bot, current.signal);
       if (current.signal.aborted) return;
+      loaded = true;
+      list.querySelector('.cron-poll-error')?.remove();
       const next = JSON.stringify(data);
       if (next === signature) return;
       const { canManage, unscheduledRequests, automations } = data;
@@ -234,6 +237,14 @@ export function createRecurringRequests(bot, api) {
       signature = next;
     } catch {
       if (current.signal.aborted) return;
+      if (loaded) {
+        if (!list.querySelector('.cron-poll-error')) {
+          const note = node('p', 'cron-error cron-poll-error', 'Couldn’t refresh recurring requests. Showing last loaded list.');
+          note.setAttribute('role', 'status');
+          list.prepend(note);
+        }
+        return;
+      }
       signature = undefined;
       count.data = '';
       form.hidden = true;

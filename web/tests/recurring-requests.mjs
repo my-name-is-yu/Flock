@@ -17,6 +17,7 @@ async function exercise(createRecurringRequests) {
   const advanced = { id: 2, kind: 'schedule', request: 'Monthly', cron: '0 9 1 * *',
     timezone: 'Europe/Paris', nextRunAt: utc };
   let canManage = true;
+  let failNextRead = false;
   let recent = [reminder, configured];
   let reads = 0;
   let holdRead;
@@ -39,6 +40,7 @@ async function exercise(createRecurringRequests) {
       return {};
     }
     check(url.searchParams.get('active') === '1', 'the active filter was dropped');
+    if (failNextRead) throw new Error('temporary_poll_failure');
     if (url.searchParams.get('before') === '3') return { automations: [advanced], before: 0 };
     reads++;
     const page = { automations: [...recent], before: 3, canManage, unscheduledRequests: ['Unavailable'] };
@@ -95,10 +97,20 @@ async function exercise(createRecurringRequests) {
   const [repeat] = form.querySelectorAll('select');
   draft.value = 'Draft to keep';
   draft.focus();
+  const previousCount = count.data;
+  failNextRead = true;
+  poll();
+  await nextTask();
+  check(list.querySelector('.cron-poll-error') && count.data === previousCount &&
+    list.textContent.includes('Reminder') && !form.hidden &&
+    draft.value === 'Draft to keep' && document.activeElement === draft,
+    'a transient poll error wiped the loaded list or draft form');
+  failNextRead = false;
   recent = [configured];
   poll();
   await nextTask();
-  check(count.data === '2' && !list.textContent.includes('Reminder'), 'an external change stayed stale');
+  check(!list.querySelector('.cron-poll-error') && count.data === '2' && !list.textContent.includes('Reminder'),
+    'an external change stayed stale or left the poll error banner behind');
   check(draft.value === 'Draft to keep' && document.activeElement === draft, 'a refresh discarded the draft or focus');
 
   const oversizedRequest = 'あ'.repeat(5334);
