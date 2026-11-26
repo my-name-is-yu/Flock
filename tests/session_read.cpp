@@ -11,7 +11,10 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/session_ref.hpp"
@@ -233,7 +236,7 @@ struct Fixture {
         return model.result;
     }
     void blockSession(std::string_view thread, bool blocked = false) {
-        Policy{*store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, thread).target, blocked);
+        PolicyRules{*store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, thread).target, blocked);
     }
 };
 
@@ -251,7 +254,7 @@ void acceptance() {
     f.blockSession(staging, true);
     f.blockSession(second, true);
     f.blockSession("internal-shared-but-denied", true);
-    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     check(f.call(search, filters) == empty && f.t3.reads == 0, "blocked Session contacted T3 or entered search");
     const auto missing = f.call(events, {{"sessionRef", "random"}, {"operation", "counts"}});
     check(missing == f.call(events, {{"sessionRef", staging}, {"operation", "counts"}, {"bot", "beta"}}) && missing.at("ok") == false &&
@@ -260,7 +263,7 @@ void acceptance() {
     f.blockSession(staging);
     f.blockSession(second);
     f.blockSession("internal-shared-but-denied");
-    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     const auto found = f.call(search, filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(), "search pagination missing");
@@ -324,7 +327,7 @@ void acceptance() {
     check(log.at("attachment").at("content").get<std::string>().starts_with("fixture failed") &&
               log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
-    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, false);
+    PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, false);
     const auto acrossEnvironments = f.call(search, Json::object()).at("sessions");
     const auto remoteRef = acrossEnvironments.back().at("sessionRef");
     check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
@@ -333,7 +336,7 @@ void acceptance() {
               f.call(events, {{"sessionRef", remoteRef}, {"operation", "get_attachment"}, {"attachmentRef", attachmentRef}}).dump() ==
                   missingAttachment.dump(),
           "references crossed environments for the same T3 thread identifier");
-    Policy{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
+    PolicyRules{*f.store}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(otherEnv, staging).target, true);
     auto tampered = sessionRef.get<std::string>();
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     check(f.call(events, {{"sessionRef", tampered}, {"operation", "counts"}}).dump() == missing.dump() &&
@@ -387,7 +390,7 @@ void acceptance() {
 
     f.t3.onRead = [&] {
         Store writer(f.dir / "state.db");
-        Policy{writer}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, staging).target, true);
+        PolicyRules{writer}.changeNeverRule(localOwner, Action::session_read, Resource::sessionRead(env, staging).target, true);
     };
     check(request("read_event", {{"eventRef", eventRef}}) == missing, "revocation during an upstream read was ignored");
     f.t3.onRead = {};
@@ -472,17 +475,18 @@ void connectedSearchRespectsCurrentAccess() {
           "upstream denial did not revoke a discovered Session");
     denied = false;
 
-    Policy policy{*f.store};
-    policy.changeNeverRule(localOwner, Action::environment_inspect, otherEnv, true);
+    PolicyRules policyRules{*f.store};
+    BotAccess botAccess{*f.store};
+    policyRules.changeNeverRule(localOwner, Action::environment_inspect, otherEnv, true);
     check(f.call(search, filters).at("sessions").empty() && f.call(events, read).at("ok") == false,
           "a Never rule did not revoke connected search access");
-    policy.changeNeverRule(localOwner, Action::environment_inspect, otherEnv, false);
+    policyRules.changeNeverRule(localOwner, Action::environment_inspect, otherEnv, false);
 
-    policy.setMember(localOwner, "alpha", "guest", true);
+    botAccess.setMember(localOwner, "alpha", "guest", true);
     check(f.call(search, filters).at("sessions").empty() && f.call(events, read).at("ok") == false &&
               f.call("start_task", work).at("ok") == false,
           "sharing a Bot retained private connected Session access");
-    policy.setMember(localOwner, "alpha", "guest", false);
+    botAccess.setMember(localOwner, "alpha", "guest", false);
     check(f.call(events, read).at("ok") == true, "removing the share did not restore private scope");
 
     connections.disconnect(otherEnv);
@@ -528,10 +532,10 @@ void approvedCallSurvivesReadPreflightContention() {
 void redactionAndResumedHistory() {
     Fixture f;
     f.blockSession(staging);
-    Policy policy{*f.store};
+    SecretRequests secretRequests{*f.store};
     const auto secret = "synthetic-session-credential";
-    const auto key = policy.requestSecret("beta", {"beta-fixture"});
-    policy.submitSecret({"root", true}, "beta", key, secret);
+    const auto key = secretRequests.requestSecret("beta", {"beta-fixture"});
+    secretRequests.submitSecret({"root", true}, "beta", key, secret);
     f.t3.secret = secret;
 
     const auto found = f.call("flock_session_search", {{"query", "regression"}});

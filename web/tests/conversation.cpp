@@ -21,7 +21,10 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/runtime.hpp"
 #include "flock/runtime_options.hpp"
@@ -279,8 +282,8 @@ void tick(Runtime& runtime, int count) {
 void botPauseEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner", false};
-    Policy{store}.setOwner(owner, "release");
-    Policy{store}.setMember(owner, "release", "reader", true);
+    BotAccess{store}.setOwner(owner, "release");
+    BotAccess{store}.setMember(owner, "release", "reader", true);
     auto settings = callbacks();
     settings.authenticate = [](std::string_view credential) {
         if (credential == "Bearer owner") return Person{"owner", false};
@@ -371,8 +374,8 @@ void inspectors(const std::filesystem::path& path) {
     ConversationIntake(store).receive({"fixture", true}, routing, "b", "Summarize");
     ConversationIntake(store).receive({"fixture", true}, routing, "c", "Release");
     runtime.runConversations();
-    Policy policy{store};
-    policy.submitSecret({"fixture", true}, "release", policy.requestSecret("release", {"inspector-token"}), model.credential);
+    SecretRequests secrets{store};
+    secrets.submitSecret({"fixture", true}, "release", secrets.requestSecret("release", {"inspector-token"}), model.credential);
     const auto summaries = browser.get("/api/compactions?bot=release");
     const auto workflows = browser.get("/api/workflows?bot=release");
     const auto view = browser.get("/api/view?bot=release");
@@ -411,7 +414,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
         if (person == "reader") return false;
         return std::nullopt;
     };
-    Policy{store}.setMember({"owner", true}, "release", "reader", true);
+    BotAccess{store}.setMember({"owner", true}, "release", "reader", true);
     const auto server = startWeb(store, 0, std::move(config));
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
@@ -877,9 +880,9 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
                            Json::array({{{"authorization", "Bearer fixture-author"}, {"person", author.id}, {"adminRoot", true}},
                                         {{"authorization", "Bearer fixture-reader"}, {"person", "fixture-shared-reader"}}}));
         configureWebIdentities(store, identities, web);
-        for (const auto* bot : {"ernest", "reviewer"}) Policy{store}.setMember(author, bot, "fixture-shared-reader", true);
-        ampRequest = Policy{store}.requestSecret("ernest", {"peer-ernest-renderer"});
-        markdownRequest = Policy{store}.requestSecret("reviewer", {"peer-reviewer-renderer"});
+        for (const auto* bot : {"ernest", "reviewer"}) BotAccess{store}.setMember(author, bot, "fixture-shared-reader", true);
+        ampRequest = SecretRequests{store}.requestSecret("ernest", {"peer-ernest-renderer"});
+        markdownRequest = SecretRequests{store}.requestSecret("reviewer", {"peer-reviewer-renderer"});
     }
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers});
     const auto server = startWeb(store, 0, web);
@@ -920,9 +923,9 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     std::string expectedNote(note);
     std::string expectedReview(review);
     if (authenticated) {
-        Policy policy{store};
-        policy.submitSecret(author, "ernest", ampRequest, peerAmpSecret);
-        policy.submitSecret(author, "reviewer", markdownRequest, peerMarkdownSecret);
+        SecretRequests secrets{store};
+        secrets.submitSecret(author, "ernest", ampRequest, peerAmpSecret);
+        secrets.submitSecret(author, "reviewer", markdownRequest, peerMarkdownSecret);
         if (const auto found = expectedNote.find(peerAmpSecret); found != expectedNote.npos)
             expectedNote.replace(found, peerAmpSecret.size(), "[redacted]");
         if (const auto found = expectedReview.find(peerMarkdownSecret); found != expectedReview.npos)
@@ -982,9 +985,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
 void fullModeProfiles(const std::filesystem::path& directory) {
     Store store(directory / "state.db");
     app::Bots bots(directory / "bots");
-    Policy policy{store};
     const Person creator{"creator"};
-    policy.setOwner(creator, "release");
+    BotAccess{store}.setOwner(creator, "release");
     struct ProfileModel final : Model {
         Decision change;
         ModelTurn decide(const ModelInput& input) override {
@@ -1002,11 +1004,11 @@ void fullModeProfiles(const std::filesystem::path& directory) {
         runtime.runConversations();
     };
     send("create_bot", "Review team");
-    check(bots.ids() == std::vector<std::string>{"reviewer"} && policy.allows(creator, Action::bot_settings, "reviewer"),
+    check(bots.ids() == std::vector<std::string>{"reviewer"} && Policy{store}.allows(creator, Action::bot_settings, "reviewer"),
           "Full did not apply a Bot creation with the requesting person's ownership");
     send("rename_bot", "Reviewer");
     check(bots.cards().at(0).at("name") == "Reviewer" && Inbox(store).inbox(creator).empty(), "Full did not apply a Bot rename directly");
-    policy.changeNeverRule(localOwner, Action::bot_rename, "review*", true);
+    PolicyRules{store}.changeNeverRule(localOwner, Action::bot_rename, "review*", true);
     send("rename_bot", "Other name");
     check(bots.cards().at(0).at("name") == "Reviewer", "Never rule did not block the profile write");
 }
@@ -1289,9 +1291,9 @@ void botRolePreviewRedactsBeforeBounding(const std::filesystem::path& path) {
     cb.bots = [&] {
         return Json::array({{{"id", "release"}, {"name", "Release"}, {"soul", visible + protectedValue + "\nRole details"}}});
     };
-    Policy policy{store};
-    const auto request = policy.requestSecret("release", {"fixture-role-token"});
-    policy.submitSecret(localOwner, "release", request, protectedValue);
+    SecretRequests secrets{store};
+    const auto request = secrets.requestSecret("release", {"fixture-role-token"});
+    secrets.submitSecret(localOwner, "release", request, protectedValue);
     auto server = startWeb(store, 0, cb);
     Browser browser(*server);
     check(browser.get("/api/bots").at(0).at("about") == visible + "[redacted]",
@@ -1311,9 +1313,9 @@ void botRoleSavesRequireCompleteOriginal(const std::filesystem::path& home) {
     };
     app::Bots bots(home / "bots");
     Store store(home / "flock.db");
-    Policy policy{store};
-    const auto request = policy.requestSecret("release", {"fixture-role-token"});
-    policy.submitSecret(localOwner, "release", request, privateValue);
+    SecretRequests secrets{store};
+    const auto request = secrets.requestSecret("release", {"fixture-role-token"});
+    secrets.submitSecret(localOwner, "release", request, privateValue);
     auto cb = callbacks();
     cb.bots = [&] { return bots.cards(); };
     cb.updateBot = [&](std::string_view bot, const Json& profile, const std::optional<AvatarImage>& image) {
@@ -1376,15 +1378,15 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         return Json{{"id", id}, {"name", profile.at("name")}};
     };
     const Person owner{"owner", true};
-    Policy policy{store};
-    policy.setMember(owner, "staging-triage", "alice", true);
-    const auto request = policy.requestSecret("release", {"fixture-token"});
-    const auto ampRequest = policy.requestSecret("release", {"renderer-amp"});
-    const auto markdownRequest = policy.requestSecret("release", {"renderer-markdown"});
-    const auto semanticRequest = policy.requestSecret("staging-triage", {"renderer-semantic"});
-    const auto formattedRequest = policy.requestSecret("staging-triage", {"renderer-formatted"});
-    const auto adjacentRequest = policy.requestSecret("staging-triage", {"renderer-adjacent"});
-    const auto formRequest = policy.requestSecret("staging-triage", {"renderer-form"});
+    BotAccess{store}.setMember(owner, "staging-triage", "alice", true);
+    SecretRequests secrets{store};
+    const auto request = secrets.requestSecret("release", {"fixture-token"});
+    const auto ampRequest = secrets.requestSecret("release", {"renderer-amp"});
+    const auto markdownRequest = secrets.requestSecret("release", {"renderer-markdown"});
+    const auto semanticRequest = secrets.requestSecret("staging-triage", {"renderer-semantic"});
+    const auto formattedRequest = secrets.requestSecret("staging-triage", {"renderer-formatted"});
+    const auto adjacentRequest = secrets.requestSecret("staging-triage", {"renderer-adjacent"});
+    const auto formRequest = secrets.requestSecret("staging-triage", {"renderer-form"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
         return ConversationIntake(store)
             .receive(owner, {std::string(bot), "unused", "local-env", "fixture"}, clientId, text)
@@ -1656,8 +1658,8 @@ void queuedWebAuthority(const std::filesystem::path& path) {
                                                 identity(retained, "retained", true), identity(memberCredential, "member", true),
                                                 identity(alternate, "mixed", true)}));
         Browser browser(*server);
-        Policy{store}.setMember(localOwner, "release", "member", true);
-        Policy{store}.setMember(localOwner, "release", "removed", true);
+        BotAccess{store}.setMember(localOwner, "release", "member", true);
+        BotAccess{store}.setMember(localOwner, "release", "removed", true);
         demotedPause = send(browser, demoted, "Paused demoted root");
         retainedPause = send(browser, retained, "Paused retained root");
         Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
@@ -1743,7 +1745,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
         if (credential == "Bearer reader") return Person{"reader", false};
         return Person{};
     };
-    Policy{store}.setMember({"owner", true}, "release", "reader", true);
+    BotAccess{store}.setMember({"owner", true}, "release", "reader", true);
     auto server = startWeb(store, 0, cb);
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/memory?bot=release"), 401);
@@ -1822,9 +1824,9 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     check(send(webhook("skip", "test")).at("tasks").empty(), "Webhook filter did not match exactly");
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
     check(browser.get("/api/schedules?bot=release&active=1").at("canManage") == false, "a Bot member was offered schedule controls");
-    Policy{store}.setMember(localOwner, "release", "reader", false);
+    BotAccess{store}.setMember(localOwner, "release", "reader", false);
     Browser::checked(browser.client.Post("/api/webhooks/deploy", headers, webhook("event-1", "main"), "application/json"), 403);
-    Policy{store}.setMember(localOwner, "release", "reader", true);
+    BotAccess{store}.setMember(localOwner, "release", "reader", true);
     browser.post("/api/memory/apply", {{"botId", "release"}, {"baseVersion", 2}, {"content", "Unauthorized"}}, 403);
     browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
     const auto accepted = send(webhook("event-1", "main")), replayed = send(webhook("event-1", "main"));
