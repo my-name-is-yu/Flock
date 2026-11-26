@@ -38,6 +38,9 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-access.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_bot_pause_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-pause.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    add_test(NAME flock_web_bot_settings_switch_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-settings-switch.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_bot_settings_switch_dom PROPERTIES TIMEOUT 60)
     add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_board_inbox_live_retry COMMAND "${FLOCK_NODE_EXECUTABLE}"
