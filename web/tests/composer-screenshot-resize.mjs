@@ -203,7 +203,7 @@ const server = createServer((request, response) => {
   } else if (url.pathname === '/app') {
     response.writeHead(200, { 'Content-Type': 'text/html' }).end(appHtml);
   } else if (url.pathname === '/') {
-    response.writeHead(200, { 'Content-Type': 'text/html' }).end(html);
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(html);
   } else {
     try {
       const data = readAsset(url.pathname);
