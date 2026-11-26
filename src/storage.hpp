@@ -30,7 +30,9 @@
 #include "wait_storage.hpp"
 #include "web_identity_state.hpp"
 #include "workflow_storage.hpp"
+#include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/store.hpp"
 
 #include <filesystem>
@@ -39,11 +41,15 @@ namespace flockv0 {
 struct Store::Impl {
     Database database;
     const std::filesystem::path path;
-    BotSettingsStorage botSettingsStorage{database, permissions, sessionParticipationStorage, taskRouting};
+    Policy permissions;
+    BotAccess botAccess;
+    SecretRequests secretRequests;
+    BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, sessionParticipationStorage, taskRouting};
     ConversationStorage conversationTurns{database,
                                           attachments,
                                           automationStorage,
                                           botLifecycle,
+                                          botAccess,
                                           botSettingsStorage,
                                           channelStorage,
                                           conversationContextStorage,
@@ -116,7 +122,6 @@ struct Store::Impl {
                           botLifecycle,
                           policyApprovals,
                           sessionParticipationStorage};
-    Policy permissions{database, botLifecycle, taskRecords, secretStorage, inboxStorage, policyApprovals};
     ChannelStorage channelStorage{database, path, permissions, webIdentity, journalStorage, conversationTurns, policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{database,    secretStorage,     webIdentity,  taskRecords,    waitStorage,
@@ -135,7 +140,7 @@ struct Store::Impl {
                                                             policyApprovals};
     SessionReadStorage sessionReadStorage{database,       secretStorage,  sessionParticipationStorage, permissions, conversationTurns,
                                           channelStorage, policyApprovals};
-    explicit Impl(std::filesystem::path path, StoreOptions);
+    Impl(Store&, std::filesystem::path path, StoreOptions);
 };
 
 }

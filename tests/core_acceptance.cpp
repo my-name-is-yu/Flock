@@ -20,7 +20,9 @@
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/secret_requests.hpp"
 #include "flock/run_ref.hpp"
 #include "flock/run_report.hpp"
 #include "flock/runtime.hpp"
@@ -405,7 +407,7 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
 void selectedWorkRechecksConnectionAfterApproval() {
     Fixture f;
     const auto task = seedSelectedTask(f);
-    Policy{*f.store}.setMode(localOwner, "supervised");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
     f.wait(task, "policy_approval");
     const auto item = Inbox(*f.store).inbox(localOwner).at(0);
     check(item.at("requestTitle").get<std::string>().starts_with("t3.send"), "Selected work used the new-Thread policy");
@@ -1168,8 +1170,8 @@ void settledReportCanRecoverAfterRestart() {
     for (const bool available : {false, true}) {
         Fixture f;
         const std::string secret = "private-report-diagnostic";
-        Policy policy{*f.store};
-        policy.submitSecret(localOwner, "alpha", policy.requestSecret("alpha", {"diagnostic"}), secret);
+        SecretRequests secretRequests{*f.store};
+        secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"diagnostic"}), secret);
         const auto id = f.submit();
         f.model.script = [&](const ModelInput& i) {
             if (i.event.at("kind") == "intake") return work();
@@ -1397,8 +1399,8 @@ void redactedHistoryPagination() {
     f.read = "on_demand";
     f.restart();
     const std::string secret = "fixture-history-secret";
-    Policy policy{*f.store};
-    policy.submitSecret({"fixture", true}, "alpha", policy.requestSecret("alpha", {"history-token"}), secret);
+    SecretRequests secretRequests{*f.store};
+    secretRequests.submitSecret({"fixture", true}, "alpha", secretRequests.requestSecret("alpha", {"history-token"}), secret);
     f.t3.historyPages = {
         {"Token: " + secret, {}, {}, "history-item", "7", 64, true},
         {"Verified " + secret, {}, {}, "history-item", {}, 0, false},
@@ -1661,7 +1663,7 @@ void peerCompletionRespectsSessionReadPolicy() {
     f.reach(sender, "peer_waiting");
     const Id recipient = TaskList(*f.store).tasks("beta").front().task.id;
     f.reach(recipient, "running");
-    Policy{*f.store}.changeNeverRule({"fixture", true}, Action::session_read, Resource::sessionRead("e", "thread-1").target, true);
+    PolicyRules{*f.store}.changeNeverRule({"fixture", true}, Action::session_read, Resource::sessionRead("e", "thread-1").target, true);
     f.t3.finish("run-1");
     f.reach(recipient, "completed");
     f.restart();
@@ -2325,7 +2327,7 @@ void modelBudgetFollowsBotConsultation() {
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory / "state.db");
     const Person verifier{"verifier", false};
-    Policy{writer}.setMember(localOwner, "beta", verifier.id, true);
+    BotAccess{writer}.setMember(localOwner, "beta", verifier.id, true);
     executeSql(f.directory / "state.db", R"SQL(
 INSERT INTO journal(time,kind,data,conversation_bot_id)
 VALUES(0,'conversation_budget_wait','{}','alpha');
@@ -3025,13 +3027,13 @@ void prefillInFull() {
     Fixture f;
     f.read = "prefill";
     f.restart();
-    Policy policy{*f.store};
+    SecretRequests secretRequests{*f.store};
     for (const auto& [name, token] : std::map<std::string, std::string>{{"first", "result"}, {"second", "complete"}}) {
-        auto request = policy.requestSecret("alpha", {name});
-        policy.submitSecret({"fixture", true}, "alpha", request, token);
+        auto request = secretRequests.requestSecret("alpha", {name});
+        secretRequests.submitSecret({"fixture", true}, "alpha", request, token);
     }
     const std::string hidden = "fixture-hidden-question";
-    policy.submitSecret({"fixture", true}, "alpha", policy.requestSecret("alpha", {"question-token"}), hidden);
+    secretRequests.submitSecret({"fixture", true}, "alpha", secretRequests.requestSecret("alpha", {"question-token"}), hidden);
     const auto id = f.submit();
     f.model.script = [&](const ModelInput& in) {
         if (in.event.at("kind") == "intake") return work();
@@ -3208,7 +3210,8 @@ int main() {
                                                                                         };
                                                                                         const auto task = f.submit();
                                                                                         f.reach(task, "running");
-                                                                                        Policy{*f.store}.setMode(localOwner, "supervised");
+                                                                                        PolicyRules{*f.store}.setMode(localOwner,
+                                                                                                                      "supervised");
                                                                                         ConversationIntake(*f.store).receive(
                                                                                             localOwner, {"alpha", "", "e", "separate"},
                                                                                             "unrelated", "Create another Bot");
@@ -3233,7 +3236,7 @@ int main() {
                                                                                         };
                                                                                         const auto task = f.submit();
                                                                                         f.reach(task, "running");
-                                                                                        Policy{*f.store}.changeNeverRule(
+                                                                                        PolicyRules{*f.store}.changeNeverRule(
                                                                                             localOwner, Action::environment_launch, "e",
                                                                                             true);
                                                                                         f.t3.finish("run-1", "failed");
@@ -3245,7 +3248,7 @@ int main() {
                                                                                    {"Never blocks ordinary launch with a T3 connection",
                                                                                     [] {
                                                                                         Fixture f;
-                                                                                        Policy{*f.store}.changeNeverRule(
+                                                                                        PolicyRules{*f.store}.changeNeverRule(
                                                                                             localOwner, Action::environment_launch, "e",
                                                                                             true);
                                                                                         T3Connections(*f.store).connect("e", localOwner.id,

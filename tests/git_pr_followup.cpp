@@ -14,7 +14,8 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/person.hpp"
-#include "flock/policy.hpp"
+#include "flock/bot_access.hpp"
+#include "flock/policy_rules.hpp"
 #include "flock/runtime.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/store.hpp"
@@ -138,7 +139,7 @@ struct Fixture {
         auto request = intake();
         host->result["state"] = "open";
         if (!fixPullRequests) request.config["fixPullRequests"] = false;
-        Policy{store}.setOwner(testRequester, request.botId);
+        BotAccess{store}.setOwner(testRequester, request.botId);
         T3Connections connections(store);
         const auto bearer = connections.connect("sandbox", testRequester.id, 48123);
         if (fromSession) {
@@ -310,7 +311,7 @@ void checksAgainBeforeSending() {
 
 void waitsForSupervisedApproval() {
     Fixture f;
-    Policy{f.store}.setMode(localOwner, "supervised");
+    PolicyRules{f.store}.setMode(localOwner, "supervised");
     f.notify(review("supervised-review"));
     const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });
@@ -329,7 +330,7 @@ void waitsForSupervisedApproval() {
 }
 void rejectsStaleSupervisedApproval(bool disconnect) {
     Fixture f;
-    Policy{f.store}.setMode(localOwner, "supervised");
+    PolicyRules{f.store}.setMode(localOwner, "supervised");
     f.notify(failure("waiting"));
     const auto inbox = Inbox(f.store).inbox(testRequester, "owner");
     const auto card = std::ranges::find_if(inbox, [](const auto& row) { return row.at("itemKind") == "policy_approval"; });
