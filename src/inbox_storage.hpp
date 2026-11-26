@@ -1,7 +1,6 @@
 #pragma once
 
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -11,6 +10,7 @@
 
 namespace flockv0 {
 class Database;
+class Policy;
 class GitStorage;
 class JournalStorage;
 class SecretStorage;
@@ -31,10 +31,10 @@ class PolicyApprovals;
 class InboxStorage {
 public:
     InboxStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                 JournalStorage& journalStorage, Store::Impl& remaining, ModelCalls& modelCalls, TaskOperations& taskOperations,
+                 JournalStorage& journalStorage, Policy& permissions, ModelCalls& modelCalls, TaskOperations& taskOperations,
                  PolicyApprovals& policyApprovals)
         : database(database), secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage),
-          journalStorage(journalStorage), remaining(remaining), modelCalls(modelCalls), taskOperations(taskOperations),
+          journalStorage(journalStorage), permissions(permissions), modelCalls(modelCalls), taskOperations(taskOperations),
           policyApprovals(policyApprovals) {}
 
     Json inbox(const Person&, std::string_view bot) const;
@@ -52,7 +52,7 @@ private:
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
     JournalStorage& journalStorage;
-    Store::Impl& remaining;
+    Policy& permissions;
     PolicyApprovals& policyApprovals;
     ModelCalls& modelCalls;
     TaskOperations& taskOperations;

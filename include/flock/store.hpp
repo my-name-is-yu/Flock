@@ -175,11 +175,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;
-    friend class AutomationStorage;
-    friend class ModelCalls;
-    friend class TaskOperations;
-    friend class TaskRouting;
-    friend class InboxStorage;
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;

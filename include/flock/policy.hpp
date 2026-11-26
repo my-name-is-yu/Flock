@@ -3,7 +3,6 @@
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 #include "flock/run_ref.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 #include <exception>
@@ -13,6 +12,15 @@
 #include <string_view>
 
 namespace flockv0 {
+class BotLifecycleStorage;
+class Database;
+class InboxStorage;
+class JournalStorage;
+class PolicyApprovals;
+class SecretStorage;
+class Store;
+class TaskRecords;
+
 bool validBotId(std::string_view);
 std::string botName(std::string_view);
 
@@ -76,6 +84,8 @@ class SecretRedactor;
 
 class Policy {
 public:
+    explicit Policy(Store&);
+
     PolicyResult check(std::string_view bot, Action, std::string_view target) const;
     PolicyResult check(const Person&, Action, std::string_view target) const;
     PolicyResult check(Id task, Action, std::string_view target) const;
@@ -110,26 +120,19 @@ public:
     void useSecret(Id task, const SecretRef&, std::string_view destination, std::string_view operation, bool upstreamPermitted,
                    const std::function<void(std::string_view)>& adapter) const;
 private:
-    explicit Policy(Store::Impl& db) : db_(db) {}
+    Policy(Database&, const BotLifecycleStorage&, const TaskRecords&, JournalStorage&, SecretStorage&, InboxStorage&, PolicyApprovals&);
     void writeRule(const Person&, RuleKind, Action, std::string_view target, bool add, bool fromCard);
     void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& details);
-    Store::Impl& db_;
-    friend class AutomationStorage;
-    friend class MemoryStorage;
+    Database& database_;
+    const BotLifecycleStorage& botLifecycle_;
+    const TaskRecords& taskRecords_;
+    JournalStorage& journalStorage_;
+    SecretStorage& secretStorage_;
+    InboxStorage& inboxStorage_;
+    PolicyApprovals& policyApprovals_;
     friend class InboxStorage;
-    friend class GitStorage;
-    friend class SessionParticipationStorage;
-    friend class SessionReadStorage;
-    friend class Store;
-    friend class ModelCalls;
-    friend class TaskOperations;
-    friend class TaskRouting;
-    friend class ConversationStorage;
-    friend class BotSettingsStorage;
-    friend class ConversationTools;
-    friend class SessionMessageStorage;
-    friend struct Store::Impl;
     friend class PolicyApprovals;
+    friend class Store;
 };
 }

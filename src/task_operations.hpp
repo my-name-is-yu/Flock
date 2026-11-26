@@ -4,7 +4,6 @@
 #include <string_view>
 #include "flock/json.hpp"
 #include "flock/outbox_instruction.hpp"
-#include "flock/store.hpp"
 #include "flock/task_context.hpp"
 #include "flock/types.hpp"
 #include "session_stop.hpp"
@@ -12,6 +11,7 @@
 namespace flockv0 {
 
 class Database;
+class Policy;
 class AutomationStorage;
 class BotLifecycleStorage;
 class InboxStorage;
@@ -37,11 +37,11 @@ enum class TaskSource { request, handoff, consultation };
 
 class TaskOperations {
 public:
-    TaskOperations(Database& database, AutomationStorage& automationStorage, BotLifecycleStorage& botLifecycle, Store::Impl& remaining,
+    TaskOperations(Database& database, AutomationStorage& automationStorage, BotLifecycleStorage& botLifecycle, const Policy& permissions,
                    JournalStorage& journalStorage, ModelCalls& modelCalls, OutboxStorage& outboxStorage, PeerStorage& peerStorage,
                    SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords, TaskRouting& taskRouting,
                    WaitStorage& waitStorage, InboxStorage& inboxStorage)
-        : database(database), automationStorage(automationStorage), botLifecycle(botLifecycle), remaining(remaining),
+        : database(database), automationStorage(automationStorage), botLifecycle(botLifecycle), permissions(permissions),
           journalStorage(journalStorage), modelCalls(modelCalls), outboxStorage(outboxStorage), peerStorage(peerStorage),
           secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
           waitStorage(waitStorage), inboxStorage(inboxStorage) {}
@@ -61,7 +61,7 @@ private:
     Database& database;
     AutomationStorage& automationStorage;
     BotLifecycleStorage& botLifecycle;
-    Store::Impl& remaining;
+    const Policy& permissions;
     JournalStorage& journalStorage;
     ModelCalls& modelCalls;
     OutboxStorage& outboxStorage;

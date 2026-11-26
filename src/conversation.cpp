@@ -73,7 +73,7 @@ std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, st
                                    const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
     if (reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
-    if (!Policy(*p_).allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
+    if (!p_->permissions.allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
     return p_->conversationTurns.messageReceipt(actor, bot, clientId, text, replyTo, attachments);
 }
 

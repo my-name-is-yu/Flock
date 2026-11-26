@@ -132,8 +132,8 @@ void applyPlannerModel(Json& config, const Store::PlannerModel& planner) {
 }
 
 AutomationStorage::AutomationStorage(Database& database, const SecretStorage& secretStorage, const BotLifecycleStorage& lifecycle,
-                                     Store::Impl& remaining, Store::AutomationModelResolver model, TaskOperations& taskOperations)
-    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), remaining_(remaining), model_(std::move(model)),
+                                     const Policy& permissions, Store::AutomationModelResolver model, TaskOperations& taskOperations)
+    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), permissions_(permissions), model_(std::move(model)),
       taskOperations(taskOperations) {}
 
 Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
@@ -164,7 +164,7 @@ VALUES(?,?,?,?,'active',?,?,?)
 Json Store::automations(const Person& actor, std::string_view bot, Id before, bool activeOnly) const {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db, Transaction::Mode::read);
-    if (!Policy(*p_).allows(actor, Action::bot_view, bot)) throw AccessDenied("Automation access denied");
+    if (!p_->permissions.allows(actor, Action::bot_view, bot)) throw AccessDenied("Automation access denied");
     auto result = p_->automationStorage.automations(bot, before, activeOnly);
     tx.commit();
     return result;
@@ -338,8 +338,7 @@ Json AutomationStorage::automationTool(std::string_view bot, const Person& actor
     const auto& args = decision.args;
     if (name == "list_schedules") return automations(bot, args.contains("before") ? requiredInteger(args, "before") : 0);
     if (name == "remove_schedule") {
-        if (!Policy(remaining_).allows(actor, Action::bot_settings, bot) ||
-            Policy(remaining_).forbidden(bot, Action::automation_change, bot))
+        if (!permissions_.allows(actor, Action::bot_settings, bot) || permissions_.forbidden(bot, Action::automation_change, bot))
             throw AccessDenied("Automation change denied");
         return cancelAutomation(bot, requiredInteger(args, "id"));
     }
@@ -352,7 +351,7 @@ Json AutomationStorage::automationTool(std::string_view bot, const Person& actor
         kind = "trigger";
     else
         return nullptr;
-    if (!Policy(remaining_).allows(actor, Action::bot_settings, bot) || Policy(remaining_).forbidden(bot, Action::automation_change, bot))
+    if (!permissions_.allows(actor, Action::bot_settings, bot) || permissions_.forbidden(bot, Action::automation_change, bot))
         throw AccessDenied("Automation change denied");
     auto definition = args;
     definition["kind"] = kind;

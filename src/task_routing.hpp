@@ -7,12 +7,13 @@
 #include <vector>
 #include "flock/json.hpp"
 #include "flock/session_ref.hpp"
-#include "flock/store.hpp"
+#include "flock/task.hpp"
 #include "flock/types.hpp"
 
 namespace flockv0 {
 
 class Database;
+class Policy;
 class PeerStorage;
 class SecretStorage;
 class WaitStorage;
@@ -47,10 +48,11 @@ class SessionReadStorage;
 class SessionParticipationStorage;
 class TaskRouting {
 public:
-    TaskRouting(Database& database, Store::Impl& remaining, PeerStorage& peerStorage, SecretStorage& secretStorage,
+    TaskRouting(Database& database, const Policy& permissions, PeerStorage& peerStorage, SecretStorage& secretStorage,
                 WaitStorage& waitStorage, SessionReadStorage& sessionReadStorage, SessionParticipationStorage& sessionParticipationStorage)
-        : database(database), remaining(remaining), peerStorage(peerStorage), secretStorage(secretStorage), waitStorage(waitStorage),
-          sessionReadStorage(sessionReadStorage), sessionParticipationStorage(sessionParticipationStorage) {}
+        : database(database), permissions(permissions), sessionReadStorage(sessionReadStorage),
+          sessionParticipationStorage(sessionParticipationStorage), peerStorage(peerStorage), secretStorage(secretStorage),
+          waitStorage(waitStorage) {}
 
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
@@ -71,7 +73,7 @@ public:
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
 private:
     Database& database;
-    Store::Impl& remaining;
+    const Policy& permissions;
     SessionReadStorage& sessionReadStorage;
     SessionParticipationStorage& sessionParticipationStorage;
     PeerStorage& peerStorage;

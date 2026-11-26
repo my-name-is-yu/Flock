@@ -101,8 +101,14 @@ RunRef runRef(const Json& data) {
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
     : path(std::move(file)), memoryStorage(*this, secretStorage, permissions, conversationTurns, std::move(seed)),
-      automationStorage(*this, secretStorage, botLifecycle, *this, std::move(model), taskOperations) {
+      automationStorage(*this, secretStorage, botLifecycle, permissions, std::move(model), taskOperations) {
     open(path);
+}
+
+Policy::Policy(Store& store) : Policy(store.p_->permissions) {}
+
+Policy Store::policy() {
+    return p_->permissions;
 }
 
 void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
@@ -183,7 +189,7 @@ Store::NotificationEvents Store::notificationEventsSince(const Person& viewer, c
     NotificationEvents result{after.value_or(0), Json::array(), {}, false};
     std::lock_guard lock(p_->mutex);
     Transaction snapshot(p_->db, Transaction::Mode::read);
-    const Policy policy(*p_);
+    const auto& policy = p_->permissions;
     std::map<std::string, Id> established, newlyVisible;
     for (const auto& bot : bots) {
         if (!policy.allows(viewer, Action::bot_view, bot)) continue;
@@ -265,7 +271,7 @@ Id Store::submit(const Intake& item, const Person* requester) {
 
 Id TaskOperations::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
-    if (!Policy(remaining).allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
+    if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
     secretStorage.sharedRedactor().requirePublic(requester->id);
     return submit(item, 0, nullptr, TaskSource::request, {}, requester->id);
 }
@@ -355,7 +361,7 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void TaskOperations::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& input, Id sourceMessage,
                              std::optional<InboxKind> expectedKind) {
     const auto& [bot, id, waitId, revision, generation] = target;
-    if (!Policy(remaining).allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
     if (operation != "cancel" && botLifecycle.botPaused(bot)) throw BotPaused{};
     auto task = taskRecords.load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};

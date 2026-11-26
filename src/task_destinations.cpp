@@ -42,7 +42,7 @@ bool TaskRouting::projectQuestionOpen(std::string_view bot, std::string_view env
 ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, std::string_view environment, bool requireConnection) {
     if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(environment))
         return "Connect this T3 environment in Settings, then try again.";
-    Policy policy(remaining);
+    auto& policy = permissions;
     if (!policy.allows(bot, Action::environment_inspect, environment) || policy.forbidden(bot, Action::environment_launch, environment))
         return "Flock cannot use this T3 environment under the current permissions.";
     try {

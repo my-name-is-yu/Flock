@@ -105,7 +105,7 @@ InboxKind parseInboxKind(std::string_view name) {
 }
 
 std::vector<std::string> InboxStorage::visibleBoardBots(const Person& actor, std::string_view bot) const {
-    const Policy policy(remaining);
+    const auto& policy = permissions;
     if (!bot.empty()) return policy.allows(actor, Action::bot_view, bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
     auto rows =
         actor.adminRoot
@@ -150,7 +150,7 @@ Json InboxStorage::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(database.mutex);
     policyApprovals.settlePolicyApprovals(policyApprovals.now());
     Transaction snapshot(database.db, Transaction::Mode::read);
-    const Policy policy(remaining);
+    const auto& policy = permissions;
     auto result = Json::array();
     const auto visible = visibleBoardBots(actor, bot);
     auto approvalBots = database.query("SELECT DISTINCT bot FROM policy_approvals WHERE status IN ('pending','expired')"
@@ -320,7 +320,7 @@ void InboxStorage::decideInbox(GitStorage& git, const Person& actor, const Inbox
     std::lock_guard lock(database.mutex);
     policyApprovals.settlePolicyApprovals(policyApprovals.now());
     Transaction transaction(database.db);
-    Policy policy(remaining);
+    auto& policy = permissions;
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind, decision))
         throw std::invalid_argument("Invalid inbox decision");
     const auto textInput = [&](std::string_view fieldName) {

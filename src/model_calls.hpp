@@ -6,13 +6,13 @@
 #include <vector>
 #include "flock/decision.hpp"
 #include "flock/json.hpp"
-#include "flock/store.hpp"
 #include "flock/types.hpp"
 
 namespace flockv0 {
 
 class ChannelStorage;
 class Database;
+class Policy;
 class BotLifecycleStorage;
 class JournalStorage;
 class SecretStorage;
@@ -44,9 +44,9 @@ struct CheckedModelTurn {
 
 class ModelCalls {
 public:
-    ModelCalls(Database& database, BotLifecycleStorage& botLifecycle, Store::Impl& remaining, JournalStorage& journalStorage,
+    ModelCalls(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, JournalStorage& journalStorage,
                SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage, ChannelStorage& channelStorage)
-        : database(database), botLifecycle(botLifecycle), remaining(remaining), journalStorage(journalStorage),
+        : database(database), botLifecycle(botLifecycle), permissions(permissions), journalStorage(journalStorage),
           secretStorage(secretStorage), taskRecords(taskRecords), waitStorage(waitStorage), channelStorage(channelStorage) {}
 
     void approveMessageModelCall(const Person&, std::string_view bot, Id message, Id pause);
@@ -66,7 +66,7 @@ public:
 private:
     Database& database;
     BotLifecycleStorage& botLifecycle;
-    Store::Impl& remaining;
+    const Policy& permissions;
     JournalStorage& journalStorage;
     SecretStorage& secretStorage;
     TaskRecords& taskRecords;
