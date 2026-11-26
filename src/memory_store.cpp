@@ -23,7 +23,6 @@
 #include "json_fields.hpp"
 
 #include <algorithm>
-#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -92,7 +91,7 @@ MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStor
     : database_(database), secretStorage_(secretStorage), permissions(permissions), conversationTurns(conversationTurns),
       seed_(std::move(seed)) {}
 
-BotNotes MemoryStorage::loadNotes(std::string_view bot, const std::function<std::string(std::string_view)>& soul, Seconds now) {
+BotNotes MemoryStorage::loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now) {
     BotNotes notes{soul ? bounded(soul(bot), maxBotRoleBytes) : std::string{}, {}};
     const auto key = privateKey(bot);
     std::lock_guard lock(database_.mutex);
