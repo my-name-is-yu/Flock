@@ -1442,8 +1442,9 @@ function cardSourceAction(item, close) {
 }
 function appendTrailingIcon(text, icon) {
   const last = text.lastChild;
-  if (last?.nodeType === Node.TEXT_NODE && last.data.trim()) {
-    const at = last.data.trimEnd().search(/\S+$/);
+  const at = last?.nodeType === Node.TEXT_NODE ? last.data.trimEnd().search(/\S+$/) : -1;
+  // Long URLs and unspaced CJK text still need to wrap inside the bubble.
+  if (at >= 0 && last.data.trimEnd().length - at <= 24) {
     const word = last.splitText(at);
     const glued = node('span', 'trailing-icon');
     glued.append(word, icon);
