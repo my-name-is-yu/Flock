@@ -34,7 +34,6 @@
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
-#include "workflow_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/intake.hpp"
 #include "flock/person.hpp"
@@ -132,12 +131,21 @@ const std::vector<std::string> turnTools{"start_task",
                                          "flock_session_events",
                                          "read_tool_result",
                                          "reply"};
-const std::vector<std::string> webTools{
-    "start_workflow",     "workflow_status",      "instruct_workflow_stage", "stop_workflow_stage",
-    "stop_workflow",      "compact_conversation", "expand_context",          "continue_fresh_session",
-    "list_secrets",       "request_secret_input", "list_connections",        "check_environment_readiness",
-    "request_bot_change", "read_memory",          "memory_history",          "create_schedule",
-    "list_schedules",     "remove_schedule",      "create_reminder",         "create_trigger"};
+const std::vector<std::string> webTools{"compact_conversation",
+                                        "expand_context",
+                                        "continue_fresh_session",
+                                        "list_secrets",
+                                        "request_secret_input",
+                                        "list_connections",
+                                        "check_environment_readiness",
+                                        "request_bot_change",
+                                        "read_memory",
+                                        "memory_history",
+                                        "create_schedule",
+                                        "list_schedules",
+                                        "remove_schedule",
+                                        "create_reminder",
+                                        "create_trigger"};
 
 std::string_view modelFailureReason(ModelErrorCode code) {
     switch (code) {
@@ -289,10 +297,6 @@ Json ConversationStorage::taskState(const TaskData& task, const Message& message
     if (task.criteriaProposal) {
         view["doneWhenSource"] = "requested";
         if (task.criteriaProposal->sourceMessageId) view["criteriaSourceMessageId"] = *task.criteriaProposal->sourceMessageId;
-    }
-    if (const auto& workflow = task.workflow) {
-        view["workflowId"] = workflow->id;
-        view["stageId"] = workflow->stageId;
     }
     if (task.blocker && !task.blocker->reason.empty()) view["blockerReason"] = task.blocker->reason;
     if (!task.intent.empty()) project("intent", task.intent, 1000);
@@ -554,14 +558,6 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
               {"environments", std::move(environments)},
               {"localMachines", std::move(machines)}};
     if (!linked.unavailable.empty()) task["linkedEnvironmentIssues"] = linked.unavailable;
-    if (web) {
-        auto& workflows = task["workflows"] = Json::array();
-        auto recent = database.query("SELECT id,CASE WHEN message_id>? THEN request ELSE '' END FROM workflows "
-                                     "WHERE bot_id=? AND message_id<=? ORDER BY id DESC LIMIT 12",
-                                     {boundary, message.bot, message.id});
-        while (recent.next())
-            workflows.push_back({{"workflowId", recent.number(0)}, {"request", bounded(scrub.text(recent.string(1)), 300)}});
-    }
     return {{"task", std::move(task)}, {"event", std::move(event)}, {"history", std::move(history)}};
 }
 
@@ -611,9 +607,6 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         }
         if (tool == "compact_conversation" || tool == "expand_context")
             return conversationContextStorage.contextTool(tool, args, message, step);
-        if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" || tool == "stop_workflow_stage" ||
-            tool == "stop_workflow")
-            return workflowStorage.workflowTool(tool, args, bot, message.id, step, routing);
         const auto actor = turnActor(message);
         auto result = botSettingsStorage.botSettingsTool(bot, message.id, settings, decision);
         if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
@@ -837,8 +830,6 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                 action["taskId"] = result.at("taskId");
                 touched.insert(result.at("taskId").get<Id>());
             }
-            for (const auto* key : {"workflowId", "stageId"})
-                if (result.contains(key)) action[key] = result.at(key);
             actions.push_back(std::move(action));
         }
     }
@@ -847,13 +838,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
         for (const auto& action : actions) {
             text += "\n- " + field(action, "effect") + ": ";
-            if (action.contains("taskId"))
-                text += requestName(taskRecords.load(action.at("taskId")));
-            else if (action.contains("workflowId")) {
-                auto workflow = database.query("SELECT request FROM workflows WHERE id=?", {action.at("workflowId")});
-                workflow.next();
-                text += bounded(workflow.string(0), 160);
-            }
+            if (action.contains("taskId")) text += requestName(taskRecords.load(action.at("taskId")));
         }
     }
     std::optional<Id> linked;

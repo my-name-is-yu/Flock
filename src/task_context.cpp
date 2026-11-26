@@ -117,7 +117,7 @@ void encodeTaskContext(Json& data, const TaskData& task) {
     if (task.sourceTaskId) data["sourceTaskId"] = *task.sourceTaskId;
     if (task.sourceMessageCoversFullRequest) data["sourceMessageCoversFullRequest"] = *task.sourceMessageCoversFullRequest;
     if (task.requester) data["requester"] = *task.requester;
-    if (!task.sourceResultRefs.empty() || task.workflow) data["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
+    if (!task.sourceResultRefs.empty()) data["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
     if (task.restartContext) data["restartContext"] = taskRestartJson(*task.restartContext);
     if (task.peerOutcome) data["peerOutcome"] = taskPeerOutcomeName(*task.peerOutcome);
 }

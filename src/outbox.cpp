@@ -63,8 +63,6 @@ OutboxSource readSource(const Json& data, const RecordDecoder& row) {
                         .messageId = row.get<Id>(data, "messageId"),
                         .revisionId = row.optional<Id>(data, "revisionId"),
                         .text = row.optional<std::string>(data, "text"),
-                        .stageId = row.optional<std::string>(data, "stageId"),
-                        .artifactVersion = row.optional<std::string>(data, "artifactVersion"),
                         .resultRunId = row.optional<std::string>(data, "resultRunId"),
                         .run = std::nullopt};
     if (const auto run = row.find(data, "run"); run != data.end()) source.run = decodeOutboxSourceRun(*run, row.nested("run"));
@@ -199,8 +197,6 @@ Json sourceJson(const OutboxSource& source) {
     Json data = {{"taskId", source.taskId}, {"messageId", source.messageId}};
     writeOptional(data, "revisionId", source.revisionId);
     writeOptional(data, "text", source.text);
-    writeOptional(data, "stageId", source.stageId);
-    writeOptional(data, "artifactVersion", source.artifactVersion);
     writeOptional(data, "resultRunId", source.resultRunId);
     if (source.run) data["run"] = sourceRunJson(*source.run);
     return data;
@@ -225,8 +221,6 @@ void redactSource(OutboxSource& source, const SecretRedactor& scrub) {
         if (value) *value = scrub.text(*value);
     };
     redact(source.text);
-    redact(source.stageId);
-    redact(source.artifactVersion);
     redact(source.resultRunId);
     if (auto& run = source.run) {
         run->threadId = scrub.text(run->threadId);

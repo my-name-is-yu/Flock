@@ -8,7 +8,6 @@
 #include "flock/decision_errors.hpp"
 #include "flock/notifications.hpp"
 #include "flock/peer_conversations.hpp"
-#include "flock/workflows.hpp"
 #include "flock/tasks.hpp"
 #include "flock/task_target.hpp"
 #include "flock/git_events.hpp"
@@ -338,8 +337,7 @@ public:
             if (!image) return error(res, 404, "avatar_not_found");
             res.set_content(image->bytes().data(), image->bytes().size(), std::string(image->format().contentType));
         });
-        for (const auto path :
-             {"/api/view", "/api/workflows", "/api/compactions", "/api/conversation", "/api/peer-conversation", "/api/sessions"}) {
+        for (const auto path : {"/api/view", "/api/compactions", "/api/conversation", "/api/peer-conversation", "/api/sessions"}) {
             server_.Get(path, [this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res, 400, "invalid_bot");
@@ -351,11 +349,8 @@ public:
                 try {
                     const auto before = queryId(req, "before", true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req, res, known, actor, id, before);
-                    if (req.path == "/api/compactions" || req.path == "/api/workflows") {
-                        const auto items = req.path == "/api/compactions" ? Conversations(store_).compactions(id, before)
-                                                                          : Workflows(store_).workflows(id, before);
-                        return json(res, 200, Policy{store_}.redactSecrets(id, items));
-                    }
+                    if (req.path == "/api/compactions")
+                        return json(res, 200, Policy{store_}.redactSecrets(id, Conversations(store_).compactions(id, before)));
                     if (req.path == "/api/view") {
                         const auto changesAfter =
                             req.has_param("changesAfter") ? std::optional{queryId(req, "changesAfter", true)} : std::nullopt;
@@ -731,19 +726,12 @@ private:
     Json readBotView(const Person& person, const std::string& id, const Json& bot, const std::vector<TaskView>* changedSessionTasks) {
         Policy policy{store_};
         if (const auto cached = changes_.cachedBotView(person, id, bot)) {
-            // Workflow deadlines advance without a write. Session deltas belong to the request's cursor.
-            std::optional<Json> workflows, sessions;
-            if (!cached->data.at("workflows").empty()) workflows = policy.redactSecrets(id, Workflows(store_).workflows(id));
-            if (changedSessionTasks) sessions = policy.redactSecrets(id, web::sessionGroups(*changedSessionTasks));
-            if (Notifications(store_).botViewStamp() == cached->botVersion->stamp) {
-                auto view = cached->data;
-                if (workflows) view["workflows"] = std::move(*workflows);
-                if (sessions) {
-                    view["sessionTasks"] = std::move(*sessions);
-                    view.erase("sessionsBefore");
-                }
-                return view;
+            auto view = cached->data;
+            if (changedSessionTasks) {
+                view["sessionTasks"] = policy.redactSecrets(id, web::sessionGroups(*changedSessionTasks));
+                view.erase("sessionsBefore");
             }
+            if (Notifications(store_).botViewStamp() == cached->botVersion->stamp) return view;
         }
         return policy.redactSecrets(id, web::botView(store_, bot, changedSessionTasks, &person));
     }

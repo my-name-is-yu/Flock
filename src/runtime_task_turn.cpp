@@ -96,7 +96,7 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     if (!receiving) {
         std::lock_guard lock(database.mutex);
         if (decisions.canComplete(task, event)) tools.push_back("complete");
-        if (!peer && !task.workflow && !task.replanning) tools.push_back("wait_for_event");
+        if (!peer && !task.replanning) tools.push_back("wait_for_event");
     }
     if (canRead) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");
@@ -228,7 +228,7 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
         summary["pendingInstructionCount"] = task.pendingInstructions.size();
     }
     if (task.trigger) summary["trigger"] = taskTriggerJson(*task.trigger);
-    if (!task.sourceResultRefs.empty() || task.workflow) summary["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
+    if (!task.sourceResultRefs.empty()) summary["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
     if (!choices.empty()) summary["peers"] = std::move(choices);
     if (std::ranges::find(tools, "send_bot_message") != tools.end()) {
         std::lock_guard lock(database.mutex);

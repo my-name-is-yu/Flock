@@ -56,7 +56,6 @@ struct JournalKeys {
     std::optional<Id> replyToMessageId, taskQuestionMessageId;
     std::optional<std::string_view> conversationRoute, conversationStatus;
     std::optional<Id> sessionParticipationId, sessionStopId, feedbackEventId;
-    std::optional<std::string_view> workflowOutcome;
 };
 
 class StorageError : public std::runtime_error {

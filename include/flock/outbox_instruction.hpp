@@ -12,7 +12,7 @@ struct OutboxSourceRun {
 struct OutboxSource {
     std::int64_t taskId, messageId;
     std::optional<std::int64_t> revisionId{};
-    std::optional<std::string> text{}, stageId{}, artifactVersion{}, resultRunId{};
+    std::optional<std::string> text{}, resultRunId{};
     std::optional<OutboxSourceRun> run{};
 };
 

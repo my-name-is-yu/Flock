@@ -21,8 +21,6 @@ class Policy;
 class T3;
 class TaskEvents;
 
-class WorkflowStorage;
-
 class runtime::RunReports {
 public:
     struct JournalReport {
@@ -30,7 +28,7 @@ public:
         RunReportEntry data;
     };
 
-    RunReports(Database&, JournalStorage&, TaskEvents&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
+    RunReports(Database&, JournalStorage&, TaskEvents&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
                const std::function<Seconds()>& clock);
     static bool hasSettledRun(const TaskData&);
     void writeRunReport(TaskData&, const SettledRunReport&);
@@ -46,7 +44,6 @@ private:
     Database& database;
     JournalStorage& journalStorage;
     TaskEvents& taskEvents;
-    WorkflowStorage& workflowStorage;
     T3& t3;
     const Policy& policy;
     TaskUpdates& updates;

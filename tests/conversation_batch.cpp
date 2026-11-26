@@ -464,11 +464,6 @@ void conversationReadParity() {
     const auto task = TaskIntake(*f.store).submit(intake, &localOwner);
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(task).task, 0), "cancel");
     const auto result = std::stoll(f.query("SELECT id FROM journal WHERE kind='cancelled' AND task_id=" + std::to_string(task)));
-    f.receive(
-        {call("start_workflow", {{"request", "Collect the release notes"}, {"stages", {{{"stageId", "collect"}, {"role", "collect"}}}}})});
-    f.runtime->runConversations();
-    f.checkFinished(2);
-    const auto workflow = f.results().at(0).at("workflowId");
     Automations(*f.store).createAutomation(
         localOwner, intake, {{"kind", "schedule"}, {"cron", "0 9 * * 1"}, {"timezone", "Etc/UTC"}, {"request", "Weekly progress"}},
         unixTime());
@@ -479,9 +474,8 @@ void conversationReadParity() {
                             {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Private notes"}});
     Memory(*f.store).memory(localOwner, "alpha", "write_memory",
                             {{"docId", sharedDoc}, {"baseVersion", 0}, {"summary", "Update memory"}, {"content", "Shared playbook"}});
-    for (const auto& read : {call("find_tasks", {{"taskId", task}}), call("read_result", {{"messageId", result}}),
-                             call("workflow_status", {{"workflowId", workflow}}), call("list_schedules"), call("list_secrets"),
-                             call("list_connections"), call("read_memory"), call("memory_history"),
+    for (const auto& read : {call("find_tasks", {{"taskId", task}}), call("read_result", {{"messageId", result}}), call("list_schedules"),
+                             call("list_secrets"), call("list_connections"), call("read_memory"), call("memory_history"),
                              call("read_memory", {{"docId", sharedDoc}}), call("memory_history", {{"docId", sharedDoc}}), sessionEvents(f)})
         compareWithSingle(f, read);
     check(f.t3.eventReads == 2, "Session events did not reach T3 once in each mode");

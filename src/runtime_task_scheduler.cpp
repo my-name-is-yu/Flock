@@ -1,6 +1,5 @@
 #include "runtime_task_scheduler.hpp"
 #include "outbox_storage.hpp"
-#include "runtime_outbox_dispatch.hpp"
 #include "runtime_task_updates.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
@@ -22,9 +21,8 @@
 
 namespace flockv0 {
 runtime::TaskScheduler::TaskScheduler(Database& database, TaskEvents& taskEvents, TaskRouting& taskRouting, T3& t3, TaskUpdates& updates,
-                                      OutboxDispatch& dispatch, bool requireT3Connection, const std::function<Seconds()>& clock,
-                                      std::stop_token shutdown)
-    : database(database), taskEvents(taskEvents), taskRouting(taskRouting), t3(t3), updates(updates), dispatch(dispatch),
+                                      bool requireT3Connection, const std::function<Seconds()>& clock, std::stop_token shutdown)
+    : database(database), taskEvents(taskEvents), taskRouting(taskRouting), t3(t3), updates(updates),
       requireT3Connection(requireT3Connection), clock(clock), shutdown(shutdown) {}
 
 std::vector<runtime::TaskScheduler::Work> runtime::TaskScheduler::eligible() {
@@ -121,10 +119,6 @@ void runtime::TaskScheduler::activate(TaskData task) {
         if (!turn.next()) return false;
         if (!current.actionId.empty()) {
             current.state = TaskState::sending;
-            return true;
-        }
-        if (current.workflow && !current.lastRun) {
-            dispatch.queueAction(current, actionId(), CommandTool::delegate, "", Json::object(), Json::object());
             return true;
         }
         if (current.eventId == 0) taskEvents.event(current, "intake", {{"kind", "intake"}});

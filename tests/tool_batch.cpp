@@ -33,13 +33,10 @@ void classification() {
     const auto expect = [](CallClass expected, std::initializer_list<std::string_view> tools) {
         for (const auto tool : tools) check(classify(call(tool)) == expected, "Unexpected class for " + std::string(tool));
     };
-    expect(parallel_read, {"read_result",        "find_tasks",          "flock_session_search",
-                           "read_tool_result",   "workflow_status",     "expand_context",
-                           "list_secrets",       "list_connections",    "check_environment_readiness",
-                           "list_schedules",     "workspace_read_file", "workspace_search",
-                           "web_search",         "web_fetch",           "mcp_discover",
-                           "mcp_read_resource",  "skill_list",          "skill_read",
-                           "inspect_attachment", "git_find_repos"});
+    expect(parallel_read,
+           {"read_result", "find_tasks", "flock_session_search", "read_tool_result", "expand_context", "list_secrets", "list_connections",
+            "check_environment_readiness", "list_schedules", "workspace_read_file", "workspace_search", "web_search", "web_fetch",
+            "mcp_discover", "mcp_read_resource", "skill_list", "skill_read", "inspect_attachment", "git_find_repos"});
     expect(gated_read, {"flock_session_events", "read_channel_attachment", "read_memory", "memory_history", "mcp_call_tool",
                         "git_repo_info", "git_pr_status", "git_commit_status", "git_read_ci_logs"});
     expect(exclusive, {"start_task",
@@ -53,10 +50,6 @@ void classification() {
                        "invite_bot",
                        "leave_session",
                        "interrupt_session",
-                       "start_workflow",
-                       "instruct_workflow_stage",
-                       "stop_workflow_stage",
-                       "stop_workflow",
                        "compact_conversation",
                        "continue_fresh_session",
                        "request_secret_input",
@@ -90,9 +83,8 @@ void classification() {
 
 void batchAdmission() {
     for (const auto& tool : botToolNames()) check(batchable(tool), "Incorrect Bot batch admission for " + tool);
-    for (const auto tool :
-         {"flock_session_search", "check_environment_readiness", "flock_session_events", "find_tasks", "read_result", "workflow_status",
-          "list_schedules", "list_secrets", "list_connections", "read_tool_result", "read_memory", "memory_history"}) {
+    for (const auto tool : {"flock_session_search", "check_environment_readiness", "flock_session_events", "find_tasks", "read_result",
+                            "list_schedules", "list_secrets", "list_connections", "read_tool_result", "read_memory", "memory_history"}) {
         const auto classification = classify(call(tool));
         check(batchable(tool) && (classification == CallClass::parallel_read || classification == CallClass::gated_read),
               "Incorrect conversation read batch admission for " + std::string(tool));

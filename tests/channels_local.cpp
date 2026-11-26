@@ -626,7 +626,7 @@ void taskUpdates(const std::filesystem::path& database) {
     check(transport->effects.size() == 8, "Task replay repeated a channel update");
 }
 
-void workflowContextIsWebScoped(const std::filesystem::path& database) {
+void compactedContextIsWebScoped(const std::filesystem::path& database) {
     Store store(database);
     SessionAdapter t3;
     Script model;
@@ -642,40 +642,34 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         ConversationIntake(store).receive(owner, intake("release", ""), "web-original", "Original Web evidence").at("messageId");
     runtime.runConversations();
 
-    Json compaction, workflow;
+    Json compaction;
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"compact_conversation", {{"endMessageId", original}, {"summary", "Web summary"}}, {}};
-        if (steps.size() == 1) {
-            compaction = steps.at(0).at("result").at("compaction").at("compactionId");
-            return {"start_workflow", {{"request", "Web-only workflow"}}, {}};
-        }
-        workflow = steps.at(1).at("result").at("workflowId");
-        return reply("Started in Web");
+        compaction = steps.front().at("result").at("compaction").at("compactionId");
+        return reply("Summarized in Web");
     };
-    ConversationIntake(store).receive(owner, intake("release", ""), "web-workflow", "Summarize and start a workflow");
+    ConversationIntake(store).receive(owner, intake("release", ""), "web-summary", "Summarize the conversation");
     runtime.runConversations();
-    check(compaction.is_number() && workflow.is_number(), "Web workflow or compaction tool failed");
+    check(compaction.is_number(), "Web compaction failed");
 
     bool webContext = false;
     model.decideNext = [&](const ModelInput& input) {
-        webContext = input.history.at(0).at("compactionId") == compaction && input.task.at("workflows").at(0).at("workflowId") == workflow;
+        webContext = input.history.at(0).at("compactionId") == compaction;
         return reply("Loaded in Web");
     };
-    ConversationIntake(store).receive(owner, intake("release", ""), "web-context", "Check the workflow");
+    ConversationIntake(store).receive(owner, intake("release", ""), "web-context", "Check the summary");
     runtime.runConversations();
-    check(webContext, "Web turn lost the workflow or compacted summary");
+    check(webContext, "Web turn lost the compacted summary");
 
     bool channelContextIsolated = false;
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        check(input.history.empty() && !input.task.contains("workflows"), "Channel received Bot-wide Web context");
-        for (const auto* tool : {"compact_conversation", "expand_context", "continue_fresh_session", "start_workflow", "workflow_status",
-                                 "instruct_workflow_stage", "stop_workflow_stage", "stop_workflow"})
+        check(input.history.empty(), "Channel received Bot-wide Web context");
+        for (const auto* tool : {"compact_conversation", "expand_context", "continue_fresh_session"})
             check(std::ranges::find(input.tools, tool) == input.tools.end(), "Channel advertised a Web tool");
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return {"expand_context", {{"compactionId", compaction}}, {}};
-        if (steps.size() == 1) return {"workflow_status", {{"workflowId", workflow}}, {}};
-        channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>() && !steps.at(1).at("result").at("ok").get<bool>();
+        channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>();
         return reply("Channel reply");
     };
     Channels(store).receiveChannel(channel, "fixture-auth", event("scope", "probe", "What is in my context?"), intake);
@@ -956,7 +950,7 @@ int main() {
         markdownDelivery(temp.path / "markdown-delivery.db");
         markdownFallbackDelivery(temp.path / "markdown-fallback.db");
         taskUpdates(temp.path / "task-updates.db");
-        workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
+        compactedContextIsWebScoped(temp.path / "compacted-context-scope.db");
         sessionEvidence(temp.path / "session-evidence.db");
         taskQuestionChoices(temp.path / "task-question-choices.db");
         local(temp.path / "local.db", std::filesystem::canonical(path).string());

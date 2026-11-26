@@ -1,5 +1,4 @@
 #include "runtime_run_observer.hpp"
-#include "workflow_storage.hpp"
 #include "outbox_storage.hpp"
 #include "journal.hpp"
 #include "runtime_peer_exchanges.hpp"
@@ -78,7 +77,6 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
     if (task.generation != snapshot.generation || task.eventId != snapshot.eventId || task.currentRevision != snapshot.currentRevision ||
         task.activeRun != snapshot.activeRun)
         return false;
-    if (task.workflow) workflowStorage.stageObservation(task, observed, clock());
     std::optional<DecisionCheckpoint> resumedDecision;
     const bool changed = [&] {
         const auto run = task.activeRun.value().ref;
@@ -224,8 +222,7 @@ void runtime::RunObserver::interruptRun(const TaskData& task) {
     const auto observed = observe(task);
     if (ingest(task, observed)) return;
     if (observed.kind == Observation::Kind::Settling) return stopNote(task, "Waiting for the remaining work on this request to finish");
-    if (observed.kind == Observation::Kind::Unavailable && !(task.workflow && stop.intent == RunStopIntent::cancel))
-        return stopNote(task, "Flock couldn't check the status of this work in T3");
+    if (observed.kind == Observation::Kind::Unavailable) return stopNote(task, "Flock couldn't check the status of this work in T3");
     const auto now = clock();
     if (now < stop.retryAt.value_or(0)) return;
     TaskData requested;
@@ -313,8 +310,7 @@ void runtime::RunObserver::finishReplan(const TaskData& task) {
             taskEvents.event(current, "replan/" + std::to_string(current.generation),
                              report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
         }
-        const bool needsQueue =
-            moving || current.state == TaskState::queued || current.projectId.empty() || (current.workflow && !current.lastRun);
+        const bool needsQueue = moving || current.state == TaskState::queued || current.projectId.empty();
         current.state = needsQueue ? TaskState::queued : TaskState::deciding;
         current.replanning = false;
         current.replanningDetail.reset();

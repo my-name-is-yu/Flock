@@ -353,7 +353,7 @@ void writeWebIdentities(const std::filesystem::path& path, const Json& accounts)
     std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
 }
 
-void inspectors(const std::filesystem::path& path) {
+void conversationSummaries(const std::filesystem::path& path) {
     struct InspectorModel : Model {
         const std::string credential = "credential-protected-after-inspector-write";
         Id boundary = 0;
@@ -364,7 +364,7 @@ void inspectors(const std::filesystem::path& path) {
                         {{"endMessageId", boundary}, {"summary", "Preserve the release notes " + credential}},
                         "Summarize earlier work"};
             if (input.event.at("turn").empty() && input.event.at("text") == "Release")
-                return {"start_workflow", {{"request", "Prepare a release " + credential}}, "Use a separate verifier"};
+                return {"start_task", {{"request", "Prepare a release " + credential}}, "Prepare the release"};
             return {"reply", {{"text", "Recorded"}}, "Acknowledge the request"};
         }
     } model;
@@ -376,33 +376,26 @@ void inspectors(const std::filesystem::path& path) {
     Browser browser(*server);
     model.boundary = ConversationIntake(store).receive({"fixture", true}, routing, "a", "Original release instructions").at("messageId");
     ConversationIntake(store).receive({"fixture", true}, routing, "b", "Summarize");
-    ConversationIntake(store).receive({"fixture", true}, routing, "c", "Release");
+    const auto release = ConversationIntake(store).receive({"fixture", true}, routing, "c", "Release").at("messageId").get<Id>();
     runtime.runConversations();
     SecretRequests secrets{store};
     secrets.submitSecret({"fixture", true}, "release", secrets.requestSecret("release", {"inspector-token"}), model.credential);
     const auto summaries = browser.get("/api/compactions?bot=release");
-    const auto workflows = browser.get("/api/workflows?bot=release");
     const auto view = browser.get("/api/view?bot=release");
     check(summaries.size() == 1 && summaries[0]["endMessageId"] == model.boundary &&
               summaries[0]["summary"] == "Preserve the release notes [redacted]" && view.at("compactions") == summaries,
           "summary or its covered range missing from the inspector");
-    check(workflows.size() == 1 && workflows[0]["request"] == "Prepare a release [redacted]" && workflows[0]["stages"].size() == 2 &&
-              view.at("workflows") == workflows,
-          "workflow stages missing from the Bot view");
-    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
-          "inspectors mixed Bot histories");
+    const auto& tasks = view.at("activeTasks");
+    check(tasks.size() == 1 && tasks.front().at("request") == "Prepare a release [redacted]",
+          "Task was missing or unredacted in the Bot view");
+    check(browser.get("/api/compactions?bot=triage").empty(), "Summaries mixed Bot histories");
     const auto audit = browser.get("/api/conversation?bot=release");
     check(audit.dump().find("Original release instructions") != std::string::npos,
           "summary removed the original message from the HTTP audit history");
-    bool linked = false;
-    for (const auto& event : audit.at("events")) {
-        const auto& data = event.at("data");
-        if (!data.contains("actions")) continue;
-        for (const auto& action : data.at("actions"))
-            if (action.at("tool") == "start_workflow" && action.at("workflowId") == workflows[0]["workflowId"])
-                linked = data.at("status") == "working";
-    }
-    check(linked, "workflow start was missing from the conversation reply");
+    const auto reply = conversationReply(audit, release);
+    check(reply.at("status") == "working" &&
+              reply.at("actions") == Json::array({{{"tool", "start_task"}, {"taskId", tasks.front().at("id")}, {"effect", "started"}}}),
+          "Task start was missing from the conversation reply");
 }
 
 void imageAttachmentCountInConversation(const std::filesystem::path& path) {
@@ -1788,6 +1781,66 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     }
 }
 
+void demoUsesSeparateTasksForImplementationAndVerification(const std::filesystem::path& path) {
+    struct CatalogDemo : Model {
+        std::unique_ptr<Model> demo = app::makeDemoModel();
+        std::size_t definitions = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "conversation_turn" && input.event.at("turn").empty()) {
+                auto webInput = input;
+                webInput.config.update({{"modelProvider", "chatgpt"}, {"model", "fixture"}});
+                definitions = app::responseRequest(webInput).at("tools").at(0).at("tools").size();
+            }
+            return demo->decide(input);
+        }
+    } model;
+    Store store(path, {.saveBotSetup = [](Store&, std::string_view, const BotSetupEdit&, const Json&) {}});
+    const auto t3 = app::makeDemoT3();
+    auto web = callbacks();
+    web.intake = [](std::string_view bot, std::string_view request) { return Intake{std::string(bot), std::string(request), "demo", ""}; };
+    Runtime runtime(store, model, *t3, [](auto) { return std::string{}; }, {.intake = web.intake});
+    const auto server = startWeb(store, 0, std::move(web));
+    Browser browser(*server);
+    const auto receipt = browser.post("/api/messages",
+                                      {{"botId", "release"},
+                                       {"clientMessageId", "implement-and-verify"},
+                                       {"text", "Implement the release summary in Demo project, then verify it in a separate Session."}},
+                                      201);
+    runtime.runConversations();
+    const auto conversation = "/api/conversation?bot=release";
+    const auto reply = conversationReply(browser.get(conversation), receipt.at("messageId"));
+    const auto& actions = reply.at("actions");
+    check(actions.size() == 2 && actions[0].at("tool") == "start_task" && actions[1].at("tool") == "start_task",
+          "The Demo did not start two ordinary tasks in one conversation");
+    check(model.definitions == 46, "The default Web conversation provider catalog changed");
+
+    const Id implementation = actions[0].at("taskId"), verification = actions[1].at("taskId");
+    tick(runtime, 3);
+    const auto queued = Tasks(store).task(verification);
+    check(Tasks(store).task(implementation).task.state == TaskState::running && queued.task.state == TaskState::queued &&
+              queued.blockedBy && queued.blockedBy->id == implementation && queued.runs.empty(),
+          "Verification bypassed the active task on the same project");
+    for (int i = 0; i < 12; ++i) {
+        runtime.tick();
+        const auto first = Tasks(store).task(implementation);
+        const auto second = Tasks(store).task(verification);
+        check(first.task.state == TaskState::completed || second.runs.empty(),
+              "The verification Session started before implementation finished");
+        if (second.task.state == TaskState::completed) break;
+    }
+    const auto first = Tasks(store).task(implementation);
+    const auto second = Tasks(store).task(verification);
+    check(first.task.state == TaskState::completed && second.task.state == TaskState::completed && first.task.projectId == "demo-project" &&
+              second.task.projectId == first.task.projectId && first.runs.size() == 1 && second.runs.size() == 1 &&
+              first.runs[0].run.ref.threadId != second.runs[0].run.ref.threadId,
+          "The two Demo tasks did not complete in separate Sessions on the same project");
+    const auto view = browser.get("/api/view?bot=release");
+    const auto& sessions = view.at("sessionTasks");
+    check(sessions.size() == 2 && sessions[0].at("id") == verification && sessions[1].at("id") == implementation &&
+              conversationCompletion(view, implementation).at("id") < conversationCompletion(view, verification).at("id"),
+          "Ordinary Session rows or ordered results are missing from the Bot view");
+}
+
 void learningNoticeEndpoints(const std::filesystem::path& path) {
     Store store(path, {.memorySeed = [](auto) { return "Initial convention"; }});
     const auto model = app::makeDemoModel();
@@ -1952,7 +2005,7 @@ int main(int argc, char** argv) {
         }
         conversationBotSetup(directory.path / "full-mode-profiles");
         botPauseEndpoints(directory.path / "bot-pause.sqlite");
-        inspectors(directory.path / "inspectors.db");
+        conversationSummaries(directory.path / "conversation-summaries.db");
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
@@ -1965,6 +2018,7 @@ int main(int argc, char** argv) {
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
+        demoUsesSeparateTasksForImplementationAndVerification(directory.path / "demo-separate-tasks.db");
         learningNoticeEndpoints(directory.path / "learning.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";

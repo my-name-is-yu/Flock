@@ -14,7 +14,6 @@
 #include "flock/channels.hpp"
 #include "flock/local_machines.hpp"
 #include "flock/identity.hpp"
-#include "flock/workflows.hpp"
 #include "flock/git_events.hpp"
 #include "git_storage.hpp"
 #include "flock/bot_memory.hpp"
@@ -230,8 +229,6 @@ WebIdentity::WebIdentity(Store& store)
     : database_(Database::of(store)), machines_(StoreAccess::get(store).localMachineStorage),
       identity_(StoreAccess::get(store).webIdentity) {}
 
-Workflows::Workflows(Store& store) : database_(Database::of(store)), workflows_(StoreAccess::get(store).workflowStorage) {}
-
 Notifications::Notifications(Store& store)
     : database_(Database::of(store)), secrets_(StoreAccess::get(store).secretStorage), channels_(StoreAccess::get(store).channelStorage),
       permissions_(StoreAccess::get(store).permissions) {}
@@ -311,7 +308,6 @@ WHERE j.conversation_bot_id IS NULL AND (
         ))
   ))
   OR (j.kind='waiting' AND j.wait_reason='model_failure')
-  OR (j.kind='completed' AND j.workflow_outcome='failed')
 )
 )
 )SQL";

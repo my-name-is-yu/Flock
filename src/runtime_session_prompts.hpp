@@ -19,14 +19,11 @@ class MemoryStorage;
 class SecretStorage;
 class TaskEvents;
 
-class WorkflowStorage;
-
 class runtime::SessionPrompts {
 public:
     SessionPrompts(Database& database, SecretStorage& secretStorage, MemoryStorage& memoryStorage, TaskEvents& taskEvents,
-                   WorkflowStorage& workflowStorage, const SoulLoader& soul)
-        : database(database), secretStorage(secretStorage), memoryStorage(memoryStorage), taskEvents(taskEvents),
-          workflowStorage(workflowStorage), soul(soul) {}
+                   const SoulLoader& soul)
+        : database(database), secretStorage(secretStorage), memoryStorage(memoryStorage), taskEvents(taskEvents), soul(soul) {}
 
     struct WorkPrompt {
         std::string instruction;
@@ -61,7 +58,6 @@ private:
     SecretStorage& secretStorage;
     MemoryStorage& memoryStorage;
     TaskEvents& taskEvents;
-    WorkflowStorage& workflowStorage;
     const SoulLoader& soul;
 };
 }

@@ -318,8 +318,7 @@ bool runtime::OutboxDispatch::deferSingleDelivery(TaskData& task, const Outbox& 
         waitStorage.clearWait(task, "connection_restored");
         task.state = TaskState::sending;
     }
-    if (attemptedPhase == OutboxPhase::started && !task.workflow && task.state != TaskState::deciding)
-        reportUnconfirmedDelivery(task, action, detail);
+    if (attemptedPhase == OutboxPhase::started && task.state != TaskState::deciding) reportUnconfirmedDelivery(task, action, detail);
     return true;
 }
 
@@ -383,14 +382,6 @@ INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
 SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_through>=?
 )SQL",
                                   {outcome.run.runId, *action.sessionParticipationId, task.sourceMessageId.value()});
-                if (task.workflow) {
-                    const auto now = clock();
-                    database.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0,"
-                                  "status=CASE WHEN status='pending' THEN 'running' ELSE status END,"
-                                  "deadline=CASE WHEN deadline=0 AND json_extract(spec,'$.softDeadlineSeconds')>0 "
-                                  "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE deadline END WHERE task_id=?",
-                                  {now, now, id});
-                }
                 instructionDelivery(task, action);
                 if ((action.command.tool == CommandTool::delegate || action.command.tool == CommandTool::start_in_session) &&
                     !task.replanning) {
@@ -535,9 +526,6 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     }
     if (sendsWork) {
         const auto scrub = policy.secretRedactor(cmd.ownerBotId);
-        if (task.workflow && scrub.text(task.workflow->inputArtifactVersion) != task.workflow->inputArtifactVersion)
-            return applyDelivery(id, action,
-                                 {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
         const auto marker = sessionPrompt(cmd.actionId, {});
         if (cmd.instruction.ends_with(marker)) cmd.instruction.resize(cmd.instruction.size() - marker.size());
         action.sessionContext = {};

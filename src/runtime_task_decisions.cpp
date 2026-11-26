@@ -282,9 +282,8 @@ void runtime::TaskDecisions::applyLaunchDefaults(TaskData& task, const Json& def
         task.config["session"] = std::move(session);
 }
 
-bool runtime::TaskDecisions::continueStage(const TaskData& task, const Json* launchDefaults) {
-    if (task.projectId.empty() || (!task.workflow && !task.freshContextRequested) || !RunReports::hasSettledRun(task) ||
-        task.pendingInstructions.empty())
+bool runtime::TaskDecisions::continueFreshSession(const TaskData& task, const Json* launchDefaults) {
+    if (task.projectId.empty() || !task.freshContextRequested || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
         auto event = taskEvents.currentEvent(current);

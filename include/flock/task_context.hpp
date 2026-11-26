@@ -40,11 +40,6 @@ struct TaskTrigger {
     std::variant<TimedTaskTrigger, WebhookTaskTrigger> details;
 };
 
-struct TaskWorkflow {
-    std::int64_t id;
-    std::string stageId, inputArtifactVersion;
-};
-
 enum class TaskPeerOutcome { completed, failed };
 std::string_view taskPeerOutcomeName(TaskPeerOutcome);
 }

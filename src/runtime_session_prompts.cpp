@@ -1,7 +1,6 @@
 #include "runtime_session_prompts.hpp"
 #include "wait_storage.hpp"
 #include "task_storage.hpp"
-#include "workflow_storage.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
@@ -47,7 +46,6 @@ struct SourceQuotes {
         const auto id = source.messageId;
         if (!id || !included.insert(id).second) return {};
         auto text = "\n\nReferenced result " + std::to_string(id) + " from task " + std::to_string(source.taskId);
-        if (source.stageId) text += "\nStage: " + *source.stageId;
         if (source.run) text += "\nSource Run: " + sourceRunJson(*source.run).dump();
         if (source.resultRunId) text += "\nReport Run: " + *source.resultRunId;
         text += " (reference only):";
@@ -187,10 +185,6 @@ runtime::SessionPrompts::WorkPrompt runtime::SessionPrompts::workPrompt(const Ta
     if (task.sourceTaskId && (moved || !task.lastRun)) {
         for (const auto& source : task.sourceResultRefs)
             if (source.taskId == *task.sourceTaskId) quoteSource(source);
-    }
-    if (task.workflow) {
-        for (const auto& source : task.sourceResultRefs) quoteSource(source);
-        workflowStorage.appendStageRequirements(instruction, task);
     }
     quotes.remaining += recentReportBudget;
     if (moved) {
