@@ -1,10 +1,16 @@
+#include "conversation_context_storage.hpp"
+
+#include "attachment_storage.hpp"
 #include "conversation_storage.hpp"
+#include "database.hpp"
+#include "secret_storage.hpp"
+#include "storage.hpp"
 #include "flock/limits.hpp"
 #include "journal_conversation.hpp"
 #include "flock/types.hpp"
 #include "flock/store.hpp"
 #include "flock/json.hpp"
-#include "flock/task.hpp"
+#include "flock/secrets.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -41,9 +47,10 @@ std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_
 unsigned char asciiLower(unsigned char value) {
     return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value;
 }
+
 }
 
-std::size_t conversation_storage::boundExpandedContext(Json& turn) {
+std::size_t ConversationContextStorage::boundExpandedContext(Json& turn) {
     std::size_t expandedBytes = 0;
     for (auto step = turn.rbegin(); step != turn.rend(); ++step) {
         auto& result = step->at("result");
@@ -62,12 +69,16 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
     return expandedBytes;
 }
 
-Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
-    const auto scrub = secretStorage.redactor(bot);
-    auto rows =
-        query("SELECT id,start_message_id,end_message_id,summary,original_count,created_at,created_by "
-              "FROM conversation_compactions WHERE bot_id=? AND (?=0 OR id<?) AND (?=0 OR end_message_id<?) ORDER BY id DESC LIMIT ?",
-              {bot, before, before, beforeMessage, beforeMessage, std::min(limit, 100u)});
+ConversationContextStorage::ConversationContextStorage(Database& database, const SecretStorage& secretStorage,
+                                                       const AttachmentStorage& attachments)
+    : database_(database), secretStorage_(secretStorage), attachments_(attachments) {}
+
+Json ConversationContextStorage::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
+    const auto scrub = secretStorage_.redactor(bot);
+    auto rows = database_.query(
+        "SELECT id,start_message_id,end_message_id,summary,original_count,created_at,created_by "
+        "FROM conversation_compactions WHERE bot_id=? AND (?=0 OR id<?) AND (?=0 OR end_message_id<?) ORDER BY id DESC LIMIT ?",
+        {bot, before, before, beforeMessage, beforeMessage, std::min(limit, 100u)});
     Json result = Json::array();
     while (rows.next())
         result.push_back({{"compactionId", rows.number(0)},
@@ -82,11 +93,12 @@ Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, I
 
 Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
-    return p_->compactions(bot, before, limit);
+    return p_->conversationContextStorage.compactions(bot, before, limit);
 }
 
-Json Store::Impl::conversationHistory(const conversation::Message& message, const Json& summaries, std::size_t expandedBytes) const {
-    const auto scrub = secretStorage.redactor(message.bot);
+Json ConversationContextStorage::conversationHistory(const conversation::Message& message, const Json& summaries,
+                                                     std::size_t expandedBytes) const {
+    const auto scrub = secretStorage_.redactor(message.bot);
     std::size_t remaining = limits::conversation_context::maxBytes - expandedBytes - limits::conversation_context::emptyHistoryBytes;
     Json history = Json::array();
     Id boundary = 0;
@@ -101,7 +113,7 @@ Json Store::Impl::conversationHistory(const conversation::Message& message, cons
                    {"summary", saved.at("summary")}};
         remaining -= summary.dump().size();
     }
-    auto rows = query(R"SQL(
+    auto rows = database_.query(R"SQL(
 SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text,entry.wait_id FROM compactable_messages entry
 LEFT JOIN channel_messages source ON source.message_id=entry.source_message_id
 WHERE entry.bot_id=? AND entry.id>?
@@ -109,7 +121,7 @@ WHERE entry.bot_id=? AND entry.id>?
   AND (?='' OR (source.scope_key=? AND entry.kind!='user_answer'))
 ORDER BY entry.id DESC LIMIT 24
 )SQL",
-                      {message.bot, boundary, message.id, message.channelScope, message.channelScope});
+                                {message.bot, boundary, message.id, message.channelScope, message.channelScope});
     while (rows.next()) {
         const auto kind = rows.string(2);
         const auto id = rows.number(0);
@@ -124,7 +136,7 @@ ORDER BY entry.id DESC LIMIT 24
             else if (const auto* invite = std::get_if<ConversationInvitationEntry>(&decoded.detail))
                 entry["sessionInvitation"] = scrub.record(encodeConversationInvitation(*invite));
             if (message.channelScope.empty()) {
-                auto media = attachments.attachmentViews(id);
+                auto media = attachments_.attachmentViews(id);
                 if (!media.empty()) entry["attachments"] = std::move(media);
             }
         }
@@ -149,62 +161,49 @@ ORDER BY entry.id DESC LIMIT 24
     return history;
 }
 
-Json Store::Impl::contextTool(std::string_view tool, const Json& args, const conversation::Message& message, int step) {
-    if (tool == "continue_fresh_session") {
-        auto task = ownTask(identifier(args, "taskId", true), message);
-        if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("Task is closed or stopping");
-        const auto instruction = args.contains("instruction")
-                                     ? conversation_storage::text(args, "instruction", limits::session_prompt::maxDecisionTextBytes, true)
-                                     : "Continue with the same completion criteria.";
-        task.newSessionRequired = true;
-        task.freshContextRequested = true;
-        task.replanning = true;
-        taskOperations.acceptInstruction(task, message.id, step, instruction, std::nullopt, nullptr);
-        return {{"ok", true}, {"freshContext", true}, {"taskId", task.id}, {"effect", "replanning"}};
-    }
-
+Json ConversationContextStorage::contextTool(std::string_view tool, const Json& args, const conversation::Message& message, int step) {
     const auto& bot = message.bot;
     const auto latest = compactions(bot, 0, 1);
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
     if (tool == "compact_conversation") {
         const auto end = identifier(args, "endMessageId", true);
-        const auto summary = secretStorage.redactor(bot).text(conversation_storage::text(args, "summary", maxSummaryBytes, true));
+        const auto summary = secretStorage_.redactor(bot).text(conversation_storage::text(args, "summary", maxSummaryBytes, true));
         if (summary.size() > maxSummaryBytes || Json(summary).dump().size() > maxExpandedBytes)
             throw Conflict("Escaped summary exceeds the context budget");
         if (end <= boundary || end >= message.id)
             throw Conflict("Use a boundary after the previous summary and before the current message");
-        auto range = query("SELECT min(id),max(id),count(*) FROM compactable_messages WHERE bot_id=? AND id<=?", {bot, end});
+        auto range = database_.query("SELECT min(id),max(id),count(*) FROM compactable_messages WHERE bot_id=? AND id<=?", {bot, end});
         range.next();
         if (range.number(1) != end) throw Conflict("Unknown conversation boundary");
-        exec("INSERT INTO conversation_compactions(bot_id,start_message_id,end_message_id,summary,original_count,"
-             "created_at,created_by) VALUES(?,?,?,?,?,?,?)",
-             {bot, range.number(0), end, summary, range.number(2), unixTime(), bot});
+        database_.exec("INSERT INTO conversation_compactions(bot_id,start_message_id,end_message_id,summary,original_count,"
+                       "created_at,created_by) VALUES(?,?,?,?,?,?,?)",
+                       {bot, range.number(0), end, summary, range.number(2), unixTime(), bot});
         return {{"ok", true}, {"compaction", compactions(bot, 0, 1).front()}};
     }
 
     Id end = std::min(boundary, message.id - 1);
     if (args.contains("compactionId")) {
-        auto row = query("SELECT end_message_id FROM conversation_compactions WHERE bot_id=? AND id=?",
-                         {bot, identifier(args, "compactionId", true)});
+        auto row = database_.query("SELECT end_message_id FROM conversation_compactions WHERE bot_id=? AND id=?",
+                                   {bot, identifier(args, "compactionId", true)});
         if (!row.next()) throw Conflict("Unknown compaction");
         end = std::min(end, row.number(0));
     }
     if (args.contains("endMessageId")) end = std::min(end, identifier(args, "endMessageId", true));
     Json revision;
-    const auto scrub = secretStorage.redactor(bot, &revision);
+    const auto scrub = secretStorage_.redactor(bot, &revision);
     Id start = args.contains("startMessageId") ? identifier(args, "startMessageId", true) : 1;
     Id offset = 0;
     Id queryMessage = message.id, queryStep = step;
     auto needle = conversation_storage::text(args, "query", 512, false);
     if (args.contains("cursor")) {
-        auto saved = query(R"SQL(
+        auto saved = database_.query(R"SQL(
 SELECT c.message_id,c.byte_offset,c.redaction_revision,c.end_message_id,c.query_message_id,c.query_step,
        coalesce(json_extract(s.decision,'$[0].args.query'),'') AS search_query
 FROM conversation_expansion_cursors c
 JOIN conversation_steps s ON s.message_id=c.query_message_id AND s.step=c.query_step
 WHERE c.bot_id=? AND c.id=?
 )SQL",
-                           {bot, identifier(args, "cursor", true)});
+                                     {bot, identifier(args, "cursor", true)});
         if (!saved.next() || saved.json(2) != revision)
             throw Conflict("Expansion cursor is stale or unknown. Read again from the start of the message.");
         auto originalNeedle = saved.string(6);
@@ -220,18 +219,19 @@ WHERE c.bot_id=? AND c.id=?
         needle = std::move(originalNeedle);
     }
     if (end < start) throw Conflict("No compacted messages in this range");
-    auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id", {bot, start, end});
+    auto rows = database_.query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",
+                                {bot, start, end});
     Json result = {{"ok", true}, {"messages", Json::array()}};
     constexpr std::size_t chunkBytes = 2000, cursorBytes = 128;
     const std::size_t limit = args.contains("limit") ? std::min<Id>(identifier(args, "limit", true), 8) : 8;
     const auto continueAt = [&](Id id, Id next) {
-        auto saved = query(R"SQL(
+        auto saved = database_.query(R"SQL(
 INSERT INTO conversation_expansion_cursors(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)
 VALUES(?,?,?,?,?,?,?)
 ON CONFLICT(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)
 DO UPDATE SET byte_offset=excluded.byte_offset RETURNING id
 )SQL",
-                           {bot, id, next, revision, end, queryMessage, queryStep});
+                                     {bot, id, next, revision, end, queryMessage, queryStep});
         saved.next();
         result["nextCursor"] = saved.number(0);
     };

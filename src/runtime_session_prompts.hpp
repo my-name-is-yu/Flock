@@ -16,9 +16,11 @@
 #include <vector>
 
 namespace flockv0 {
+class WorkflowStorage;
+
 class Runtime::Components::SessionPrompts {
 public:
-    explicit SessionPrompts(Store::Impl& db) : db(db) {}
+    SessionPrompts(Store::Impl& db, WorkflowStorage& workflowStorage) : db(db), workflowStorage(workflowStorage) {}
 
     struct WorkPrompt {
         std::string instruction;
@@ -49,5 +51,6 @@ private:
     WorkPrompt workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes, const SessionContract* contract);
 
     Store::Impl& db;
+    WorkflowStorage& workflowStorage;
 };
 }

@@ -17,6 +17,8 @@
 #include <string_view>
 
 namespace flockv0 {
+class WorkflowStorage;
+
 class Runtime::Components::RunReports {
 public:
     struct JournalReport {
@@ -24,7 +26,7 @@ public:
         RunReportEntry data;
     };
 
-    RunReports(Store::Impl&, T3&, const Policy&, TaskUpdates&, SessionHistory&, const std::function<Seconds()>& clock);
+    RunReports(Store::Impl&, WorkflowStorage&, T3&, const Policy&, TaskUpdates&, SessionHistory&, const std::function<Seconds()>& clock);
     static bool hasSettledRun(const TaskData&);
     void writeRunReport(TaskData&, const SettledRunReport&);
     void recoverRunReport(const TaskData&);
@@ -37,6 +39,7 @@ private:
                                  std::string_view status);
 
     Store::Impl& db;
+    WorkflowStorage& workflowStorage;
     T3& t3;
     const Policy& policy;
     TaskUpdates& updates;

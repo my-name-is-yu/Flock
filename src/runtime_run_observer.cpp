@@ -1,4 +1,5 @@
 #include "runtime_run_observer.hpp"
+#include "workflow_storage.hpp"
 #include "outbox_storage.hpp"
 #include "journal.hpp"
 #include "runtime_peer_exchanges.hpp"
@@ -67,7 +68,7 @@ bool Runtime::Components::RunObserver::ingest(const TaskData& snapshot, const Ob
     if (task.generation != snapshot.generation || task.eventId != snapshot.eventId || task.currentRevision != snapshot.currentRevision ||
         task.activeRun != snapshot.activeRun)
         return false;
-    if (task.workflow) db.stageObservation(task, observed, clock());
+    if (task.workflow) workflowStorage.stageObservation(task, observed, clock());
     std::optional<DecisionCheckpoint> resumedDecision;
     const bool changed = [&] {
         const auto run = task.activeRun.value().ref;
