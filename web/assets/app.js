@@ -1440,7 +1440,6 @@ function cardSourceAction(item, close) {
     void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
-// Keep a trailing icon on the same line as the word before it, so a wrap never leaves it alone.
 function appendTrailingIcon(text, icon) {
   const last = text.lastChild;
   if (last?.nodeType === Node.TEXT_NODE && last.data.trim()) {
