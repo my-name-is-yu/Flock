@@ -155,6 +155,14 @@ Policy Store::policy() {
     return Policy(*p_);
 }
 
+SecretRedactor Policy::secretRedactor(std::string_view bot) const {
+    return db_.secretStorage.redactor(bot);
+}
+
+Json Policy::redactSecrets(std::string_view bot, const Json& data) const {
+    return secretRedactor(bot).record(data, SecretRedactor::Fields::external);
+}
+
 PolicyResult Policy::check(std::string_view bot, Action action, std::string_view target) const {
     return check(bot, Resource{action, std::string(target)});
 }
@@ -249,7 +257,7 @@ void Policy::changeNeverRule(const Person& actor, Action action, std::string_vie
 
 void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::string_view target, bool add, bool fromCard) {
     if (!identifier(target)) throw Conflict("Invalid policy rule target");
-    db_.sharedRedactor().requirePublic({actor.id, target});
+    db_.secretStorage.sharedRedactor().requirePublic({actor.id, target});
     const auto name = actionName(action), type = ruleName(kind);
     if (add) {
         db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)"
@@ -264,7 +272,7 @@ void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::s
 Json Policy::createOwnedBot(const Person& creator, const std::function<Json(const PublishOwnedBot&)>& create) {
     std::lock_guard lock(db_.mutex);
     if (!allows(creator, Action::bot_create, "")) throw DecisionDenied{};
-    db_.sharedRedactor().requirePublic({creator.id});
+    db_.secretStorage.sharedRedactor().requirePublic({creator.id});
     return create([&](std::string_view bot, const std::function<void()>& publish) {
         Transaction ownership(db_.db);
         setOwner(creator, bot);
@@ -277,7 +285,7 @@ void Policy::setOwner(const Person& creator, std::string_view bot) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !allows(creator, Action::bot_create, bot)) throw DecisionDenied{};
     if (db_.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
-    db_.sharedRedactor().requirePublic({creator.id, bot});
+    db_.secretStorage.sharedRedactor().requirePublic({creator.id, bot});
     if (db_.query("SELECT 1 FROM bot_creation_intents WHERE target=?", {bot}).next()) throw Conflict("Bot creation is already in progress");
     db_.exec("INSERT INTO bot_owners VALUES(?,?)", {bot, creator.id});
 }
@@ -286,7 +294,7 @@ void Policy::setMember(const Person& actor, std::string_view bot, std::string_vi
     std::lock_guard lock(db_.mutex);
     Transaction tx(db_.db);
     if (!allows(actor, Action::bot_settings, bot) || !identifier(person)) throw DecisionDenied{};
-    db_.sharedRedactor().requirePublic({actor.id, bot, person});
+    db_.secretStorage.sharedRedactor().requirePublic({actor.id, bot, person});
     if (add)
         db_.exec("INSERT OR IGNORE INTO bot_members VALUES(?,?)", {bot, person});
     else
@@ -310,7 +318,7 @@ Json Policy::botSettings(const Person& actor, std::string_view bot) const {
                             {bot});
     while (inputs.next())
         result["secretInputs"].push_back({{"id", inputs.number(0)}, {"name", inputs.string(1)}, {"status", inputs.string(2)}});
-    return db_.redactor(bot).record(result);
+    return db_.secretStorage.redactor(bot).record(result);
 }
 
 void Policy::audit(const Person& actor, std::string_view bot, std::string_view action, const Json& details) {
@@ -340,10 +348,10 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
             forbidden(bot, create ? Action::bot_create : Action::bot_rename, target))
             throw Conflict("Bot change denied by policy");
         if (!identifier(creator.id) || (!create && !allows(creator, Action::bot_settings, target))) throw DecisionDenied{};
-        db_.redactor(bot).requirePublic({name, target});
+        db_.secretStorage.redactor(bot).requirePublic({name, target});
         if (create) {
             Transaction intent(db_.db);
-            db_.sharedRedactor().requirePublic({creator.id, target});
+            db_.secretStorage.sharedRedactor().requirePublic({creator.id, target});
             if (db_.query("SELECT 1 FROM bot_owners WHERE bot=? UNION ALL SELECT 1 FROM bot_creation_intents WHERE target=?",
                           {target, target})
                     .next())
@@ -426,7 +434,7 @@ bool Policy::requiresIdentity() const {
 Id Policy::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMessage) {
     if (!validBotId(bot) || !ref.valid()) throw Conflict("Invalid Bot or secret reference");
     std::lock_guard lock(db_.mutex);
-    db_.redactor(bot).requirePublic({bot, ref.name});
+    db_.secretStorage.redactor(bot).requirePublic({bot, ref.name});
     auto row = db_.query(R"SQL(
 INSERT INTO protected_inputs(bot,name,file,source_message_id)
  SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=?2 AND status='fulfilled')
@@ -458,11 +466,11 @@ SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pendin
     if (!row.next()) throw DecisionUnavailable{};
     const auto name = row.string(1);
     if (value.empty() || name.find(value) != name.npos || bot.find(value) != bot.npos) throw Conflict("Invalid protected value");
-    db_.redactor(bot).requirePublic(actor.id);
+    db_.secretStorage.redactor(bot).requirePublic(actor.id);
     audit(actor, bot, "supply_secret", {{"requestId", request}, {"resourceKind", "secret"}, {"resourceId", name}});
     db_.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
     db_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?", {request});
-    db_.secrets.insert({row.string(0)}, value);
+    db_.secretStorage.insert({row.string(0)}, value);
 }
 
 void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destination, std::string_view operation, bool upstream,
@@ -485,7 +493,7 @@ void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destinati
         }
         auto row = db_.query("SELECT file FROM protected_inputs WHERE name=? AND status='fulfilled'", {ref.name});
         if (!row.next()) throw Conflict("Secret unavailable");
-        value = db_.secrets.read({row.string(0)});
+        value = db_.secretStorage.read({row.string(0)});
         tx.commit();
     }
     try {

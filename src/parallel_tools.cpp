@@ -133,7 +133,7 @@ private:
             if (isBotTool(call.tool)) store_.validateBotTool(tools_, call);
             return nullptr;
         } catch (const Conflict& error) {
-            return toolFailure(store_.sharedRedactor().text(error.what()));
+            return toolFailure(store_.secretStorage.sharedRedactor().text(error.what()));
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception&) {
@@ -234,7 +234,7 @@ private:
             auto result = store_.applyLocalConversationCall(message_, step_, calls_[slot], callKey(slot), ctx_.clock(), ApprovalWait::defer,
                                                             nullptr, LinkedTaskDestinations{});
             if (result)
-                saveSlot(slot, store_.redactor(message_.bot).record(std::move(*result)));
+                saveSlot(slot, store_.secretStorage.redactor(message_.bot).record(std::move(*result)));
             else
                 approvalWaiting_ = true;
         }
@@ -300,7 +300,8 @@ private:
         auto& slots = batch->second;
         for (auto it = slots.begin(); it != slots.end();) {
             const auto& tool = calls_.at(it->first).tool;
-            const auto scrub = !isBotTool(tool) || tool == "inspect_attachment" ? store_.redactor(message_.bot) : store_.sharedRedactor();
+            const auto scrub = !isBotTool(tool) || tool == "inspect_attachment" ? store_.secretStorage.redactor(message_.bot)
+                                                                                : store_.secretStorage.sharedRedactor();
             const auto& result = it->second;
             Transaction transaction(store_.db);
             saveSlot(it->first, result ? scrub.record(result->value) : Json(nullptr));

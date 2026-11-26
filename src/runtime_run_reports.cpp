@@ -48,7 +48,7 @@ RunEvidence Runtime::Components::RunReports::fetchRunEvidence(const TaskData& ta
         evidence.availability = RunEvidence::Availability::ReportUnavailable;
         evidence.detail = error.what();
     }
-    const auto scrub = db.redactor(task.botId);
+    const auto scrub = db.secretStorage.redactor(task.botId);
     evidence.report = scrub.text(evidence.report);
     evidence.detail = scrub.text(evidence.detail);
     if (scrub.text(evidence.itemId) != evidence.itemId) evidence.itemId.clear();

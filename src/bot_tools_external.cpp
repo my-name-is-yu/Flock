@@ -292,10 +292,10 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
         }
     } else if (call.tool == "skill_read") {
         const auto [root, relative] = skillFile(ctx, *resource, args, path);
-        content = readToolFile(root, relative, sharedRedactor());
+        content = readToolFile(root, relative, secretStorage.sharedRedactor());
     } else
         content = attachments.inspectAttachment(ctx.bot, ctx.messageId, args);
-    const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();
+    const auto scrub = call.tool == "inspect_attachment" ? secretStorage.redactor(ctx.bot) : secretStorage.sharedRedactor();
     if (call.tool == "web_fetch" && content.value("truncated", false)) content["text"] = scrub.text(field(content, "text"), true);
     auto data = scrub.payload(content);
     if (call.tool == "web_search" && data.contains("results")) {

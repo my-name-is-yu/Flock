@@ -103,7 +103,8 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                   runJson(context.run), intent});
             auto pending = prResult(request.operationId, "pending");
             pending["reason"] = reason;
-            journal(context.taskId, "git_mutation", sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
+            journal(context.taskId, "git_mutation",
+                    secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
                 throw Conflict("This PR target belongs to another task");
@@ -138,7 +139,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
 
     const auto run = saved.json(3);
     const auto task = load(context.taskId);
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     std::string_view state = rejected ? "failed" : "ambiguous";
     Id number = 0;
     std::string url;
@@ -230,6 +231,6 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
          {status, link ? Json(number) : Json(nullptr), link ? Json(url) : Json(nullptr), operation});
     exec("UPDATE pr_review_items SET status=? WHERE id=?", {link ? "linked" : "rejected", item.itemId});
     journal(item.taskId, "git_mutation",
-            sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));
+            secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, prResult(operation, status, number, url))));
 }
 }

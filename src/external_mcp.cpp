@@ -47,7 +47,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
     Transaction tx(db.db);
     const auto actor = db.sessionActor(person);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
-    db.sharedRedactor().requirePublic({person, bots});
+    db.secretStorage.sharedRedactor().requirePublic({person, bots});
     ExternalMcpCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
     db.exec("INSERT INTO external_mcp_connections VALUES(?,?,?)",
             {credential.connectionId, actor.id, connector_credentials::digest(credential.bearerToken)});
@@ -104,7 +104,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
     }
     if (db.botPaused(bot)) throw BotPaused{};
 
-    const auto scrub = db.sharedRedactor();
+    const auto scrub = db.secretStorage.sharedRedactor();
     scrub.requirePublic(requestId);
     const auto request = redactConnectionTokens(scrub.text(text));
     Intake item;
@@ -179,7 +179,7 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
     Transaction tx(db.db, Transaction::Mode::read);
     const auto owner = authorizeTask(connection, taskId);
     const auto task = db.load(taskId);
-    const auto scrub = db.redactor(owner.bot);
+    const auto scrub = db.secretStorage.redactor(owner.bot);
     const auto publicText = [&](std::string_view text) { return redactConnectionTokens(scrub.text(text)); };
     Json data{{"taskId", taskId},    {"bot", owner.bot},  {"status", taskStateName(task.state)},
               {"question", nullptr}, {"result", nullptr}, {"sessionRun", nullptr}};

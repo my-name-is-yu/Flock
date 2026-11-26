@@ -235,7 +235,8 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
         if (relative == ".") relative.clear();
         return searchWorkspace(root, relative, toolText(args, "query", 256));
     }
-    if (call.tool == "workspace_read_file") return readToolFile(root, relativeToolPath(toolText(args, "path", 1024)), sharedRedactor());
+    if (call.tool == "workspace_read_file")
+        return readToolFile(root, relativeToolPath(toolText(args, "path", 1024)), secretStorage.sharedRedactor());
     if (call.tool == "workspace_write_file") {
         const auto data = toolText(args, "text", maxFileBytes, true);
         writeFile(root, relativeToolPath(toolText(args, "path", 1024)), data);

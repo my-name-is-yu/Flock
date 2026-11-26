@@ -140,7 +140,7 @@ public:
             if (!cursor.empty() && !batch.empty()) omitEmitted(batch, cursor);
         }
         const bool catalogTruncated = !progress.at("catalog").empty();
-        const auto scrub = store_.sharedRedactor();
+        const auto scrub = store_.secretStorage.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
         const auto scanLimit = std::min(searchCandidateLimit, batch.size());
@@ -191,7 +191,7 @@ public:
             auto& items = result["sessions"];
             auto scopes = Json::array();
             if (anchor) scopes.push_back(issue(RefKind::session, anchor->target, sessionScope));
-            const auto latestScrub = store_.sharedRedactor();
+            const auto latestScrub = store_.secretStorage.sharedRedactor();
             const auto unsearched =
                 std::ranges::find_if(incomplete, [&](const SessionTarget& target) { return permitted(target, false, connected); });
             bool truncated = catalogTruncated || skippedSlowCandidate || unsearched != incomplete.end();
@@ -349,7 +349,7 @@ public:
         if (evidence.empty()) return;
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db, Transaction::Mode::read);
-        const auto scrub = store_.sharedRedactor();
+        const auto scrub = store_.secretStorage.sharedRedactor();
         for (const auto& [result, resourceAllowed, dispatched] : evidence) {
             auto saved = std::move(*result);
             const auto allowed = resourceAllowed && std::ranges::all_of(saved.at("sessions"), [&](const Json& token) {
@@ -603,7 +603,7 @@ JOIN json_each(?3) target ON target.value=entry.value
         Transaction transaction(store_.db);
         if (!permitted(session)) return scopedResult(failure(unavailable));
         Json result{{"ok", true}, {"truncated", false}, {"nextCursor", nullptr}};
-        format(*value, store_.sharedRedactor(), result);
+        format(*value, store_.secretStorage.sharedRedactor(), result);
         auto scopes = Json::array({issue(RefKind::session, session.target, session.payload)});
         transaction.commit();
         return scopedResult(std::move(result), std::move(scopes));
@@ -625,7 +625,7 @@ JOIN json_each(?3) target ON target.value=entry.value
         }
         SessionEventFilter filter{kind, filters.from, filters.to, limit, after, {}};
         if (!filters.query.empty()) {
-            const auto scrub = store_.sharedRedactor();
+            const auto scrub = store_.secretStorage.sharedRedactor();
             filter.matchText = [scrub, query = filters.query](const SessionEvent& item) {
                 return session_read::contains(scrub.text(item.text, item.textTruncated), query) ||
                        session_read::contains(scrub.text(item.title), query);

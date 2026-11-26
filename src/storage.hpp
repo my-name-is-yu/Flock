@@ -3,6 +3,8 @@
 #include "attachment_storage.hpp"
 #include "outbox_storage.hpp"
 #include "run_ref_storage.hpp"
+#include "secret_storage.hpp"
+#include "web_identity_state.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
@@ -132,17 +134,6 @@ struct ConversationModelCheckpoint {
     std::variant<std::vector<ModelCall>, ConversationModelFailure> outcome;
 };
 
-class SecretStore {
-public:
-    explicit SecretStore(const std::filesystem::path& stateDirectory);
-    ~SecretStore();
-    SecretStore(const SecretStore&) = delete;
-    void insert(const SecretRef&, std::string_view value);
-    std::string read(const SecretRef&) const;
-private:
-    int stateDirectory_;
-};
-
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 std::string redactT3Tokens(std::string);
 
@@ -198,15 +189,14 @@ struct Store::Impl : Database {
     const std::filesystem::path path;
     const MemorySeed memorySeed;
     const AutomationModelResolver automationModel;
-    SecretStore secrets{path.parent_path()};
+    SecretStorage secretStorage{*this, path.parent_path()};
     OutboxStorage outboxStorage{*this};
     AttachmentStorage attachments{*this};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
     std::map<std::string, std::shared_ptr<LocalMachine>, std::less<>> localMachines;
     std::vector<std::string> rootPeople;
-    WebIdentityResolver resolveWebIdentity;
-    bool liveInteractiveRoles = false;
+    WebIdentityState webIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     std::mutex sessionQueueCancellationMutex;
@@ -283,7 +273,6 @@ struct Store::Impl : Database {
     void processDueAutomation(Id, Seconds now, bool skip = false);
     static void applyPlannerModel(Json& config, const PlannerModel&);
     Json automationRoute(std::string_view bot, Json routing) const;
-    SecretRedactor sharedRedactor() const;
     Statement actionablePrReviews(std::string_view bot) const;
     Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
@@ -313,8 +302,6 @@ struct Store::Impl : Database {
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
                     GitWatchStart = GitWatchStart::operationIntent);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const TaskData& task);
-    std::vector<std::string> gitCredentials;
-    Id gitRedactionEpoch = 0;
     void gitInboxItem(const TaskData& task, std::string_view key, std::string_view url, std::string_view title, std::string_view prompt);
     void insertPrReview(const TaskData& task, std::string_view url, std::string_view title, std::string_view prompt,
                         std::string_view gitKey, std::string_view operationId = {}, const Json& candidates = Json::array());
@@ -323,7 +310,6 @@ struct Store::Impl : Database {
     void approveMessageModelCall(const Person&, std::string_view bot, Id message, Id pause);
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
-    SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     struct CompletedToolCall {
         Json value;

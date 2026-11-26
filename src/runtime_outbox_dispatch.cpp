@@ -157,7 +157,7 @@ bool Runtime::Components::OutboxDispatch::assignedRunMatches(const TaskData& tas
 
 Runtime::Components::OutboxDispatch::DeliveryOutcome
 Runtime::Components::OutboxDispatch::classifyDelivery(const TaskData& task, const Outbox& action, Delivery& outcome, bool reply) {
-    const auto scrub = db.redactor(task.botId);
+    const auto scrub = db.secretStorage.redactor(task.botId);
     if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
         outcome = {Delivery::Kind::Unknown, {}, "T3 returned a protected Run identifier"};
     outcome.detail = scrub.text(outcome.detail);
@@ -258,7 +258,7 @@ void Runtime::Components::OutboxDispatch::applyDelivery(Id id, const Outbox& act
             if (gateway != action.command.environmentId) outcome.run.gatewayEnvironmentId = std::move(gateway);
         }
         if (!outcome.launchWarning.empty()) {
-            task.launchWarning = db.redactor(task.botId).text(outcome.launchWarning);
+            task.launchWarning = db.secretStorage.redactor(task.botId).text(outcome.launchWarning);
             db.journal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
         }
         const bool cancelling = task.state == TaskState::cancelling;
@@ -454,7 +454,7 @@ void Runtime::Components::OutboxDispatch::deliver(const TaskData& task, Outbox a
             }
         }
         if (sendsWork) {
-            const auto scrub = db.redactor(cmd.ownerBotId);
+            const auto scrub = db.secretStorage.redactor(cmd.ownerBotId);
             if (task.workflow && scrub.text(task.workflow->inputArtifactVersion) != task.workflow->inputArtifactVersion)
                 return applyDelivery(
                     id, action, {Delivery::Kind::Settings, {}, "The pinned workflow artifact version contains a protected value", true});
@@ -634,7 +634,7 @@ void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std:
     SessionPrompts::WorkPrompt prompt;
     if (tool == CommandTool::follow_up) {
         prompt = prompts.workPrompt(task, event, id.size());
-        const auto scrub = db.redactor(task.botId);
+        const auto scrub = db.secretStorage.redactor(task.botId);
         redactInstructions(prompt.pending, scrub);
         instruction += prompt.instruction;
         instruction = scrub.text(instruction);
@@ -665,7 +665,7 @@ void Runtime::Components::OutboxDispatch::queueAction(TaskData& task, const std:
             action.commit = OutboxCommit{*task.requestedCommit, true};
             instruction = commit_check::instructions(instruction, action.commit->expected);
         }
-        action.instructionBase = db.redactor(task.botId).text(instruction);
+        action.instructionBase = db.secretStorage.redactor(task.botId).text(instruction);
     } else
         cmd.instruction = std::move(instruction);
     outboxStorage.insertOutbox(taskId, action);

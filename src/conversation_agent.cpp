@@ -307,7 +307,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
                    {"currentRevision", row.number(5)},
                    {"truncated", decoded.truncated}};
     if (!decoded.source.is_null()) result["run"] = std::move(decoded.source);
-    return redactor(message.bot).record(std::move(result));
+    return secretStorage.redactor(message.bot).record(std::move(result));
 }
 
 namespace {
@@ -346,7 +346,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
                     args = Json::object();
                     result = {{"ok", false}, {"error", "Memory access denied"}};
                 } else {
-                    const auto shared = sharedRedactor();
+                    const auto shared = secretStorage.sharedRedactor();
                     args = shared.record(std::move(args));
                     result = shared.record(std::move(result));
                 }
@@ -376,10 +376,10 @@ Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json 
                           {"currentTime", now},
                           {"replyTo", nullptr},
                           {"turn", conversationSteps(message, step, images)},
-                          {"gitEvent", sharedRedactor().record(message.routing.at("gitEvent"))}};
+                          {"gitEvent", secretStorage.sharedRedactor().record(message.routing.at("gitEvent"))}};
         return {{"task", Json::object()}, {"event", std::move(event)}, {"history", Json::array()}};
     }
-    const auto scrub = redactor(message.bot);
+    const auto scrub = secretStorage.redactor(message.bot);
     Json tasks = Json::array();
     std::set<Id> listed;
     const bool web = message.channelScope.empty();
@@ -778,7 +778,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         while (pending.next()) steps.push_back(static_cast<int>(pending.number(0)));
         for (const auto step : steps)
             saveTurnResults(message.id, step,
-                            Json::array({redactor(message.bot)
+                            Json::array({secretStorage.redactor(message.bot)
                                              .record({{"ok", false},
                                                       {"delivery", "not_accepted"},
                                                       {"error", "The turn ended before the T3 Session message was sent."}})}));
@@ -826,7 +826,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         linked = message.routing.at("gitEvent").at("taskId").get<Id>();
     else if (touched.size() == 1)
         linked = *touched.begin();
-    const auto scrub = redactor(message.bot);
+    const auto scrub = secretStorage.redactor(message.bot);
     const ConversationReplyEntry entry{.replyToMessageId = message.id,
                                        .text = scrub.text(text),
                                        .status = effectStatus(actions),
@@ -860,9 +860,9 @@ Person Store::Impl::turnActor(const Message& message) {
         }
     }
     case PrincipalSource::web: {
-        if (!resolveWebIdentity) return {};
+        if (!webIdentity.resolve) return {};
         try {
-            if (const auto root = resolveWebIdentity(admitted.id)) return {admitted.id, *root};
+            if (const auto root = webIdentity.resolve(admitted.id)) return {admitted.id, *root};
         } catch (const std::exception&) {
             return {};
         }

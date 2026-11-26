@@ -214,8 +214,8 @@ bool Store::Impl::t3EnvironmentConnected(std::string_view environment) {
 }
 
 Person Store::Impl::sessionActor(std::string_view person) {
-    if (resolveWebIdentity) {
-        if (const auto root = resolveWebIdentity(person)) return {std::string(person), *root};
+    if (webIdentity.resolve) {
+        if (const auto root = webIdentity.resolve(person)) return {std::string(person), *root};
     } else if (person == localOwner.id && !Policy(*this).requiresIdentity())
         return localOwner;
     return {};
@@ -301,7 +301,7 @@ JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND
     if (const auto message = replay()) return message;
     if (!origin || !connected(origin->target.environmentId)) throw Conflict("This Session is unavailable through your T3 connection");
     if (!policy.allows(bot, Resource::sessionRead(origin->target.environmentId, thread))) origin->title.clear();
-    const auto scrub = db.sharedRedactor();
+    const auto scrub = db.secretStorage.sharedRedactor();
     for (const std::string_view id :
          {std::string_view(bot), std::string_view(origin->target.environmentId), std::string_view(thread), std::string_view(requestId)}) {
         scrub.requirePublic(id);
@@ -430,7 +430,7 @@ FROM ancestry a JOIN messages m ON m.id=a.source WHERE m.person_id=?2
                 if (invitee.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
                 if (invitee.string(2) == "removed") throw Conflict("The person removed this Bot from the Session");
             }
-            const auto scrub = sharedRedactor();
+            const auto scrub = secretStorage.sharedRedactor();
             for (const auto id : std::array<std::string_view, 4>{bot, message.bot, target.environmentId, target.threadId}) {
                 scrub.requirePublic(id);
                 if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session invitation identifier");
@@ -453,7 +453,7 @@ FROM ancestry a JOIN messages m ON m.id=a.source WHERE m.person_id=?2
 
         return finish([&] {
             const auto sender = authorize();
-            const auto scrub = sharedRedactor();
+            const auto scrub = secretStorage.sharedRedactor();
             const auto safeNote = redactT3Tokens(scrub.text(note));
             const auto title = bounded(redactT3Tokens(scrub.text(metadata->title)), 512);
             const auto inviterName = redactT3Tokens(scrub.text(message.routing.at("config").value("botDisplayName", message.bot)));

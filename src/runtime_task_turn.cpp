@@ -72,7 +72,7 @@ std::vector<std::string> Runtime::Components::TaskTurn::available(const TaskData
 void Runtime::Components::TaskTurn::recordFailure(TaskData& task, const Json& event, std::string_view detail, bool transient,
                                                   FailureCause cause) {
     const auto attempts = event["failures"].get<int>() + 1;
-    const auto why = bounded(db.redactor(task.botId).text(std::string(detail)), 2048);
+    const auto why = bounded(db.secretStorage.redactor(task.botId).text(std::string(detail)), 2048);
     db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?", {attempts, transient ? clock() + (1 << (attempts - 1)) : 0, event["id"]});
     db.journal(task.id, "model_failure", {{"eventId", event["id"]}, {"attempt", attempts}, {"text", why}});
     task.feedback = why;

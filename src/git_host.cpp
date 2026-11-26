@@ -207,7 +207,7 @@ GitRepository GitRepository::parse(std::string_view host, std::string_view repo)
 Json Store::Impl::saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result) {
     std::lock_guard lock(mutex);
     Transaction tx(db);
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     scrub.requirePublic(target);
     exec("INSERT INTO git_task_reads(task_id,invocation,tool,target,result) VALUES(?,?,?,?,?)"
          " ON CONFLICT(task_id,invocation) DO NOTHING",
@@ -243,7 +243,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const TaskData& task, Json&
     if (!refs.empty()) event["gitReadRefs"] = std::move(refs);
     if (!event.contains("gitResults")) return;
 
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     const Policy policy(*this);
     std::set<Id> authorized;
     for (const auto& [id, read] : requested) {
@@ -346,7 +346,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
                 throw Conflict("The task is cancelled");
             context = taskGitContext(task);
         }
-        sharedRedactor().requirePublic(args);
+        secretStorage.sharedRedactor().requirePublic(args);
         if (decision.tool == "git_read_result") return {{"readId", args.at("readId")}};
         if (generation && op == "read") {
             auto previous = query("SELECT id FROM git_task_reads WHERE task_id=? AND invocation=?", {taskId, invocation});
@@ -370,13 +370,13 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
             }
             repos.push_back(candidate.repo);
         }
-        const auto result =
-            sharedRedactor().record({{"ok", true},
-                                     {"host", hostId},
-                                     {"repos", repos},
-                                     {"truncated", truncated},
-                                     {"nextPage", more && page < std::numeric_limits<Id>::max() ? Json(page + 1) : Json(nullptr)}},
-                                    SecretRedactor::Fields::external);
+        const auto result = secretStorage.sharedRedactor().record(
+            {{"ok", true},
+             {"host", hostId},
+             {"repos", repos},
+             {"truncated", truncated},
+             {"nextPage", more && page < std::numeric_limits<Id>::max() ? Json(page + 1) : Json(nullptr)}},
+            SecretRedactor::Fields::external);
         if (generation) return saveTaskGitRead(taskId, invocation, decision.tool, readTarget(decision, hostId), result);
         return result;
     }
@@ -405,7 +405,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
             const auto gate = approveAction(origin, {action, repo.resource()}, key, payload, policyClock());
             if (gate == ApprovalGate::waiting && !turn) {
                 Json resume{{"tool", decision.tool}, {"args", decision.args}, {"invocation", invocation}};
-                if (op != "read") resume["reason"] = sharedRedactor().text(decision.reason);
+                if (op != "read") resume["reason"] = secretStorage.sharedRedactor().text(decision.reason);
                 exec("UPDATE policy_approvals SET resume=? WHERE operation=?", {resume, key});
             }
             transaction.commit();
@@ -438,18 +438,18 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, std::s
             if (decision.tool == "git_read_ci_logs") {
                 const auto maxBytes = args.value("maxBytes", std::size_t{8192});
                 const auto log = host.readCiLogs(context, repo, args.at("jobId"), maxBytes);
-                const auto sanitized = sharedRedactor().text(log.text, log.truncated);
+                const auto sanitized = secretStorage.sharedRedactor().text(log.text, log.truncated);
                 const auto utf8 = Json::parse(Json(sanitized).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
                 const auto excerpt = bounded(utf8, maxBytes);
                 result = {{"ok", true}, {"data", {{"text", excerpt}, {"truncated", log.truncated || excerpt.size() < utf8.size()}}}};
             } else {
                 const auto data = host.call(context, repo, decision);
-                result = {{"ok", true}, {"data", sharedRedactor().payload(data, false, gitResultTextLimit)}};
+                result = {{"ok", true}, {"data", secretStorage.sharedRedactor().payload(data, false, gitResultTextLimit)}};
             }
         } catch (const StorageError&) {
             throw;
         } catch (const std::exception& error) {
-            result = {{"ok", false}, {"error", bounded(sharedRedactor().text(error.what()), gitResultTextLimit)}};
+            result = {{"ok", false}, {"error", bounded(secretStorage.sharedRedactor().text(error.what()), gitResultTextLimit)}};
         }
         if (generation && result.at("ok") == true)
             return saveTaskGitRead(taskId, invocation, decision.tool, readTarget(decision, repo.host, repo.repo), result);
@@ -502,7 +502,7 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
                  {reviewKey, taskId, repo.host, repo.repo, args.at("prNumber"), eventCursor, args.at("reviewers").dump()});
         }
         journal(taskId, "git_mutation",
-                sharedRedactor().record(
+                secretStorage.sharedRedactor().record(
                     gitJournal(context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
         tx.commit();
     }
@@ -517,7 +517,7 @@ ON CONFLICT(inbox_key,reviewer) DO NOTHING
     Transaction tx(db);
     watchMutation.release();
     feedbackMutation.release();
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     if (result.value("ok", false))
         result["data"] = scrub.payload(result.at("data"), false, gitResultTextLimit);
     else
@@ -571,7 +571,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {
-        return {{"ok", false}, {"error", sharedRedactor().text(error.what())}};
+        return {{"ok", false}, {"error", secretStorage.sharedRedactor().text(error.what())}};
     }
 }
 }

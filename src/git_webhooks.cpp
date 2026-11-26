@@ -56,7 +56,7 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     if (!validDigest || !validEventIdentity || !validRelatedIds || !hasValidWebhookTarget(event))
         throw std::invalid_argument("Invalid Git webhook event");
     std::lock_guard lock(p_->mutex);
-    const auto scrub = p_->sharedRedactor();
+    const auto scrub = p_->secretStorage.sharedRedactor();
     scrub.requirePublic({repo.host, repo.repo, event.eventId, event.action, sha});
     Json data{{"kind", event.kind},
               {"action", event.action},
@@ -213,7 +213,7 @@ WHERE json_extract(result,'$.data.id')=?1
         const auto reviewer = field(event, "requestedReviewer");
         event.erase("requestedReviewer");
         const auto action = field(event, "action");
-        const auto scrub = sharedRedactor();
+        const auto scrub = secretStorage.sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event, "summary")), 4000);
         const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + std::to_string(pr.get<Id>());
         auto inboxKey = key;

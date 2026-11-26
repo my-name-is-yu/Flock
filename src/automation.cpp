@@ -124,7 +124,7 @@ Json Store::createAutomation(const Person& actor, const Intake& target, const Js
 Json Store::Impl::createAutomation(const Intake& target, const Json& args, std::string_view author, Seconds now) {
     auto item = automation(args, now);
     const auto routing = route(target);
-    const auto scrub = item.definition.at("kind") == "trigger" ? sharedRedactor() : redactor(target.botId);
+    const auto scrub = item.definition.at("kind") == "trigger" ? secretStorage.sharedRedactor() : secretStorage.redactor(target.botId);
     scrub.requirePublic({target.botId, routing, author, item.definition});
     if (item.definition.contains("eventFilter") && scrub.payload(item.definition["eventFilter"]) != item.definition["eventFilter"])
         throw Conflict("Secret values cannot be used as event filters");
@@ -154,7 +154,7 @@ FROM automations WHERE bot_id=? AND (?=0 OR id<?)
     auto rows = query(sql.c_str(), {bot, before, before});
     Json items = Json::array();
     Id next = 0;
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     std::optional<SecretRedactor> shared;
     while (rows.next()) {
         if (items.size() == 20) {
@@ -163,7 +163,7 @@ FROM automations WHERE bot_id=? AND (?=0 OR id<?)
         }
         auto item = automationView(rows);
         if (item.at("kind") == "trigger") {
-            if (!shared) shared = sharedRedactor();
+            if (!shared) shared = secretStorage.sharedRedactor();
             auto filter = shared->payload(item.at("eventFilter"));
             item.erase("eventFilter");
             item = shared->record(std::move(item));
@@ -224,7 +224,7 @@ std::vector<ScheduleImportError> Store::syncSchedules(std::string_view bot, Seco
 std::vector<ScheduleImportError> Store::Impl::stageConfiguredSchedules(std::string_view bot,
                                                                        const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
     if (botDeleted(bot)) return {};
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     std::map<std::string_view, std::size_t> counts;
     for (const auto& schedule : schedules) ++counts[schedule.id];
 
@@ -406,7 +406,7 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
         if (!skipped && occurrences.count) {
             const auto key = "schedule:" + std::to_string(id) + ":" + std::to_string(occurrences.last);
             if (!query("SELECT 1 FROM automation_firings WHERE dedupe_key=? AND bot_id=?", {key, bot}).next()) {
-                const auto scrub = redactor(bot);
+                const auto scrub = secretStorage.redactor(bot);
                 TimedTaskTrigger trigger{kind == "schedule" ? TimedTriggerKind::schedule : TimedTriggerKind::reminder,
                                          occurrences.last,
                                          occurrences.first,
@@ -448,7 +448,7 @@ SELECT id,bot_id,definition,routing FROM automations WHERE status='active' AND k
 AND json_extract(definition,'$.source')=? ORDER BY id
 )SQL",
                           {source});
-    const auto scrub = p_->sharedRedactor();
+    const auto scrub = p_->secretStorage.sharedRedactor();
     std::optional<Json> payload;
     std::map<std::string, Json> received;
     while (rows.next()) {

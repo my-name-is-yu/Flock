@@ -68,7 +68,7 @@ PolicyOrigin Store::Impl::policyOrigin(const conversation::Message& message) {
     } else if (channelMessageAuthorized(message.id, message.bot)) {
         const auto& id = message.admittedActor.id;
         const bool canSignIn =
-            resolveWebIdentity ? resolveWebIdentity(id).has_value() : id == localOwner.id && !Policy(*this).requiresIdentity();
+            webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !Policy(*this).requiresIdentity();
         if (canSignIn) origin.requester = id;
     }
     return origin;
@@ -194,7 +194,7 @@ ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resour
     Policy policy(*this);
     const auto action = actionName(resource.action);
     const auto deny = [&](std::string_view reason) {
-        auto details = sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
+        auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
         policy.audit(Person{}, origin.bot, "action_denied", details);
         if (origin.task) journal(origin.task, "policy_denied", details);
         return ApprovalGate::denied;
@@ -234,9 +234,9 @@ AND (anchor>=? OR requester='' OR ?='')
     const auto result = policy.check(origin.bot, resource);
     if (result == PolicyResult::allow) return ApprovalGate::allow;
     if (origin.requester.empty()) return deny("no_person_requester");
-    if (sharedRedactor().text(origin.requester) != origin.requester) return deny("protected_requester");
+    if (secretStorage.sharedRedactor().text(origin.requester) != origin.requester) return deny("protected_requester");
     if (!currentPolicyApproval(origin.turn, origin.task, origin.revision, origin.generation, operation)) return ApprovalGate::stale;
-    const auto scrub = sharedRedactor();
+    const auto scrub = secretStorage.sharedRedactor();
     if (scrub.text(resource.target) != resource.target) return deny("protected_target");
     auto preview = [&](auto&& self, Json value) -> Json {
         if (value.is_object()) {
@@ -292,7 +292,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
                      {item.itemId, item.botId});
     if (!row.next()) throw DecisionUnavailable{};
     Policy policy(*this);
-    const auto currentActor = currentApprovalActor(policy, resolveWebIdentity, liveInteractiveRoles, actor);
+    const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     const bool nextTime = choice == "allow_next_time";
     const bool saveRule = nextTime || choice == "always_allow";
@@ -329,7 +329,7 @@ WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
 )SQL",
                       {bot});
     const Policy policy(*this);
-    const auto currentActor = currentApprovalActor(policy, resolveWebIdentity, liveInteractiveRoles, actor);
+    const auto currentActor = currentApprovalActor(policy, webIdentity.resolve, webIdentity.liveInteractiveRoles, actor);
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     auto cards = Json::array();
     while (rows.next()) {
@@ -367,7 +367,7 @@ WHERE a.bot=? AND a.status IN ('pending','expired') ORDER BY a.id DESC
                 item["conversationBotId"] = source.string(0);
             }
         }
-        cards.push_back(sharedRedactor().record(std::move(item)));
+        cards.push_back(secretStorage.sharedRedactor().record(std::move(item)));
     }
     return cards;
 }

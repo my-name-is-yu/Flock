@@ -96,7 +96,7 @@ bool closed(std::string_view status) {
 Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {
     auto owner = query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?", {id, bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     const bool stopping = owner.number(0);
     Json result = {{"ok", true},
                    {"workflowId", id},
@@ -200,7 +200,7 @@ Id Store::Impl::startWorkflow(Id message, const Json& args, std::string_view bot
     if (environment.empty()) throw Conflict("Choose a connected T3 environment for this workflow");
     auto destination = routing;
     destination["environmentId"] = environment;
-    const auto scrub = redactor(bot);
+    const auto scrub = secretStorage.redactor(bot);
     scrub.requirePublic({bot, destination});
     const auto safe = scrub.record(args, SecretRedactor::Fields::external);
     const auto stages = stageDefinitions(safe);
@@ -253,7 +253,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     }
 
     if (stopping) throw Conflict("Workflow is stopping");
-    const auto instruction = redactor(bot).text(conversation_storage::text(args, "instruction", 8000, true));
+    const auto instruction = secretStorage.redactor(bot).text(conversation_storage::text(args, "instruction", 8000, true));
     auto stage = query("SELECT s.task_id,s.status,EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id"
                        " AND d.stage_id=s.stage_id) FROM workflow_stages s WHERE s.workflow_id=? AND s.stage_id=?",
                        {id, target});
@@ -315,7 +315,7 @@ void Store::Impl::materializeWorkflowStages() {
         const auto spec = ready.json(1);
         const auto stage = spec.at("stageId").get<std::string>();
         const auto bot = ready.string(2);
-        const auto scrub = redactor(bot);
+        const auto scrub = secretStorage.redactor(bot);
         const auto routing = ready.json(3);
         const auto request = scrub.text(field(spec, "request"));
         std::vector<OutboxSource> sources;
