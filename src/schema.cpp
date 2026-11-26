@@ -1,8 +1,10 @@
-#include "storage.hpp"
+#include "database.hpp"
 #include "flock/types.hpp"
 
 #include <string>
 #include <utility>
+
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -532,7 +534,7 @@ CREATE TABLE managed_web_pending(
 }
 }
 
-void Store::Impl::openSchema() {
+void Database::openSchema() {
     exec("PRAGMA foreign_keys=ON");
     exec("PRAGMA synchronous=FULL");
     const auto format = [&] {

@@ -1,4 +1,5 @@
 #pragma once
+#include "database.hpp"
 #include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
@@ -64,27 +65,6 @@ struct ModelBudget {
     Id initialLimit;
 };
 
-class StorageError : public std::runtime_error {
-public:
-    explicit StorageError(sqlite3* db);
-    bool contended() const { return code_ == SQLITE_BUSY || code_ == SQLITE_LOCKED; }
-private:
-    int code_;
-};
-
-class Statement {
-public:
-    Statement(sqlite3*, const char*, const Json& values);
-    ~Statement() { sqlite3_finalize(stmt_); }
-    Statement(const Statement&) = delete;
-    bool next();
-    bool null(int col) const { return sqlite3_column_type(stmt_, col) == SQLITE_NULL; }
-    Id number(int col) const { return sqlite3_column_int64(stmt_, col); }
-    std::string string(int col) const;
-    Json json(int col) const { return Json::parse(string(col)); }
-private:
-    sqlite3_stmt* stmt_ = nullptr;
-};
 std::string field(const Json&, std::string_view);
 inline bool hasDestinationSelector(const Json& args) {
     return args.is_object() && (args.contains("destination") || args.contains("environmentId") || args.contains("projectId") ||
@@ -178,8 +158,6 @@ struct ConversationMessageEntry;
 struct ConversationReplyEntry;
 enum class ConversationReplyRoute;
 struct SessionStopResult;
-enum class JournalKind;
-struct JournalKeys;
 struct TaskRevisionEntry;
 struct DeliveredInstructionEntry;
 struct UserAnswerEntry;
@@ -215,12 +193,10 @@ struct GitPrKey {
     auto operator<=>(const GitPrKey&) const = default;
 };
 
-struct Store::Impl {
-    sqlite3* db = nullptr;
+struct Store::Impl : Database {
     const std::filesystem::path path;
     const MemorySeed memorySeed;
     const AutomationModelResolver automationModel;
-    mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
     std::map<ChannelKind, ChannelConnector> channels;
@@ -232,7 +208,6 @@ struct Store::Impl {
     std::mutex deliveryMutex;
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
-    void openSchema();
     bool botDeleted(std::string_view bot) const;
     bool botPaused(std::string_view bot) const;
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
@@ -361,12 +336,6 @@ struct Store::Impl {
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path, MemorySeed, AutomationModelResolver);
-    ~Impl();
-    Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
-    void exec(const char*, const Json& args = Json::array()) const;
-    Id dataVersion() const;
-    std::pair<Id, Id> changeStamp() const;
-    Id last() const { return sqlite3_last_insert_rowid(db); }
     TaskData load(Id) const;
     TaskView taskDetails(Id, bool includeBlocker) const;
     TaskView sessionTask(Id) const;
@@ -564,27 +533,9 @@ struct Store::Impl {
     bool prepareOutbox(const Outbox&);
     void unlockQuestion(TaskData&, std::string_view reason);
 private:
-    Id writeJournal(std::optional<Id>, JournalKind, const Json&, const JournalKeys&, std::optional<std::string_view> conversationBot = {});
     Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
 };
 
 std::optional<InboxKind> inboxWaitKind(WaitReason reason);
 
-class Transaction {
-public:
-    enum class Mode { write, read };
-    explicit Transaction(sqlite3* db, Mode mode = Mode::write) : db_(db) {
-        Statement(db_, mode == Mode::write ? "BEGIN IMMEDIATE" : "BEGIN", Json::array()).next();
-    }
-    ~Transaction() {
-        if (!done_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-    }
-    void commit() {
-        Statement(db_, "COMMIT", Json::array()).next();
-        done_ = true;
-    }
-private:
-    sqlite3* db_;
-    bool done_ = false;
-};
 }

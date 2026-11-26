@@ -35,7 +35,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -45,45 +44,6 @@
 namespace flockv0 {
 namespace {
 constexpr int initialWorkAllowance = 3;
-constexpr std::chrono::milliseconds storageBusyTimeout{4000};
-
-[[noreturn]] void sqlError(sqlite3* db) {
-    throw StorageError(db);
-}
-}
-StorageError::StorageError(sqlite3* db) : std::runtime_error(sqlite3_errmsg(db)), code_(sqlite3_errcode(db) & 0xff) {}
-
-Statement::Statement(sqlite3* db, const char* sql, const Json& values) {
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) sqlError(db);
-    try {
-        int i = 0;
-        for (const auto& value : values) {
-            ++i;
-            int rc;
-            if (value.is_null())
-                rc = sqlite3_bind_null(stmt_, i);
-            else if (value.is_number_integer())
-                rc = sqlite3_bind_int64(stmt_, i, value.get<Id>());
-            else {
-                const auto encoded = value.is_string() ? value.get<std::string>() : value.dump();
-                rc = sqlite3_bind_text(stmt_, i, encoded.data(), static_cast<int>(encoded.size()), SQLITE_TRANSIENT);
-            }
-            if (rc != SQLITE_OK) sqlError(db);
-        }
-    } catch (...) {
-        sqlite3_finalize(stmt_);
-        throw;
-    }
-}
-bool Statement::next() {
-    const int rc = sqlite3_step(stmt_);
-    if (rc == SQLITE_ROW) return true;
-    if (rc == SQLITE_DONE) return false;
-    sqlError(sqlite3_db_handle(stmt_));
-}
-std::string Statement::string(int col) const {
-    const auto* data = sqlite3_column_text(stmt_, col);
-    return data ? std::string(reinterpret_cast<const char*>(data), sqlite3_column_bytes(stmt_, col)) : std::string{};
 }
 Seconds unixTime() {
     using namespace std::chrono;
@@ -132,34 +92,9 @@ RunRef runRef(const Json& data) {
 
 Store::Impl::Impl(std::filesystem::path file, MemorySeed seed, AutomationModelResolver model)
     : path(std::move(file)), memorySeed(std::move(seed)), automationModel(std::move(model)) {
-    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
-    const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
-    try {
-        if (rc != SQLITE_OK) sqlError(db);
-        sqlite3_busy_timeout(db, storageBusyTimeout.count());
-        const auto deadline = std::chrono::steady_clock::now() + storageBusyTimeout;
-        for (;;) {
-            try {
-                openSchema();
-                break;
-            } catch (const StorageError& error) {
-                // SQLite can skip the busy handler while a competing connection switches to WAL.
-                if (!error.contended() || std::chrono::steady_clock::now() >= deadline) throw;
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        }
-    } catch (...) {
-        sqlite3_close(db);
-        throw;
-    }
+    open(path);
 }
 
-Store::Impl::~Impl() {
-    sqlite3_close(db);
-}
-void Store::Impl::exec(const char* sql, const Json& args) const {
-    query(sql, args).next();
-}
 Id Store::Impl::waitAnchor(Id task, Id wait) const {
     auto row = query("SELECT id FROM journal WHERE task_id=? AND kind='waiting' AND conversation_bot_id IS NULL"
                      " AND wait_id=? ORDER BY id DESC LIMIT 1",
@@ -343,16 +278,6 @@ Store::Store(std::filesystem::path db, MemorySeed seed, AutomationModelResolver 
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const {
     return p_->path;
-}
-
-Id Store::Impl::dataVersion() const {
-    auto version = query("PRAGMA data_version");
-    return version.next() ? version.number(0) : 0;
-}
-
-std::pair<Id, Id> Store::Impl::changeStamp() const {
-    std::lock_guard lock(mutex);
-    return {sqlite3_total_changes64(db), dataVersion()};
 }
 
 std::pair<Id, Id> Store::changeStamp() const {

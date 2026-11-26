@@ -15,47 +15,6 @@
 namespace flockv0 {
 class RecordDecoder;
 
-enum class JournalKind {
-    waiting,
-    user_answer,
-    send_started,
-    report,
-    run_settled,
-    interrupt_requested,
-    instruction_accepted,
-    instruction_delivered,
-    task_revision,
-    bot_message,
-    read_bot_evidence,
-    pr_review_requested,
-    git_pr_followup_requested,
-    conversation_message,
-    conversation_reply,
-    conversation_budget_approved,
-    completed,
-    cancel_requested,
-    cancelled,
-    tool_error,
-    decision
-};
-
-struct JournalKeys {
-    std::optional<Id> waitId, revisionId;
-    std::optional<WaitReason> waitReason;
-    std::optional<bool> answerInConversation, stopRequested;
-    const RunRef* run = nullptr;
-    std::optional<std::string_view> environmentId, resultRunId, status, actionId;
-    std::optional<Id> messageId;
-    std::optional<int> instructionStep;
-    std::optional<std::string_view> exchangeId, peerMessageId;
-    std::optional<Id> forwardedSourceMessageId, prReviewItemId;
-    std::optional<std::string_view> gitEventId, operationId;
-    std::optional<Id> replyToMessageId, taskQuestionMessageId, waitMessageId;
-    std::optional<std::string_view> conversationRoute, conversationStatus;
-    std::optional<Id> sessionParticipationId, sessionStopId, feedbackEventId;
-    std::optional<std::string_view> workflowOutcome;
-};
-
 struct TaskRevisionEntry {
     Id revisionId, sourceMessageId;
 };

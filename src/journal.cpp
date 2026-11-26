@@ -20,38 +20,6 @@
 
 namespace flockv0 {
 namespace {
-constexpr std::array kinds{
-    std::pair{JournalKind::waiting, std::string_view{"waiting"}},
-    std::pair{JournalKind::user_answer, std::string_view{"user_answer"}},
-    std::pair{JournalKind::send_started, std::string_view{"send_started"}},
-    std::pair{JournalKind::report, std::string_view{"report"}},
-    std::pair{JournalKind::run_settled, std::string_view{"run_settled"}},
-    std::pair{JournalKind::interrupt_requested, std::string_view{"interrupt_requested"}},
-    std::pair{JournalKind::instruction_accepted, std::string_view{"instruction_accepted"}},
-    std::pair{JournalKind::instruction_delivered, std::string_view{"instruction_delivered"}},
-    std::pair{JournalKind::task_revision, std::string_view{"task_revision"}},
-    std::pair{JournalKind::bot_message, std::string_view{"bot_message"}},
-    std::pair{JournalKind::read_bot_evidence, std::string_view{"read_bot_evidence"}},
-    std::pair{JournalKind::pr_review_requested, std::string_view{"pr_review_requested"}},
-    std::pair{JournalKind::git_pr_followup_requested, std::string_view{"git_pr_followup_requested"}},
-    std::pair{JournalKind::conversation_message, std::string_view{"conversation_message"}},
-    std::pair{JournalKind::conversation_reply, std::string_view{"conversation_reply"}},
-    std::pair{JournalKind::conversation_budget_approved, std::string_view{"conversation_budget_approved"}},
-    std::pair{JournalKind::completed, std::string_view{"completed"}},
-    std::pair{JournalKind::cancel_requested, std::string_view{"cancel_requested"}},
-    std::pair{JournalKind::cancelled, std::string_view{"cancelled"}},
-    std::pair{JournalKind::tool_error, std::string_view{"tool_error"}},
-    std::pair{JournalKind::decision, std::string_view{"decision"}},
-};
-
-template <class T> Json sqlValue(const std::optional<T>& value) {
-    return value ? Json(*value) : Json(nullptr);
-}
-
-Json sqlFlag(std::optional<bool> value) {
-    return value ? Json(*value ? 1 : 0) : Json(nullptr);
-}
-
 std::optional<std::string_view> gatewayId(const RunRef& run) {
     if (run.gatewayEnvironmentId.empty()) return std::nullopt;
     return run.gatewayEnvironmentId;
@@ -163,7 +131,7 @@ Json encodeRunReport(const RunReportEntry& report) {
               {"environmentId", report.environmentId},
               {"resultRunId", report.resultRunId},
               {"status", report.status},
-              {"revisionId", sqlValue(report.revisionId)}};
+              {"revisionId", report.revisionId ? Json(*report.revisionId) : Json(nullptr)}};
     if (report.stopRequested) data["stopRequested"] = *report.stopRequested;
     if (const auto* destination = std::get_if<DestinationRunReportDetails>(&report.details)) {
         data["destination"] = destination->name;
@@ -173,54 +141,6 @@ Json encodeRunReport(const RunReportEntry& report) {
     }
     setReportEvidence(data, report.evidence);
     return data;
-}
-
-Id Store::Impl::writeJournal(std::optional<Id> task, JournalKind kind, const Json& data, const JournalKeys& keys,
-                             std::optional<std::string_view> conversationBot) {
-    const auto* run = keys.run;
-    exec(R"SQL(
-INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,wait_id,wait_reason,user_answer_conversation,
-                    action_id,run_environment_id,run_thread_id,run_id,run_gateway_id,result_run_id,run_status,revision_id,stop_requested,
-                    message_id,instruction_step,exchange_id,peer_message_id,forwarded_source_message_id,pr_review_item_id,
-                    git_event_id,operation_id,reply_to_message_id,task_question_message_id,wait_message_id,conversation_route,
-                    conversation_status,session_participation_id,session_stop_id,feedback_event_id,workflow_outcome)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-)SQL",
-         {sqlValue(task),
-          unixTime(),
-          enumName(kinds, kind),
-          data,
-          sqlValue(conversationBot),
-          sqlValue(keys.waitId),
-          keys.waitReason ? Json(waitReasonName(*keys.waitReason)) : Json(nullptr),
-          sqlFlag(keys.answerInConversation),
-          sqlValue(keys.actionId),
-          sqlValue(keys.environmentId),
-          run ? Json(run->threadId) : Json(nullptr),
-          run ? Json(run->runId) : Json(nullptr),
-          run ? sqlValue(gatewayId(*run)) : Json(nullptr),
-          sqlValue(keys.resultRunId),
-          sqlValue(keys.status),
-          sqlValue(keys.revisionId),
-          sqlFlag(keys.stopRequested),
-          sqlValue(keys.messageId),
-          sqlValue(keys.instructionStep),
-          sqlValue(keys.exchangeId),
-          sqlValue(keys.peerMessageId),
-          sqlValue(keys.forwardedSourceMessageId),
-          sqlValue(keys.prReviewItemId),
-          sqlValue(keys.gitEventId),
-          sqlValue(keys.operationId),
-          sqlValue(keys.replyToMessageId),
-          sqlValue(keys.taskQuestionMessageId),
-          sqlValue(keys.waitMessageId),
-          sqlValue(keys.conversationRoute),
-          sqlValue(keys.conversationStatus),
-          sqlValue(keys.sessionParticipationId),
-          sqlValue(keys.sessionStopId),
-          sqlValue(keys.feedbackEventId),
-          sqlValue(keys.workflowOutcome)});
-    return last();
 }
 
 Id Store::Impl::journal(Id task, const Wait& wait) {
@@ -255,7 +175,7 @@ Id Store::Impl::journal(Id task, const DeliveredInstructionEntry& entry) {
                         {{"actionId", entry.actionId},
                          {"messageId", instruction.messageId},
                          {"step", instruction.step},
-                         {"revisionId", sqlValue(entry.revisionId)},
+                         {"revisionId", entry.revisionId ? Json(*entry.revisionId) : Json(nullptr)},
                          {"run", assignedRunJson(entry.run)},
                          {"source", instruction.source ? sourceJson(*instruction.source) : Json(nullptr)}},
                         {.revisionId = entry.revisionId, .messageId = instruction.messageId, .instructionStep = instruction.step});

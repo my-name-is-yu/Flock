@@ -70,7 +70,7 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core STATIC src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
+add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp src/runtime_lifecycle.cpp
