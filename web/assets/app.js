@@ -2418,6 +2418,8 @@ function renderComposer() {
   if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
   const decision = canDecide ? decisions.composer() : null;
   if (!canDecide) {
+    dragDepth = 0;
+    elements.composer.classList.remove('dragover');
     composition = null;
     elements['composer-ghost'].hidden = true;
     elements.message.classList.remove('has-ghost');
@@ -2457,11 +2459,14 @@ function renderComposer() {
     !body.trim() || byteLength(body) > composerLimit(context.data.limits, reply, decision);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   const screenshotError = !busy && !closedReply && screenshots?.error;
+  const needsMessageForImages = !busy && !closedReply && !screenshotError && !notice?.text &&
+    !body.trim() && (screenshots?.images?.length ?? 0) > 0 && !screenshots?.loading;
   elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
+    (closedReply ? 'This question is closed. You can still copy your reply.' :
+      screenshotError || notice?.text || (needsMessageForImages ? 'Add a message to send images.' : ''));
   elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
-  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
-  elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !!notice?.quiet);
+  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.fading);
+  elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.quiet);
   scheduleNoticeFade(context, notice);
 }
 
@@ -3538,6 +3543,33 @@ elements.message.addEventListener('paste', (event) => {
   if (!files.length || elements.message.readOnly || decisions.composer()) return;
   event.preventDefault();
   void addScreenshots(view, view.composer, view.composer.reply, files);
+});
+let dragDepth = 0;
+const canDropScreenshots = (event) => !elements.message.readOnly && !decisions.composer() &&
+  Array.from(event.dataTransfer?.types ?? []).includes('Files');
+elements.composer.addEventListener('dragenter', (event) => {
+  if (!canDropScreenshots(event)) return;
+  event.preventDefault();
+  dragDepth++;
+  elements.composer.classList.add('dragover');
+});
+elements.composer.addEventListener('dragover', (event) => {
+  if (!canDropScreenshots(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  elements.composer.classList.add('dragover');
+});
+elements.composer.addEventListener('dragleave', () => {
+  if (dragDepth > 0) dragDepth--;
+  if (!dragDepth) elements.composer.classList.remove('dragover');
+});
+elements.composer.addEventListener('drop', (event) => {
+  dragDepth = 0;
+  elements.composer.classList.remove('dragover');
+  if (!canDropScreenshots(event)) return;
+  event.preventDefault();
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  if (files.length) void addScreenshots(view, view.composer, view.composer.reply, files);
 });
 function updateDraft() {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
