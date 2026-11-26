@@ -23,6 +23,9 @@
   <div class="workspace">
     <aside id="navigation" class="sidebar" aria-label="Bot navigation">
       <div class="sidebar-head">
+        <button id="toggle-chat-sidebar" class="icon-button toggle-chat-sidebar wide-only" type="button" aria-controls="navigation" aria-expanded="true" aria-label="Hide Bot list" data-tooltip="Hide Bot list">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
+        </button>
         <h2 id="bots-heading" class="sidebar-title">Bots</h2>
         <button id="new-bot-button" class="icon-button new-bot-button" type="button" aria-label="New Bot" data-tooltip="New Bot" aria-haspopup="dialog">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -66,6 +69,9 @@
         <div class="header-inner">
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button id="show-chat-sidebar" class="icon-button header-menu wide-only" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Show Bot list" data-tooltip="Show Bot list" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
           </button>
           <div id="profile-identity" class="profile-identity header-identity" hidden>
             <button id="profile-avatar-button" class="profile-face profile-face-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" data-tooltip="Bot settings">
@@ -116,9 +122,6 @@
                 </button>
               </div>
             </details>
-            <button id="toggle-chat-sidebar" class="icon-button toggle-chat-sidebar" type="button" aria-controls="navigation" aria-expanded="true" aria-label="Hide Bot list" data-tooltip="Hide Bot list">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
-            </button>
           </div>
         </div>
       </header>

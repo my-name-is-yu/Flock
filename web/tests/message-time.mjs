@@ -411,6 +411,17 @@ async function exercise() {
   const descriptionId = document.getElementById('peer-heading').getAttribute('aria-describedby');
   check(document.getElementById(descriptionId)?.textContent === 'Read-only conversation between Bots',
     'The Bot conversation heading lost its read-only description');
+  const hideList = document.getElementById('toggle-chat-sidebar');
+  const showList = document.getElementById('show-chat-sidebar');
+  hideList.focus();
+  hideList.click();
+  document.getElementById('navigation').getAnimations().forEach(animation => animation.finish());
+  const listButton = showList.getBoundingClientRect();
+  check(document.activeElement === showList &&
+    document.elementFromPoint(listButton.x + listButton.width / 2, listButton.y + listButton.height / 2)?.closest('button') === showList,
+    'Show Bot list did not take focus or was covered by the Back button');
+  showList.click();
+  check(document.activeElement === hideList, 'Showing the Bot list dropped keyboard focus');
 
   const forwardedTime = eventTime(forwarded);
   const source = forwarded.querySelector('.peer-forwarded-message');
