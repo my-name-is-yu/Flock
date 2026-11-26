@@ -233,6 +233,8 @@ if(BUILD_TESTING)
   add_test(NAME flock_live_evidence_schema COMMAND flock_live_evidence --self-test)
   add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
+  add_test(NAME flock_header_fanout COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/header_fanout.py")
   if(FLOCK_LIVE_TESTS)
     foreach(test flock_live_t3 flock_live_conversation flock_live_evidence)
       add_test(NAME ${test} COMMAND ${test} --live)

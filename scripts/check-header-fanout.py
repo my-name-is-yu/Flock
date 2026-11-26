@@ -64,14 +64,19 @@ def main():
     except (OSError, ValueError) as error:
         parser.exit(1, f"{error}\n")
 
-    violations = sorted(
-        ((name, count) for name, count in counts.items() if count > LIMIT and name not in allowed),
-        key=lambda entry: (-entry[1], entry[0]),
-    )
+    violations = []
+    for name in sorted(counts.keys() | allowed.keys()):
+        count = counts[name]
+        if name in allowed:
+            recorded = allowed[name]
+            if count != recorded:
+                violations.append(f"{name}: measured {count}, recorded {recorded}")
+        elif count > LIMIT:
+            violations.append(f"{name}: measured {count}, limit {LIMIT}")
     if violations:
-        print(f"Project headers above the {LIMIT}-object fan-out limit", file=sys.stderr)
-        for name, count in violations:
-            print(f"  {count:3}  {name}", file=sys.stderr)
+        print("Header fan-out check failed", file=sys.stderr)
+        for violation in violations:
+            print(f"  {violation}", file=sys.stderr)
         return 1
     print(f"Header fan-out passed for {len(counts)} headers across {objects} objects")
     return 0
