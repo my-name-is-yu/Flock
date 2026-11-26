@@ -36,6 +36,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cmake --preset dev -S "$source_dir" -B "$build_dir"
+cmake --preset dev -G 'Unix Makefiles' -S "$source_dir" -B "$build_dir"
 cmake --build "$build_dir" --config Debug
+python3 "$source_dir/scripts/check-header-fanout.py" "$source_dir" "$build_dir" "$source_dir/scripts/header-fanout-allowlist.json"
 ctest --test-dir "$build_dir" --build-config Debug --output-on-failure --no-tests=error
