@@ -30,9 +30,7 @@ struct ModelInput {
     BotNotes notes;
     std::vector<std::string> tools;
     std::string feedback;
-    Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
-    bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
     std::string learningRunId{};
     // Requests with the same scope share a prompt prefix. Sent only as a hashed cache key, never in the prompt.

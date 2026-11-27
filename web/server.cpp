@@ -8,7 +8,6 @@
 #include "flock/avatar_style.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/notifications.hpp"
-#include "flock/peer_conversations.hpp"
 #include "flock/tasks.hpp"
 #include "flock/task_target.hpp"
 #include "flock/git_events.hpp"
@@ -105,11 +104,6 @@ bool acceptsMissingPage(const Request& req) {
 void setViewer(Response& res, const WebCallbacks& callbacks, const Person& person) {
     const Json viewer = web::hasWebIdentities(callbacks) ? Json(person.id) : Json(nullptr);
     res.set_header("X-Flock-Viewer", viewer.dump(-1, ' ', true, Json::error_handler_t::replace));
-}
-
-std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& person) {
-    // Local access shares one principal, so it cannot identify a human author.
-    return web::hasWebIdentities(callbacks) && person.id != localOwner.id ? std::string_view{person.id} : std::string_view{};
 }
 
 struct InputError : std::runtime_error {
@@ -338,7 +332,7 @@ public:
             if (!image) return error(res, 404, "avatar_not_found");
             res.set_content(image->bytes().data(), image->bytes().size(), std::string(image->format().contentType));
         });
-        for (const auto path : {"/api/view", "/api/compactions", "/api/conversation", "/api/peer-conversation", "/api/sessions"}) {
+        for (const auto path : {"/api/view", "/api/compactions", "/api/conversation", "/api/sessions"}) {
             server_.Get(path, [this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res, 400, "invalid_bot");
@@ -349,7 +343,6 @@ public:
                 if (!bot) return error(res, 404, "bot_not_found");
                 try {
                     const auto before = queryId(req, "before", true);
-                    if (req.path == "/api/peer-conversation") return readPeerConversation(req, res, known, actor, id, before);
                     if (req.path == "/api/compactions")
                         return json(res, 200, Policy{store_}.redactSecrets(id, Conversations(store_).compactions(id, before)));
                     if (req.path == "/api/view") {
@@ -449,20 +442,13 @@ public:
 private:
     void changes(const Request& req, Response& res) {
         const auto bot = req.get_param_value("bot");
-        const auto peer = req.get_param_value("peer");
-        if (req.get_param_value_count("bot") > 1 || req.get_param_value_count("peer") > 1 || bot.size() > 1024 || peer.size() > 1024 ||
-            (req.has_param("bot") && bot.empty()) || (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
+        if (req.get_param_value_count("bot") > 1 || bot.size() > 1024 || (req.has_param("bot") && bot.empty()))
             return error(res, 400, "invalid_subscription");
         const auto person = web::person(callbacks_, req);
         Policy policy{store_};
-        if ((!bot.empty() && !policy.allows(person, Action::bot_view, bot)) ||
-            (!peer.empty() && !policy.allows(person, Action::bot_view, peer)))
-            return error(res, 403, "access_denied");
+        if (!bot.empty() && !policy.allows(person, Action::bot_view, bot)) return error(res, 403, "access_denied");
         ChangeFeed::Target target = ChangeFeed::BotList{};
-        if (!peer.empty())
-            target = ChangeFeed::DirectMessage{bot, peer};
-        else if (!bot.empty())
-            target = ChangeFeed::BotView{bot};
+        if (!bot.empty()) target = ChangeFeed::BotView{bot};
         auto subscription = changes_.subscribe({person, std::move(target)});
         if (!subscription) return error(res, 503, "event_stream_unavailable");
         auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
@@ -664,17 +650,6 @@ private:
         return nullptr;
     }
 
-    std::vector<PeerBot> peers(std::string_view bot) const { return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{}; }
-
-    bool hasPeerPermission(std::string_view bot, std::string_view peer) const {
-        return std::ranges::any_of(peers(bot), [&](const PeerBot& entry) { return entry.intake.botId == peer; });
-    }
-
-    bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
-        if (configured && (hasPeerPermission(bot, peer) || hasPeerPermission(peer, bot))) return true;
-        return PeerConversations(store_).hasPeerExchange(bot, peer);
-    }
-
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
         return {{"bots", botList(person)}, {"inbox", Inbox(store_).inbox(person, {})}};
     }
@@ -737,14 +712,6 @@ private:
         return policy.redactSecrets(id, web::botView(store_, bot, changedSessionTasks, &person));
     }
 
-    Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
-        Policy policy{store_};
-        if (!policy.allows(person, Action::bot_view, dm.bot) || !policy.allows(person, Action::bot_view, dm.peer)) return nullptr;
-        const auto known = bots();
-        if (!botById(known, dm.bot) || !canReadPeer(dm.bot, dm.peer, botById(known, dm.peer) != nullptr)) return nullptr;
-        return policy.redactSecrets(dm.peer, policy.redactSecrets(dm.bot, web::peerConversation(store_, dm.bot, dm.peer, 0)));
-    }
-
     Json botList(const Person& person) const {
         auto visible = bots();
         Policy policy{store_};
@@ -753,21 +720,6 @@ private:
                       visible.end());
         auto list = web::botList(store_, visible);
         if (list.empty()) return list;
-        std::set<std::string> known;
-        for (const auto& bot : list) known.insert(web::field(bot, "id"));
-        auto pairs = PeerConversations(store_).peerExchangePairs();
-        for (const auto& id : known) {
-            for (const auto& entry : peers(id)) {
-                const auto& peer = entry.intake.botId;
-                if (known.contains(peer)) pairs.emplace_back(id, peer);
-            }
-        }
-        std::map<std::string, std::set<std::string>> connections;
-        for (const auto& [sender, recipient] : pairs) {
-            if (sender == recipient) continue;
-            if (known.contains(sender) && policy.allows(person, Action::bot_view, recipient)) connections[sender].insert(recipient);
-            if (known.contains(recipient) && policy.allows(person, Action::bot_view, sender)) connections[recipient].insert(sender);
-        }
         for (auto& bot : list) {
             const auto id = web::field(bot, "id");
             bot = redactBot(id, bot);
@@ -781,28 +733,8 @@ private:
                 else
                     *about = bounded(firstLine, 160);
             }
-            auto& entries = bot["peers"] = Json::array();
-            for (const auto& peer : connections[id]) entries.push_back({{"id", peer}});
         }
         return list;
-    }
-
-    void readPeerConversation(const Request& req, Response& res, const Json& known, const Person& actor, std::string_view bot, Id before) {
-        const auto peer = req.get_param_value("peer");
-        if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer) return error(res, 400, "invalid_peer");
-        if (!Policy{store_}.allows(actor, Action::bot_view, peer)) return error(res, 403, "access_denied");
-        const bool configured = botById(known, peer) != nullptr;
-        if (!canReadPeer(bot, peer, configured))
-            return configured ? error(res, 403, "peer_not_allowed") : error(res, 404, "peer_not_found");
-        Id anchor = 0;
-        if (req.has_param("anchor")) {
-            if (req.has_param("before")) return error(res, 400, "invalid_cursor");
-            anchor = PeerConversations(store_).peerMessageAnchor(bot, peer, queryId(req, "anchor", false));
-            if (!anchor) return error(res, 404, "peer_message_not_found");
-        }
-        const auto history =
-            Policy{store_}.redactSecrets(bot, web::peerConversation(store_, bot, peer, before, anchor, verifiedViewer(callbacks_, actor)));
-        json(res, 200, Policy{store_}.redactSecrets(peer, history));
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {

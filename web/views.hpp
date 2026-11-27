@@ -20,7 +20,6 @@ Json botSettings(const Json&);
 void projectMemoryHistoryLinks(Json&);
 Json botView(Store&, const Json&, const std::vector<TaskView>* changedSessionTasks = nullptr, const Person* viewer = nullptr);
 Json conversation(Store&, std::string_view bot, Id before, const Person* viewer = nullptr);
-Json peerConversation(Store&, std::string_view bot, std::string_view peer, Id before, Id anchor = 0, std::string_view viewer = {});
 Json sessions(Store&, std::string_view bot, Id before);
 Json sessionGroups(const std::vector<TaskView>& tasks);
 } // namespace flockv0::web

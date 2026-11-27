@@ -45,7 +45,6 @@ using namespace flockv0;
 
 namespace {
 const Person owner{"owner", true}, alice{"alice"}, bob{"bob"}, reader{"reader"};
-constexpr auto originalCriteria = "Verify the published report";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -128,9 +127,7 @@ struct Script : Model {
             }
             return {"reply", {{"text", "Recorded."}}, "Report the outcome"};
         }
-        if (event.at("kind") == "question" && !event.contains("withdrawnUserQuestion"))
-            return {"ask_user", {{"question", "Which report?"}, {"choices", {"Draft", "Final"}}}, "A choice is needed"};
-        return {"delegate", {{"instruction", "Draft the report"}, {"doneWhen", originalCriteria}}, "Set the completion criteria"};
+        throw std::runtime_error("a task without a conversation called the model");
     }
 };
 
@@ -151,7 +148,8 @@ struct Sessions : T3 {
         Observation result;
         if (run.threadId == "thread-" + questionProject) {
             result.kind = Observation::Kind::Question;
-            result.question = {"fixture-question", {{.id = "report"}}};
+            result.question = {"fixture-question",
+                               {{.id = "report", .prompt = "Which report?", .options = {{"Draft", "Draft"}, {"Final", "Final"}}}}};
         }
         return result;
     }

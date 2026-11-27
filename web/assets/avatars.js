@@ -83,7 +83,6 @@ export function avatarIconSvg(name) {
 export function presenceMotion(presence) {
   switch (presence) {
     case 'queued':
-    case 'peer_waiting':
       return 'waiting';
     case 'stopping':
       return 'thinking';

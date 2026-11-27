@@ -36,5 +36,4 @@ private:
 
 Json responseRequest(const ModelInput&);
 ModelTurn responseDecision(const Json& output, const Json& request);
-bool runModelAcceptance(Model&, const std::string& slug, std::ostream&);
 }

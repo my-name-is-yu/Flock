@@ -15,26 +15,9 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-enum class CompletionEvidenceKind { peer_report, session_read };
-
-struct CompletionEvidence {
-    std::string environmentId, threadId, runId;
-    CompletionEvidenceKind kind;
-    std::optional<std::string> itemId, messageId;
-    bool operator==(const CompletionEvidence&) const = default;
-};
-
-struct PeerCompletion {
-    Id taskId;
-    std::string exchangeId, messageId, botId, requestKind, status;
-    std::vector<CompletionEvidence> evidence;
-};
-
-using CompletionProvenance = std::variant<std::monostate, OutboxSourceRun, PeerCompletion>;
-
 struct TaskCompletion {
     std::string reason, doneWhen;
-    CompletionProvenance provenance;
+    std::optional<OutboxSourceRun> source;
 };
 
 struct FanoutCompletion {

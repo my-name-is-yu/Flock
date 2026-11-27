@@ -33,10 +33,6 @@ Json BotSetupStorage::modelCatalog(const Json& patch) const {
     return loadCatalog && !field(patch, "reasoningEffort").empty() ? loadCatalog() : Json::array();
 }
 
-void BotSetupStorage::refreshPlannerModel(std::string_view bot, Json& config) const {
-    StoreAccess::get(store).automationStorage.refreshPlannerModel(bot, config);
-}
-
 std::optional<Intake> BotSetupStorage::liveIntake(const IntakeResolver& resolve, std::string_view bot, std::string_view text) const {
     if (!save || !resolve) return {};
     try {
@@ -74,49 +70,6 @@ Json BotSetupStorage::apply(std::string_view bot, std::string_view operation, co
           }},
          catalog);
     return {{"ok", true}, {"status", event ? "applied" : "unchanged"}, {"eventId", event}};
-}
-
-std::optional<PolicyOrigin> BotSetupStorage::taskOrigin(const TaskData& task) {
-    if (!save || !task.sourceMessageId) return {};
-    auto& storage = StoreAccess::get(store);
-    auto origin = storage.policyApprovals.taskPolicyOrigin(task);
-    if (!origin.anchor) return {};
-    const auto message = storage.conversationTurns.loadTurnMessage(origin.anchor);
-    if (message.bot == task.botId &&
-        (message.principalSource == conversation::PrincipalSource::trusted ||
-         message.principalSource == conversation::PrincipalSource::web) &&
-        storage.permissions.allows(storage.conversationTurns.turnActor(message), Action::bot_settings, task.botId))
-        return origin;
-    return {};
-}
-
-bool BotSetupStorage::taskAvailable(const TaskData& task) {
-    std::lock_guard lock(database.mutex);
-    return taskOrigin(task).has_value();
-}
-
-bool BotSetupStorage::applyForTask(const TaskData& task, const Json& patch, Seconds now, Id attempt) {
-    const auto catalog = modelCatalog(patch);
-    auto& storage = StoreAccess::get(store);
-    std::lock_guard lock(database.mutex);
-    const auto current = storage.taskRecords.load(task.id);
-    if (current.state != TaskState::deciding || current.generation != task.generation) return false;
-    const auto key =
-        std::string(taskSetupOperation) + std::to_string(task.id) + "/" + std::to_string(task.eventId) + "/" + std::to_string(attempt);
-    if (recorded(key) || database.query("SELECT 1 FROM policy_approvals WHERE operation=? AND status='used'", {key}).next()) return true;
-    const auto origin = taskOrigin(current);
-    if (!origin) throw Conflict("You cannot change this Bot’s settings");
-    validate(task.botId, patch);
-    {
-        Transaction transaction(database.db);
-        const auto gate = storage.policyApprovals.approveAction(*origin, {Action::bot_settings, task.botId}, key, patch, now, false);
-        transaction.commit();
-        if (gate == ApprovalGate::waiting) return false;
-        if (gate != ApprovalGate::allow) throw Conflict(std::string(approvalError(gate)));
-    }
-    apply(task.botId, key, patch, catalog, now, task.id);
-    storage.policyApprovals.consumePolicyApproval(key);
-    return true;
 }
 
 void BotSetupStorage::undo(const Person& actor, std::string_view bot, Id event) {

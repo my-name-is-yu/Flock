@@ -33,7 +33,6 @@ public:
     // Completes with the given report, citing the last Run's saved report as the source when it matches.
     Id completeWithReport(TaskData&, std::string report, std::string reason);
     std::string latestReportText(Id task) const;
-    void saveDecisionCheckpoint(TaskData&, DecisionCheckpoint);
 private:
     Database& database;
     JournalStorage& journalStorage;
@@ -42,4 +41,6 @@ private:
 };
 
 void waitForExternalEvent(TaskData&, const Json& args, Seconds now);
+// When nobody decides what follows a task: a settled Run completes it with its report, and anything else asks the person.
+void settleUndecided(TaskData&, std::string_view reason, TaskRecords&, WaitStorage&, std::string_view detail = {});
 }

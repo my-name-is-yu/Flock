@@ -1,3 +1,4 @@
+#include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
 #include "fake_git.hpp"
@@ -69,13 +70,6 @@ public:
 private:
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
-        if (event.at("kind") == "intake")
-            return {"delegate", {{"instruction", "Push change"}, {"doneWhen", "Open a PR for the pushed branch"}}, {}};
-        if (event.at("kind") == "result") {
-            if (openPullRequest && event.value("gitResults", Json::array()).empty()) return {"git_open_pr", openArgs(), {}};
-            if (openPullRequest) return {"wait_for_event", {{"note", "Waiting for the pull request"}, {"checkAgainAfterMinutes", 5}}, {}};
-            return {"complete", {{"report", "Change checked"}}, {}};
-        }
         const auto& steps = event.at("turn");
         if (event.contains("sessionWake") && event.contains("task")) {
             // The conversation decides what follows a finished Run: open the PR and wait for its events.
@@ -138,7 +132,7 @@ struct Fixture {
     Id task;
     std::optional<T3Connection> sessionConnection;
 
-    Fixture(bool person = true, bool fixPullRequests = true, bool fromSession = false, IntakeResolver liveIntake = {})
+    Fixture(bool fixPullRequests = true, bool fromSession = false, IntakeResolver liveIntake = {})
         : store(directory.path / "state.db"), runtime(
                                                   store, model, sessions, [](std::string_view) { return std::string{}; },
                                                   [&] {
@@ -160,10 +154,12 @@ struct Fixture {
             sessionConnection = connections.authenticate(bearer);
             sessions.askOrigin = SessionTarget{"sandbox", "original-request", {}};
             ask("initial", initialAsk);
-            task = model.createdTask;
-            check(task > 0, "The initial Session ask did not create a task");
-        } else
-            task = TaskIntake(store).submit(request, person ? &testRequester : nullptr);
+        } else {
+            ConversationIntake(store).receive(testRequester, request, "initial", initialAsk);
+            runtime.runConversations();
+        }
+        task = model.createdTask;
+        check(task > 0, "The initial request did not create a task");
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1, "Could not open fixture PR");
     }
@@ -215,7 +211,7 @@ void keepsWorkInOriginatingSession() {
 }
 
 void followsRepeatedFailuresAcrossFiveHeads() {
-    Fixture f(true, true, true);
+    Fixture f(true, true);
     const auto existingReviews = Inbox(f.store).inbox(testRequester, "owner");
     for (int i = 0; i < 5; ++i) {
         const std::string head(40, static_cast<char>('a' + i));
@@ -298,7 +294,7 @@ void followsCurrentChecksAcrossWebhookOrdering() {
 
 void readsLiveFixSettingBeforeSending() {
     bool enabled = true;
-    Fixture f(true, true, false, [&](std::string_view bot, std::string_view) {
+    Fixture f(true, false, [&](std::string_view bot, std::string_view) {
         auto current = intake(std::string(bot));
         current.config["fixPullRequests"] = enabled;
         return current;
@@ -386,12 +382,9 @@ void testGitPrFollowup() {
     waitsForSupervisedApproval();
     rejectsStaleSupervisedApproval(true);
     rejectsStaleSupervisedApproval(false);
-    Fixture disabled(true, false);
+    Fixture disabled(false);
     disabled.notify(failure("disabled"));
     check(!disabled.model.canFix && disabled.sessions.sessionSends.empty() &&
               includes(TaskHistory(disabled.store).history(disabled.task).dump(), "Git notification received"),
           "Disabled setting did not keep report-only behavior");
-    Fixture noRequester(false);
-    noRequester.notify(review("no-requester"));
-    check(!noRequester.model.canFix && noRequester.sessions.sessionSends.empty(), "A PR with no person behind it offered a fix request");
 }

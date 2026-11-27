@@ -1,6 +1,5 @@
 #include "runtime_run_reports.hpp"
 #include "task_run_reports.hpp"
-#include "runtime_session_history.hpp"
 #include "runtime_task_state.hpp"
 #include "runtime_task_updates.hpp"
 #include "task_storage.hpp"
@@ -27,9 +26,8 @@
 
 namespace flockv0 {
 runtime::RunReports::RunReports(Database& database, JournalStorage& journalStorage, TaskEvents& taskEvents, T3& t3, const Policy& policy,
-                                TaskUpdates& updates, SessionHistory& history, const std::function<Seconds()>& clock)
-    : database(database), journalStorage(journalStorage), taskEvents(taskEvents), t3(t3), policy(policy), updates(updates),
-      history(history), clock(clock) {}
+                                TaskUpdates& updates, const std::function<Seconds()>& clock)
+    : database(database), journalStorage(journalStorage), taskEvents(taskEvents), t3(t3), policy(policy), updates(updates), clock(clock) {}
 
 void runtime::RunReports::writeRunReport(TaskData& task, const SettledRunReport& report) {
     const auto entry = runReportEntry(report);
@@ -87,87 +85,5 @@ std::optional<runtime::RunReports::JournalReport> runtime::RunReports::settledSe
     auto data = decodeRunReport(report.number(0), report.json(1));
     if (data.run.threadId != run.threadId || data.run.runId != run.runId) return std::nullopt;
     return JournalReport{report.number(0), std::move(data)};
-}
-
-bool runtime::RunReports::sessionReportUnavailable(const TaskData& task) const {
-    const auto report = settledSessionReport(task);
-    return report && report->data.evidence.availability == RunEvidence::Availability::ReportUnavailable;
-}
-
-std::optional<runtime::RunReports::JournalReport> runtime::RunReports::reportRetry(const TaskData& task, const Json& event) const {
-    if (!hasSettledRun(task) || task.replanning || task.newSessionRequired || task.lastRun->assignment.revisionId != task.currentRevision)
-        return std::nullopt;
-    auto retry = settledSessionReport(task);
-    if (!retry) return std::nullopt;
-    const auto& report = retry->data;
-    if (report.evidence.availability != RunEvidence::Availability::ReportUnavailable || !report.matches(*task.lastRun) ||
-        report.environmentId != task.environmentId || report.resultRunId.empty())
-        return std::nullopt;
-    if (event.at("kind") == "result") {
-        const auto matches = [&](std::string_view key, const Json& value) {
-            const auto saved = event.find(key);
-            return saved != event.end() && *saved == value;
-        };
-        if (!matches("environmentId", report.environmentId) || !matches("run", assignedRunJson(*task.lastRun)) ||
-            !matches("resultRunId", report.resultRunId) || !matches("status", report.status) ||
-            !matches("revisionId", revisionJson(report.revisionId)))
-            return std::nullopt;
-    }
-    auto settled = database.query(R"SQL(
-SELECT id,data FROM journal WHERE task_id=? AND kind='run_settled'
-AND run_environment_id=? AND run_thread_id=? AND run_id=? AND result_run_id=? AND run_status=?
-AND revision_id IS ?
-)SQL",
-                                  {task.id, report.environmentId, report.run.threadId, report.run.runId, report.resultRunId, report.status,
-                                   revisionJson(report.revisionId)});
-    while (settled.next())
-        if (decodeRunReport(settled.number(0), settled.json(1)).matches(*task.lastRun)) return retry;
-    return std::nullopt;
-}
-
-void runtime::RunReports::retryRunReport(const TaskData& task, const Json& event, const TaskDecision& decision) {
-    const auto retry = [&] {
-        std::lock_guard lock(database.mutex);
-        return reportRetry(task, event);
-    }();
-    const auto& args = decision.args;
-    if (!retry || args.contains("itemId") || args.contains("cursor") || args.contains("offset") ||
-        field(args, "threadId") != retry->data.run.threadId || field(args, "runId") != retry->data.resultRunId)
-        throw Conflict("Choose the exact settled result Run to retry its terminal report");
-    const auto& report = retry->data;
-    const auto& env = report.environmentId;
-    const auto& thread = report.run.threadId;
-    if (!policy.allows(task.botId, Resource::sessionRead(env, thread))) throw Conflict("Session read access required");
-    const auto evidence = fetchRunEvidence(task, env, report.run, report.resultRunId, report.status);
-    const bool available = evidence.availability != RunEvidence::Availability::ReportUnavailable;
-    updates.change(task, [&](TaskData& current) {
-        const auto latest = taskEvents.currentEvent(current);
-        if (latest.is_null() || latest.at("consumed") == true || current.state != TaskState::deciding) return false;
-        const auto target = reportRetry(current, latest);
-        if (!target || target->id != retry->id || target->data != report) return false;
-        if (available) {
-            const auto boundedEvidence = boundedReportEvidence(evidence);
-            auto updated = target->data;
-            updated.evidence = boundedEvidence;
-            if (updated.evidence.sessionCreatedAt.empty()) updated.evidence.sessionCreatedAt = report.evidence.sessionCreatedAt;
-            database.exec("UPDATE journal SET data=? WHERE id=?", {encodeRunReport(updated), target->id});
-            if (latest.at("kind") == "result") {
-                auto row = database.query("SELECT data FROM events WHERE id=? AND task_id=?", {latest.at("id"), current.id});
-                if (!row.next()) throw Conflict("The settled result event is no longer available");
-                auto data = row.json(0);
-                setReportEvidence(data, boundedEvidence);
-                database.exec("UPDATE events SET data=? WHERE id=? AND task_id=?", {data, latest.at("id"), current.id});
-            }
-        }
-        history.recordSessionRead(current, latest,
-                                  {{"environmentId", env},
-                                   {"threadId", thread},
-                                   {"runId", target->data.resultRunId},
-                                   {"view", "report"},
-                                   {"reportAvailable", available},
-                                   {"text", bounded(evidence.detail, 2048)}},
-                                  decision.usage);
-        return true;
-    });
 }
 }

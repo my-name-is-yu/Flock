@@ -54,7 +54,6 @@ void checkReply(const Json& data) {
 
 struct Mixed : Model {
     Model& live;
-    std::map<Id, Json> questions;
     Json trace = Json::array();
     explicit Mixed(Model& model) : live(model) {}
     ModelTurn decide(const ModelInput& input) override {
@@ -65,13 +64,7 @@ struct Mixed : Model {
             for (const auto& decision : turn.calls) trace.push_back({{"tool", decision.tool}, {"args", decision.args}});
             return turn;
         }
-        if (const auto question = questions.find(input.task.at("id").get<Id>());
-            kind == "intake" && question != questions.end() && !input.event.contains("userAnswer"))
-            return {{{"ask_user", question->second, "The fixture needs a decision"}}};
-        if (kind == "result") return {{{"complete", {{"report", input.event.value("report", "")}}, "The fixture report is the result"}}};
-        Json args = {{"instruction", input.task.value("request", "")}};
-        if (input.task.value("doneWhen", "").empty()) args["doneWhen"] = "Report the result with evidence";
-        return {{{"delegate", args, "Run the fixture work"}}};
+        throw std::runtime_error("a task without a conversation called the model");
     }
 };
 
@@ -144,16 +137,17 @@ struct Scene {
     }
     Id task(std::string request, std::string project, Json question = nullptr) {
         const auto id = TaskIntake(store).submit(intake(std::move(request), std::move(project)));
-        const bool asksQuestion = !question.is_null();
-        if (asksQuestion) model.questions.emplace(id, std::move(question));
-        reach(id, asksQuestion ? "waiting" : "running");
-        if (asksQuestion) {
-            const auto wait = taskJson(taskStore.task(id)).at("wait");
-            const auto& expected = model.questions.at(id);
-            check(wait.at("reason") == "user_question" && wait.at("text") == expected.at("question") &&
-                      wait.at("choices") == expected.at("choices"),
-                  "fixture expected question " + expected.dump() + ", got wait " + wait.dump());
-        }
+        reach(id, "running");
+        if (question.is_null()) return id;
+        QuestionField field{.id = "choice", .prompt = question.at("question")};
+        for (const auto& choice : question.at("choices")) field.options.push_back({choice, choice});
+        t3.runs.at(taskStore.task(id).task.activeRun->ref.runId) = {.kind = Observation::Kind::Question,
+                                                                    .question = {"question-" + std::to_string(id), {std::move(field)}}};
+        reach(id, "waiting");
+        const auto wait = taskJson(taskStore.task(id)).at("wait");
+        check(wait.at("reason") == "user_question" && wait.at("text") == question.at("question") &&
+                  wait.at("choices") == question.at("choices"),
+              "fixture expected question " + question.dump() + ", got wait " + wait.dump());
         return id;
     }
     TaskSnapshots snapshot() const {

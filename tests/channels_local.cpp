@@ -855,6 +855,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     SessionAdapter t3;
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     int project = 0;
+    std::map<std::string, Id, std::less<>> sessionTasks;
     const auto session = [&](auto bot) {
         auto route = intake(bot, "Prepare");
         route.projectId += std::to_string(++project);
@@ -862,6 +863,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         for (int i = 0; i < 3; ++i) runtime.tick();
         auto run = Tasks(store).task(task).task.activeRun;
         check(run.has_value(), "Fixture Session did not start");
+        sessionTasks[run->ref.threadId] = task;
         return std::move(run->ref);
     };
     auto a = session("release");
@@ -897,10 +899,18 @@ void local(const std::filesystem::path& database, const std::string& path) {
     rejects([&] { LocalMachines(store).decideLocalConnection(root, id, true); });
     rejects([&] { operation(a, "read_file", path); });
     const auto originalRun = a;
-    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
-    model.decideNext = [](const ModelInput&) {
-        return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
+    const auto sessionA = sessionTasks.at(originalRun.threadId);
+    model.decideNext = [&](const ModelInput& input) {
+        if (!input.event.at("turn").empty()) return reply("Queued");
+        return Decision{"send_to_task",
+                        {{"taskId", sessionA},
+                         {"generation", Tasks(store).task(sessionA).task.generation},
+                         {"instruction", "Continue in this Session"}},
+                        {}};
     };
+    ConversationIntake(store).receive(localOwner, intake("release", ""), std::to_string(++count), "Continue in this Session");
+    runtime.runConversations();
+    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
     for (int i = 0; i < 5; ++i) runtime.tick();
     for (const auto& row : TaskList(store).activeTasks("release")) {
         const auto& active = row.task.activeRun;

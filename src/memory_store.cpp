@@ -378,8 +378,6 @@ bool MemoryStorage::canEditFrom(const conversation::Message& message) {
 
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
     if (!permissions.allows(task.botId, Action::private_memory_write, task.botId)) return false;
-    const bool automationSetUpByBotManager = task.trigger.has_value();
-    if (automationSetUpByBotManager) return true;
     if (!task.sourceMessageId) return false;
     const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
     return message.bot == task.botId && canEditFrom(message);

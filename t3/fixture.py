@@ -215,11 +215,6 @@ class Fixture(BaseHTTPRequestHandler):
                 return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
-            if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
-                self.server.launch_accepted.set()
-                assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
-                self.close_connection = True
-                return
             if self.server.multi_environment and tool["name"] == "t3_thread_launch":
                 self.server.launch_accepted.set()
                 if state.get("multiDropLaunchReply"):
@@ -303,10 +298,6 @@ class Fixture(BaseHTTPRequestHandler):
                     "threadId": f"lineage-child-{len(launches) + 1}", "arguments": args})
                 assert launch["arguments"] == args, "same-key launch changed its accepted payload"
                 return {"projectId": "project", "threadId": launch["threadId"], "runId": "root"}
-            if self.server.peer_recovery:
-                state["launches"].append(args["clientRequestId"])
-                assert len(state["launches"]) == 1, "Runtime sent a second launch"
-                assert "Verify the fixture" in args["message"]
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
@@ -938,35 +929,12 @@ class Fixture(BaseHTTPRequestHandler):
                 "status": status, "updatedAt": "2026-01-01T00:00:00.000Z"}
 
 
-def test_peer_recovery(server, runner, temp):
-    server.launch_accepted = threading.Event()
-    server.allow_launch_disconnect = threading.Event()
-    server.state["launches"] = []
-    db_path = temp + "/state.db"
-    command = [runner, server.origin, temp + "/creds", db_path]
-    with subprocess.Popen(command + ["start"]) as process:
-        try:
-            deadline = time.monotonic() + 10
-            while not server.launch_accepted.wait(0.05):
-                assert process.poll() is None, f"Runtime exited before T3 accepted the launch: {process.returncode}"
-                assert time.monotonic() < deadline, "T3 did not accept the launch"
-            action_id, = server.state["launches"]
-            process.kill()
-            assert process.wait(timeout=5) == -signal.SIGKILL, "Runtime was not killed by SIGKILL"
-        finally:
-            if process.poll() is None:
-                process.kill()
-            server.allow_launch_disconnect.set()
-    subprocess.run(command + ["recover"], timeout=15, check=True)
-    assert server.state["launches"] == [action_id], "recovery resent the launch"
-
-
 def test_multi_environment(local, runner, temp, linked_routes=False):
     commit = "0123456789abcdef0123456789abcdef01234567"
     with ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as mini:
         mini.origin = f"http://127.0.0.1:{mini.server_port}"
         mini.state = {}
-        mini.peer_recovery = mini.stock_thread = False
+        mini.stock_thread = False
         mini.multi_environment = True
         for server, name in ((local, "local"), (mini, "mini")):
             server.state.update(claimedEnvironment=f"env-{name}", multiProject=f"project-{name}", multiCommit=commit)
@@ -1346,7 +1314,6 @@ if sys.argv[2:3] == ["recording-contract"]:
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
-    server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     server.stock_thread = sys.argv[2:] == ["pinned-workspace"]
     server.multi_environment = sys.argv[2:] in (["multi-environment"], ["multi-environment-links"])
     if server.stock_thread:
@@ -1371,10 +1338,7 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
                             stockHead=git("-C", root, "rev-parse", "HEAD"))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        if server.peer_recovery:
-            test_peer_recovery(server, sys.argv[1], temp)
-            code = 0
-        elif server.multi_environment:
+        if server.multi_environment:
             test_multi_environment(server, sys.argv[1], temp, sys.argv[2:] == ["multi-environment-links"])
             code = 0
         elif sys.argv[2:] == ["connection-setup"]:

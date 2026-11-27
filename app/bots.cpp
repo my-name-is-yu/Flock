@@ -375,15 +375,6 @@ std::optional<Bot> Bots::tryGet(std::string_view id) const {
     }
 }
 
-std::optional<PlannerModel> Bots::plannerModel(std::string_view id) const {
-    const auto bot = tryGet(id);
-    if (!bot) return std::nullopt;
-    PlannerModel planner{bot->settings.at("model").get<std::string>(), bot->settings.at("modelProvider").get<std::string>(), std::nullopt};
-    if (const auto effort = bot->settings.find("reasoningEffort"); effort != bot->settings.end())
-        planner.reasoningEffort = effort->get<std::string>();
-    return planner;
-}
-
 std::string Bots::readOptionalNotes(std::string_view id, std::string_view filename, std::size_t limit) const try {
     std::lock_guard lock(mutex_);
     return readText(path(id) / filename, limit, true);

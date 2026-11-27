@@ -20,51 +20,38 @@ async function exercise() {
       badge: item.querySelector('.setting-state')?.textContent,
     }));
   }
-  const neither = { port: false, sessionRead: false };
+  const neither = { port: false, remoteAddress: false };
 
   let rows = await show({
-    active: { port: 52011, sessionRead: 'off' }, saved: { port: null, sessionRead: null },
-    next: { port: null, sessionRead: 'off' }, overrides: neither, pending: neither,
+    active: { port: 52011, remoteAddress: null }, saved: { port: null, remoteAddress: null },
+    next: { port: null, remoteAddress: null }, overrides: neither, pending: neither,
   });
-  check(rows.length === 3, 'A fresh start showed a restart notice');
-  check(rows[2].title === 'Address for other computers' && rows[2].value === 'Off' && rows[2].change,
+  check(rows.length === 2, 'A fresh start showed a restart notice');
+  check(rows[1].title === 'Address for other computers' && rows[1].value === 'Off' && rows[1].change,
     'A fresh start did not offer an address for other computers');
-  check(rows[0].value === '52011' && !rows[0].next, `An automatic port with nothing saved read “${rows[0].value}”`);
-  check(rows[1].value === 'Off' && rows[0].change && rows[1].change, 'A fresh start did not show its values with Change');
+  check(rows[0].value === '52011' && !rows[0].next && rows[0].change, `An automatic port with nothing saved read “${rows[0].value}”`);
 
   rows = await show({
-    active: { port: 52011, sessionRead: 'off' }, saved: { port: null, sessionRead: 'on_demand' },
-    next: { port: null, sessionRead: 'on_demand' }, overrides: neither, pending: { port: false, sessionRead: true },
-  });
-  check(rows[0].value === '52011', `A pending Read T3 threads change made the port read “${rows[0].value}”`);
-  check(rows[1].value === 'Off → When needed after restart' && rows[1].next === 'When needed',
-    `A pending Read T3 threads change read “${rows[1].value}”`);
-  check(rows[3]?.title === 'Restart required', 'A pending change did not ask for a restart');
-
-  rows = await show({
-    active: { port: 5000, sessionRead: 'off' }, saved: { port: null, sessionRead: null },
-    next: { port: null, sessionRead: 'off' }, overrides: neither, pending: { port: true, sessionRead: false },
+    active: { port: 5000, remoteAddress: null }, saved: { port: null, remoteAddress: null },
+    next: { port: null, remoteAddress: null }, overrides: neither, pending: { port: true, remoteAddress: false },
   });
   check(rows[0].value === '5000 → Automatic after restart' && rows[0].next === 'Automatic',
     `Returning to an automatic port read “${rows[0].value}”`);
-  check(rows[1].value === 'Off' && rows[3]?.title === 'Restart required', 'A pending port change changed the other row');
+  check(rows[1].value === 'Off' && rows[2]?.title === 'Restart required', 'A pending port change changed the other row');
 
   rows = await show({
-    active: { port: 52011, sessionRead: 'on_demand' }, saved: { port: 5000, sessionRead: 'prefill' },
-    next: { port: null, sessionRead: 'on_demand' }, overrides: { port: true, sessionRead: true }, pending: neither,
+    active: { port: 52011, remoteAddress: null }, saved: { port: 5000, remoteAddress: null },
+    next: { port: null, remoteAddress: null }, overrides: { port: true, remoteAddress: false }, pending: neither,
   });
-  check(rows.length === 3 && rows[0].value === '52011' && rows[1].value === 'When needed',
-    `Launch settings read “${rows[0].value}” and “${rows[1].value}”`);
-  check(rows.slice(0, 2).every(item => item.badge === 'Set at launch' && !item.change), 'Launch settings could be changed here');
+  check(rows.length === 2 && rows[0].value === '52011' && rows[0].badge === 'Set at launch' && !rows[0].change,
+    `Launch settings read “${rows[0].value}” or could be changed here`);
 
   rows = await show({
-    active: { port: 52011, sessionRead: 'off', remoteAddress: null },
-    saved: { port: null, sessionRead: null, remoteAddress: '100.64.0.2' },
-    next: { port: null, sessionRead: 'off', remoteAddress: '100.64.0.2' }, overrides: neither,
-    pending: { ...neither, remoteAddress: true },
+    active: { port: 52011, remoteAddress: null }, saved: { port: null, remoteAddress: '100.64.0.2' },
+    next: { port: null, remoteAddress: '100.64.0.2' }, overrides: neither, pending: { ...neither, remoteAddress: true },
   });
-  check(rows[2].value === 'Off → 100.64.0.2 after restart' && rows[3]?.title === 'Restart required',
-    `A pending address for other computers read “${rows[2].value}”`);
+  check(rows[1].value === 'Off → 100.64.0.2 after restart' && rows[2]?.title === 'Restart required',
+    `A pending address for other computers read “${rows[1].value}”`);
 }
 
 function fixturesUx() {
@@ -88,11 +75,11 @@ function fixturesUx() {
       },
     },
     system: {
-      active: { port: 52011, sessionRead: 'off' },
-      saved: { port: null, sessionRead: null },
-      next: { port: null, sessionRead: 'off' },
-      overrides: { port: false, sessionRead: false },
-      pending: { port: false, sessionRead: false },
+      active: { port: 52011, remoteAddress: null },
+      saved: { port: null, remoteAddress: null },
+      next: { port: null, remoteAddress: null },
+      overrides: { port: false, remoteAddress: false },
+      pending: { port: false, remoteAddress: false },
     },
   };
   window.fetch = async (path, options = {}) => {

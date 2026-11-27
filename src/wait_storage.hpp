@@ -22,12 +22,10 @@ std::optional<WaitRun> taskWaitRun(const TaskData& task);
 
 class Database;
 class JournalStorage;
-class PeerStorage;
 
 class WaitStorage {
 public:
-    WaitStorage(Database& database, JournalStorage& journalStorage, PeerStorage& peers)
-        : database(database), journalStorage(journalStorage), peers(peers) {}
+    WaitStorage(Database& database, JournalStorage& journalStorage) : database(database), journalStorage(journalStorage) {}
 
     bool waitIsActionable(const TaskData& task) const;
     Id waitAnchor(Id task, Id wait) const;
@@ -40,6 +38,5 @@ public:
 private:
     Database& database;
     JournalStorage& journalStorage;
-    PeerStorage& peers;
 };
 }

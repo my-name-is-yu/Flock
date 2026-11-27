@@ -17,7 +17,6 @@ namespace flockv0 {
 
 class Database;
 class Policy;
-class PeerStorage;
 class WaitStorage;
 class T3;
 struct TaskData;
@@ -59,10 +58,10 @@ class SessionReadStorage;
 class SessionParticipationStorage;
 class TaskRouting {
 public:
-    TaskRouting(Database& database, const Policy& permissions, PeerStorage& peerStorage, WaitStorage& waitStorage,
-                SessionReadStorage& sessionReadStorage, SessionParticipationStorage& sessionParticipationStorage)
-        : database(database), permissions(permissions), peerStorage(peerStorage), waitStorage(waitStorage),
-          sessionReadStorage(sessionReadStorage), sessionParticipationStorage(sessionParticipationStorage) {}
+    TaskRouting(Database& database, const Policy& permissions, WaitStorage& waitStorage, SessionReadStorage& sessionReadStorage,
+                SessionParticipationStorage& sessionParticipationStorage)
+        : database(database), permissions(permissions), waitStorage(waitStorage), sessionReadStorage(sessionReadStorage),
+          sessionParticipationStorage(sessionParticipationStorage) {}
 
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
@@ -84,7 +83,6 @@ public:
 private:
     Database& database;
     const Policy& permissions;
-    PeerStorage& peerStorage;
     WaitStorage& waitStorage;
     SessionReadStorage& sessionReadStorage;
     SessionParticipationStorage& sessionParticipationStorage;

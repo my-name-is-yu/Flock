@@ -27,12 +27,6 @@ struct TaskDecision : Decision {
     std::optional<nlohmann::json> setup{};
 };
 
-struct DecisionCheckpoint {
-    std::int64_t generation, eventId;
-    std::optional<std::int64_t> revisionId;
-    TaskDecision decision;
-};
-
 struct QuestionTarget {
     std::optional<std::int64_t> waitId;
     std::int64_t eventId;
@@ -46,7 +40,6 @@ struct TaskQuestion {
     std::vector<QuestionField> fields;
     QuestionTarget target;
     std::optional<std::int64_t> suspendedWaitId{};
-    std::optional<DecisionCheckpoint> suspendedDecision{};
 };
 
 struct RecordedTaskBlocker {

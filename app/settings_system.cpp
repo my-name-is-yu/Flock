@@ -25,13 +25,6 @@ unsigned portSetting(const Json& value) {
     return value.get<unsigned>();
 }
 
-constexpr auto defaultSessionRead = "on_demand";
-
-std::string sessionReadSetting(const Json& value) {
-    if (value != "off" && value != "on_demand" && value != "prefill") throw Conflict("Choose how Flock reads T3 Sessions.");
-    return value.get<std::string>();
-}
-
 bool reachableFromOtherMachines(const std::string& address) {
     addrinfo hints{};
     hints.ai_socktype = SOCK_STREAM;
@@ -67,8 +60,6 @@ void validate(const Json& settings) {
     for (const auto& [key, value] : settings.items()) {
         if (key == "port" || key == "previousPort") {
             if (!value.is_null()) (void)portSetting(value);
-        } else if (key == "sessionRead") {
-            if (!value.is_null()) (void)sessionReadSetting(value);
         } else if (key == "remoteAddress") {
             validateRemoteAddress(value);
         } else
@@ -78,14 +69,10 @@ void validate(const Json& settings) {
 
 }
 
-SettingsSystem::SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort,
-                               std::optional<std::string> cliSessionRead)
-    : file_(home / "system-settings.json"), cliPort_(cliPort), cliSessionRead_(cliSessionRead.has_value()),
-      saved_(readSettingsFile(file_)) {
+SettingsSystem::SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort)
+    : file_(home / "system-settings.json"), cliPort_(cliPort), saved_(readSettingsFile(file_)) {
     validate(saved_);
     startupPortSetting_ = saved_.value("port", Json(nullptr));
-    const auto mode = saved_.value("sessionRead", Json(nullptr));
-    activeSessionRead_ = cliSessionRead.value_or(mode.is_null() ? defaultSessionRead : mode.get<std::string>());
     const auto remoteAddress = saved_.value("remoteAddress", Json(nullptr));
     if (!remoteAddress.is_null()) activeRemoteAddress_ = remoteAddress.get<std::string>();
 }
@@ -131,18 +118,15 @@ void SettingsSystem::listenerStarted(unsigned port) {
 Json SettingsSystem::viewLocked(unsigned t3Port) const {
     const auto activePort = activePort_ ? Json(*activePort_) : Json(nullptr);
     const auto savedPort = saved_.value("port", Json(nullptr));
-    const auto savedRead = saved_.value("sessionRead", Json(nullptr));
     const auto nextPort = cliPort_.value_or(savedPort.is_null() ? t3Port : savedPort.get<unsigned>());
-    const auto nextRead = cliSessionRead_ ? Json(activeSessionRead_) : savedRead.is_null() ? Json(defaultSessionRead) : savedRead;
     const bool pendingPort = !cliPort_ && (nextPort ? nextPort != activePort_.value_or(0) : !startupPortSetting_.is_null());
-    const bool pendingRead = nextRead != activeSessionRead_;
     const auto activeRemote = activeRemoteAddress_ ? Json(*activeRemoteAddress_) : Json(nullptr);
     const auto nextRemote = saved_.value("remoteAddress", Json(nullptr));
-    return {{"active", {{"port", activePort}, {"sessionRead", activeSessionRead_}, {"remoteAddress", activeRemote}}},
-            {"saved", {{"port", savedPort}, {"sessionRead", savedRead}, {"remoteAddress", nextRemote}}},
-            {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}, {"remoteAddress", nextRemote}}},
-            {"overrides", {{"port", cliPort_.has_value()}, {"sessionRead", cliSessionRead_}, {"remoteAddress", false}}},
-            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}, {"remoteAddress", nextRemote != activeRemote}}}};
+    return {{"active", {{"port", activePort}, {"remoteAddress", activeRemote}}},
+            {"saved", {{"port", savedPort}, {"remoteAddress", nextRemote}}},
+            {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"remoteAddress", nextRemote}}},
+            {"overrides", {{"port", cliPort_.has_value()}, {"remoteAddress", false}}},
+            {"pending", {{"port", pendingPort}, {"remoteAddress", nextRemote != activeRemote}}}};
 }
 
 Json SettingsSystem::view(unsigned t3Port) const {
@@ -159,9 +143,6 @@ Json SettingsSystem::change(const Json& patch, unsigned t3Port) {
             if (cliPort_) throw Conflict("The startup command sets the current port.");
             if (!value.is_null()) (void)portSetting(value);
             if (next.value("port", Json(nullptr)) != value && activePort_) next["previousPort"] = *activePort_;
-        } else if (key == "sessionRead") {
-            if (cliSessionRead_) throw Conflict("The startup command sets how Flock reads T3 Sessions.");
-            if (!value.is_null()) (void)sessionReadSetting(value);
         } else if (key == "remoteAddress") {
             validateRemoteAddress(value);
         } else

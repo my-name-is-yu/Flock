@@ -40,6 +40,4 @@ struct TaskTrigger {
     std::variant<TimedTaskTrigger, WebhookTaskTrigger> details;
 };
 
-enum class TaskPeerOutcome { completed, failed };
-std::string_view taskPeerOutcomeName(TaskPeerOutcome);
 }

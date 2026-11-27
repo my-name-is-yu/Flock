@@ -51,7 +51,6 @@ constexpr std::array states{
     std::pair{TaskState::sending, std::string_view{"sending"}},
     std::pair{TaskState::running, std::string_view{"running"}},
     std::pair{TaskState::waiting, std::string_view{"waiting"}},
-    std::pair{TaskState::peer_waiting, std::string_view{"peer_waiting"}},
     std::pair{TaskState::external_waiting, std::string_view{"external_waiting"}},
     std::pair{TaskState::cancelling, std::string_view{"cancelling"}},
     std::pair{TaskState::completed, std::string_view{"completed"}},
@@ -300,7 +299,6 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     else if (criteriaSource)
         row.fail("criteriaSourceMessageId", "requires proposed completion criteria");
     task.requestedCommit = row.optional<std::string>(data, "requestedCommit");
-    task.feedback = row.optional<std::string>(data, "feedback");
     task.waitingNote = row.optional<std::string>(data, "waitingNote");
     decodeTaskInteraction(task, data, row);
     decodeTaskContext(task, data, row);
@@ -342,7 +340,6 @@ Json encodeTaskPayload(const TaskData& task) {
         if (task.criteriaProposal->sourceMessageId) data["criteriaSourceMessageId"] = *task.criteriaProposal->sourceMessageId;
     }
     if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
-    if (task.feedback) data["feedback"] = *task.feedback;
     if (task.waitingNote) data["waitingNote"] = *task.waitingNote;
     encodeTaskInteraction(data, task);
     encodeTaskContext(data, task);
@@ -625,7 +622,7 @@ std::optional<std::string> TaskRecords::externalWaitingNote(const TaskData& task
 }
 
 Id TaskRecords::completeWithReport(TaskData& task, std::string report, std::string reason) {
-    CompletionProvenance source;
+    std::optional<OutboxSourceRun> source;
     if (task.lastRun) {
         auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
         if (row.next()) {
@@ -640,6 +637,19 @@ Id TaskRecords::completeWithReport(TaskData& task, std::string report, std::stri
         }
     }
     return complete(task, {std::move(report), task.currentRevision, TaskCompletion{std::move(reason), task.doneWhen, std::move(source)}});
+}
+
+void settleUndecided(TaskData& task, std::string_view reason, TaskRecords& records, WaitStorage& waits, std::string_view detail) {
+    if (reason == "finished" || reason == "failed") {
+        auto report = records.latestReportText(task.id);
+        records.completeWithReport(task, report.empty() ? "The Session finished without a readable report." : std::move(report),
+                                   "Nobody asked for more work after the Session finished");
+        return;
+    }
+    // Nothing settled, so leave the task where the person can see it instead of closing work that never ran.
+    std::string text = "This task stopped before its work finished.";
+    if (!detail.empty()) text += " " + std::string(detail);
+    waits.wait(task, ModelQuestionWait{}, text + " Reply with what to do next, or cancel it.");
 }
 
 std::string TaskRecords::latestReportText(Id task) const {
@@ -683,7 +693,6 @@ INSERT INTO task_run_destinations(task_id,position,name,environment_id,project_i
 
 Id TaskRecords::complete(TaskData& task, const CompletionEntry& entry) {
     task.pendingInstructions.clear();
-    task.pendingDecision.reset();
     task.newSessionRequired = false;
     task.state = TaskState::completed;
     const auto id = journalStorage.journal(task.id, entry);
@@ -699,7 +708,6 @@ void waitForExternalEvent(TaskData& task, const Json& args, Seconds now) {
     if (delay == args.end() || !delay->is_number_integer() || *delay < minExternalCheckMinutes || *delay > maxExternalCheckMinutes)
         throw Conflict("Choose a re-check time between 5 and 1440 minutes");
     task.pendingInstructions.clear();
-    task.pendingDecision.reset();
     task.state = TaskState::external_waiting;
     task.waitingNote = std::move(note);
     task.externalCheckAt = now + 60 * delay->get<int>();

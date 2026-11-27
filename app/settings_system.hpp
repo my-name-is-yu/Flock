@@ -17,12 +17,11 @@ namespace flockv0::app {
 
 class SettingsSystem {
 public:
-    SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort, std::optional<std::string> cliSessionRead);
+    SettingsSystem(const std::filesystem::path& home, std::optional<unsigned> cliPort);
 
     unsigned startupPort(unsigned t3Port) const;
     unsigned t3CliPort(unsigned requestedPort, unsigned t3Port) const;
     std::optional<unsigned> recoveryPort(unsigned t3Port) const;
-    const std::string& sessionRead() const { return activeSessionRead_; }
     const std::optional<std::string>& remoteAddress() const { return activeRemoteAddress_; }
     void listenerStarted(unsigned port);
     Json view(unsigned t3Port) const;
@@ -32,11 +31,9 @@ private:
 
     const std::filesystem::path file_;
     const std::optional<unsigned> cliPort_;
-    const bool cliSessionRead_;
     mutable std::mutex mutex_;
     Json saved_;
     Json startupPortSetting_;
-    std::string activeSessionRead_;
     std::optional<std::string> activeRemoteAddress_;
     std::optional<unsigned> activePort_;
 };

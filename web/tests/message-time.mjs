@@ -17,12 +17,7 @@ function fixtures() {
     }
     close() {}
   };
-  const bot = { id: 'release', name: 'Release', model: 'demo', peers: [{ id: 'triage' }] };
-  const peer = { id: 'triage', name: 'Triage' };
-  window.renameBot = (name) => {
-    bot.name = name;
-    document.dispatchEvent(new Event('visibilitychange'));
-  };
+  const bot = { id: 'release', name: 'Release', model: 'demo' };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
   const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
   const RealDate = Date;
@@ -81,15 +76,6 @@ function fixtures() {
     } });
     document.dispatchEvent(new Event('visibilitychange'));
   };
-  const dm = (id, seconds, fromBotId, data) => ({ id, time: time + seconds, kind: 'bot_message', data: { fromBotId, ...data } });
-  const older = dm(8, 0, 'release', { text: 'Earlier release message' });
-  const peerEvents = [
-    dm(9, 60, 'release', { text: 'Release starts the exchange' }),
-    dm(10, 90, 'release', { forwardedMessage: { text: 'Forwarded source only', time: time - 60 } }),
-    dm(11, 100, 'triage', { text: 'Triage replies' }),
-    dm(12, 1000, 'triage', { text: 'Triage resumes after a break' }),
-    dm(13, 12 * 3600, 'triage', { text: 'Triage follows up tomorrow' }),
-  ];
   let activeTasks = [];
   let parallelTasks = [];
   window.showWorking = (request) => {
@@ -123,9 +109,7 @@ function fixtures() {
     document.dispatchEvent(new Event('visibilitychange'));
   };
   window.fetch = async (path) => {
-    if (path === '/api/bots') return Response.json([bot, peer]);
-    if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
-      ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
+    if (path === '/api/bots') return Response.json([bot]);
     const response = Response.json({ bot, events, olderBefore: 0, presence: activeTasks.some(task => task.state === 'running') ? 'working' : 'idle',
       activeTasks, parallelTasks, sessionTasks, sessionsBefore: 15, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null, limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 } });
@@ -421,26 +405,6 @@ async function exercise() {
   window.reducedMotionFixture.matches = false;
   await exerciseReplyMotion();
 
-  window.noHoverFixture.matches = true;
-  window.noHoverFixture.dispatchEvent(new Event('change'));
-  history.pushState(null, '', '?bot=release&peer=triage');
-  window.dispatchEvent(new PopStateEvent('popstate'));
-  for (let attempt = 0; attempt < 20 && !document.getElementById('event-13'); attempt++)
-    await new Promise(resolve => setTimeout(resolve, 10));
-  const [release, forwarded, triage] = document.querySelectorAll('.peer-dm-message');
-  const senders = () => [...document.querySelectorAll('.peer-dm-message > .msg-meta:not(.sr-only) .msg-name')]
-    .map(name => name.textContent).join(',');
-  const eventTime = row => row.querySelector('.msg-actions > time');
-  check(senders() === 'Release,Triage,Triage,Triage' && forwarded.querySelector('.msg-avatar'),
-    'The read-only DM did not group by sender, gap, and local day');
-  check(document.querySelectorAll('.day:not(.chat-time-break)').length === 2 &&
-    document.querySelectorAll('.chat-time-break').length === 1 && document.getElementById('composer-container').hidden,
-    'The read-only DM lost a centered separator or exposed the composer');
-  check(release.tabIndex === 0 && release.querySelectorAll('time').length === 1 && eventTime(release).dateTime,
-    'The peer message did not expose a focusable semantic timestamp');
-  const descriptionId = document.getElementById('peer-heading').getAttribute('aria-describedby');
-  check(document.getElementById(descriptionId)?.textContent === 'Read-only conversation between Bots',
-    'The Bot conversation heading lost its read-only description');
   const hideList = document.getElementById('toggle-chat-sidebar');
   const showList = document.getElementById('show-chat-sidebar');
   hideList.focus();
@@ -452,38 +416,6 @@ async function exercise() {
     'Show Bot list did not take focus or was covered by the Back button');
   showList.click();
   check(document.activeElement === hideList, 'Showing the Bot list dropped keyboard focus');
-
-  const forwardedTime = eventTime(forwarded);
-  const source = forwarded.querySelector('.peer-forwarded-message');
-  tap(source.querySelector('.event-text'));
-  // The quote names only its original sender; the message's own time is the one revealed.
-  check(shown()[0] === forwardedTime && !source.querySelector('time') &&
-    source.querySelector('.msg-quote')?.textContent === 'Original sender',
-    'Tapping a forwarded-only message did not reveal its own timestamp beside the attributed quote');
-  tap(triage.querySelector('.event-text'));
-  check(shown().length === 1 && shown()[0].parentElement === triage && eventTime(forwarded) === forwardedTime,
-    'The peer message timestamp did not move back when another one was opened');
-  tap(triage.querySelector('.event-text'));
-  check(!shown().length, 'Tapping the open peer message did not close its timestamp');
-
-  document.getElementById('older').click();
-  for (let attempt = 0; attempt < 20 && !document.getElementById('event-8'); attempt++)
-    await new Promise(resolve => setTimeout(resolve, 10));
-  check(document.getElementById('event-9') === release && release.querySelector('.msg-meta').classList.contains('sr-only') &&
-    senders() === 'Release,Triage,Triage,Triage', 'Prepending peer history replaced the loaded row or repeated its sender label');
-
-  document.getElementById('peer-parent-link').click();
-  const picker = document.getElementById('peer-picker');
-  for (let attempt = 0; attempt < 20 && picker.hidden; attempt++)
-    await new Promise(resolve => setTimeout(resolve, 10));
-  check(!picker.hidden, 'The Bot conversation picker did not become available');
-  picker.click();
-  const title = document.getElementById('detail-title');
-  check(title.textContent === 'Release’s talks with other Bots', 'The conversation picker did not name the current Bot');
-  window.renameBot('Deploy');
-  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy’s talks with other Bots'; attempt++)
-    await new Promise(resolve => setTimeout(resolve, 10));
-  check(title.textContent === 'Deploy’s talks with other Bots', 'The open conversation picker kept the old Bot name');
 }
 
 const index = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `

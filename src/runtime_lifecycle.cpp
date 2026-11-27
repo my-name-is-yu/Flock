@@ -48,17 +48,12 @@ runtime::DatabaseLock::~DatabaseLock() {
     close(fd);
 }
 
-void runtime::Workers::drain(TaskTurn& taskTurn) {
+void runtime::Workers::drain() {
     requestStop();
     conversations.clear();
     tasks.clear();
     if (channels.valid()) channels.wait();
     if (sessionWake.valid()) sessionWake.wait();
-    try {
-        taskTurn.persistTaskInferences();
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "Flock Task inference shutdown: %s\n", error.what());
-    }
 }
 
 template <class Key> void runtime::Workers::collect(std::map<Key, std::future<void>>& workers, std::string_view operation) {

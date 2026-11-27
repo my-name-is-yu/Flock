@@ -29,9 +29,6 @@ void invalidate(Json& update, const ChangeFeed::BotList&) {
 void invalidate(Json& update, const ChangeFeed::BotView& view) {
     update["bot"] = view.bot;
 }
-void invalidate(Json& update, const ChangeFeed::DirectMessage& dm) {
-    update["dm"] = {{"bot", dm.bot}, {"peer", dm.peer}};
-}
 }
 
 ChangeFeed::ChangeFeed(Store& store, Load load) : store_(store), load_(std::move(load)), worker_([this] { monitor(); }) {}
@@ -45,7 +42,6 @@ std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
     constexpr std::size_t maxSubscribers = 3;
     if (stopping_ || subscribers_ >= maxSubscribers) return std::nullopt;
     Cursor cursor{{Scope{view.person, BotList{}}, 0}, {view, 0}};
-    if (const auto* dm = std::get_if<DirectMessage>(&view.target)) cursor.emplace(Scope{view.person, BotView{dm->bot}}, 0);
     for (auto& [scope, revision] : cursor) {
         auto& watched = watched_[scope];
         ++watched.subscribers;

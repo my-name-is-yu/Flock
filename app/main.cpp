@@ -66,7 +66,7 @@ namespace flockv0::app {
 namespace {
 constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
-  run [--fixed] [--no-web] [--port PORT] [--session-read off|on_demand|prefill]
+  run [--fixed] [--no-web] [--port PORT]
   bots
   rules list
   mode [full|supervised]
@@ -86,7 +86,6 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   model login [--print-url] [--reconsent]
   model status
   model models
-  model acceptance MODEL_SLUG
 
 State defaults to $FLOCK_HOME or ~/.config/flock. Quote messages and answers
 containing spaces. Run --fixed uses local demo adapters for both model and T3.
@@ -176,10 +175,6 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     } else if (action == "models") {
         args.end();
         print(model.models());
-    } else if (action == "acceptance") {
-        const auto slug = args.pop("model slug");
-        args.end();
-        return runModelAcceptance(model, slug, std::cout) ? 0 : 1;
     } else
         throw Conflict("Unknown model command: " + action);
     return 0;
@@ -257,7 +252,6 @@ void requestStop(int) {
 void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
     std::optional<unsigned> port;
-    std::optional<std::string> sessionRead;
     RuntimeOptions options;
     while (!args.empty()) {
         const auto option = args.pop("run option");
@@ -267,11 +261,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             web = false;
         else if (option == "--port")
             port = static_cast<unsigned>(number(args, "port", 0, 65535));
-        else if (option == "--session-read") {
-            sessionRead = args.pop("session read mode");
-            if (*sessionRead != "off" && *sessionRead != "on_demand" && *sessionRead != "prefill")
-                throw Conflict("Session read mode must be off, on_demand or prefill");
-        } else
+        else
             throw Conflict("Unknown run option: " + option);
     }
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) { return bots.get(botId).intake(request); };
@@ -288,15 +278,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     Store store(home / "flock.sqlite3",
                 {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
-                 .automationModel = [&](std::string_view id) { return bots.plannerModel(id); },
                  .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
                                      const Json& catalog) { bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog); },
                  .botSetupCatalog = loadSetupModelCatalog});
-    SettingsSystem system(home, port, sessionRead);
+    SettingsSystem system(home, port);
     SettingsConnections connections(home);
     SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
     const auto identities = access.identities();
-    options.sessionRead = system.sessionRead();
     const auto savedPort = T3Connections(store).port();
     if (savedPort && !web)
         std::cerr << "Warning: Flock Session tools cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
@@ -339,7 +327,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         },
         {},
         [&](std::string_view botId) { return bots.avatarImage(botId); },
-        options.peers,
         identities.authenticate,
         options.clock,
     };

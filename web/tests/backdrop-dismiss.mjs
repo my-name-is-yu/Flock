@@ -104,11 +104,11 @@ function settingsFixtures() {
         access: { mode: 'local', users: [] },
         connections: {},
         system: {
-          active: { port: 52011, sessionRead: 'off' },
-          saved: { port: null, sessionRead: null },
-          next: { port: null, sessionRead: 'off' },
-          overrides: { port: false, sessionRead: false },
-          pending: { port: false, sessionRead: false },
+          active: { port: 52011, remoteAddress: null },
+          saved: { port: null, remoteAddress: null },
+          next: { port: null, remoteAddress: null },
+          overrides: { port: false, remoteAddress: false },
+          pending: { port: false, remoteAddress: false },
         },
       });
     }

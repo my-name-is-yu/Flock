@@ -45,8 +45,7 @@ bool sharedMemoryTool(std::string_view tool) {
 }
 
 bool recordsTaskDecisionReason(std::string_view tool) {
-    constexpr std::string_view recorded[]{"delegate",         "follow_up",   "complete", "ask_user", "answer_session_question",
-                                          "send_bot_message", "reply_to_bot"};
+    constexpr std::string_view recorded[]{"delegate", "follow_up", "complete", "ask_user", "answer_session_question"};
     return std::ranges::find(recorded, tool) != std::end(recorded);
 }
 
@@ -77,21 +76,6 @@ LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
         if (source >= messageId) throw Conflict("Invalid model call ancestry");
         messageId = source;
     }
-}
-
-std::string ModelCalls::taskModelScope(Id taskId) const {
-    auto ancestor = database.query(R"SQL(
-WITH RECURSIVE ancestry(id) AS (
-  SELECT ? UNION ALL
-  SELECT p.sender_task FROM peer_exchanges p JOIN ancestry a ON a.id=p.recipient_task
-  WHERE p.sender_task<a.id
-)
-SELECT t.id,t.source_message_id FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
-)SQL",
-                                   {taskId});
-    if (!ancestor.next()) throw Conflict("The originating task is missing");
-    if (const auto message = ancestor.number(1)) return messageModelScope(message);
-    return "task/" + std::to_string(ancestor.number(0));
 }
 
 void ModelCalls::recordBotTool(std::string_view scope, Id messageId) {
@@ -178,7 +162,6 @@ CheckedModelTurn ModelCalls::callModel(std::string_view bot, Model& model, const
         safe.task = scrub.record(input.task);
         safe.event = scrub.record(input.event);
         safe.history = scrub.record(input.history);
-        safe.evidence = scrub.record(input.evidence);
         safe.config = scrub.record(input.config, SecretRedactor::Fields::external);
         safe.notes.soul = scrub.text(input.notes.soul);
         safe.notes.memory = scrub.text(input.notes.memory);

@@ -18,6 +18,9 @@ Delivery Sessions::send(const Command& command) {
                 false,
                 "queued"};
     }
-    return {Delivery::Kind::Accepted, {"thread-" + command.projectId, "run-" + command.projectId, {}, command.gatewayEnvironmentId}, {}};
+    const std::string prefix = holdRuns ? "held-" : "";
+    return {Delivery::Kind::Accepted,
+            {prefix + "thread-" + command.projectId, prefix + "run-" + command.projectId, {}, command.gatewayEnvironmentId},
+            {}};
 }
 }

@@ -22,9 +22,8 @@ public:
         : database(database), journal(journal), events(events), records(records) {}
 
     TaskData snapshot(Id id);
-    void saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision = std::nullopt);
+    void saveTask(TaskData& task);
     void consumeEvent(TaskData& task);
-    static bool checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task);
 
     void establishCriteria(TaskData&, const Json& args);
     void recordDecision(const TaskData&, const Json& event, const TaskDecision&, std::string_view action);

@@ -17,7 +17,7 @@ public:
 
     void closeQuestion(TaskData& task, std::string_view reason, std::string_view resolution = {});
     void suspendQuestion(TaskData& task);
-    std::optional<DecisionCheckpoint> resumeQuestion(TaskData& task);
+    void resumeQuestion(TaskData& task);
 private:
     Database& database;
     WaitStorage& waits;

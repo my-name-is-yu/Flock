@@ -80,7 +80,7 @@ T3SetupResult connectT3(const std::filesystem::path& home, const T3ConnectReques
     const auto credentialDirectory = home / "credentials" / "t3";
     const auto target = resolveTarget(request, credentialDirectory, previous);
     const auto savedPort = previous ? previous->port : 0;
-    const auto cliPort = [&] { return SettingsSystem(home, std::nullopt, std::nullopt).t3CliPort(port, savedPort); };
+    const auto cliPort = [&] { return SettingsSystem(home, std::nullopt).t3CliPort(port, savedPort); };
     const auto connectionPort = requester ? port : cliPort();
     const auto owns = [&](std::string_view token) { return connections.ownsBearer(token); };
 

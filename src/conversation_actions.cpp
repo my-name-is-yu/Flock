@@ -16,7 +16,6 @@
 #include "task_operations.hpp"
 #include "task_events.hpp"
 #include "secret_storage.hpp"
-#include "peer_storage.hpp"
 #include "journal_storage.hpp"
 #include "session_dispatch_lock.hpp"
 #include "journal.hpp"
@@ -1106,10 +1105,6 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
             auto project = change->route.projectId;
             const bool pinned = !project.empty();
             if (!pinned) project = taskRouting.rememberedT3Project(task.botId, environment);
-            if (peerStorage.recipientRouteWouldCycle(task.id, environment, project)) {
-                if (pinned) throw Conflict("This destination would make project queues wait for one another");
-                project.clear();
-            }
             auto route = change->route;
             route.projectId = std::move(project);
             route.gatewayEnvironmentId = gateway;
@@ -1149,7 +1144,6 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
             if (task.question) task.question->target = questionTarget(task, reason == WaitReason::user_question ? waitId : 0);
         }
     }
-    if (task.question) task.question->suspendedDecision.reset();
     journalStorage.journal(task.id, pending);
     task.pendingInstructions.push_back(std::move(pending));
     if (task.state == TaskState::external_waiting) {

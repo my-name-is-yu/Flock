@@ -45,7 +45,7 @@ Json payload() {
                                            {"revisionId", nullptr},
                                            {"conflicting", false},
                                            {"source", instructionSource}}})},
-            {"contextIds", {{"answerEventId", 15}, {"peerMessageId", "peer-message"}, {"sourceMessageId", 17}}},
+            {"contextIds", {{"answerEventId", 15}, {"sourceMessageId", 17}}},
             {"sourceResultRefs", Json::array({source})},
             {"destinationAction", true},
             {"expectedCommit", "abc123"},

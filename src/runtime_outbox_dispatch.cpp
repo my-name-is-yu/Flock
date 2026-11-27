@@ -490,7 +490,6 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
             current.t3CheckAt.reset();
             waitStorage.clearWait(current, "action_closed");
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
-            current.feedback = approvalError(gate);
             if (current.state == TaskState::deciding)
                 taskEvents.event(current, "policy/" + cmd.actionId, {{"kind", "policy_outcome"}, {"text", approvalError(gate)}});
             database.writeJournal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});

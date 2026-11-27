@@ -20,64 +20,10 @@
 
 namespace flockv0 {
 namespace {
-using namespace std::literals;
-constexpr std::array evidenceKinds{
-    std::pair{CompletionEvidenceKind::peer_report, "peer_report"sv},
-    std::pair{CompletionEvidenceKind::session_read, "session_read"sv},
-};
-
-Json evidenceJson(const CompletionEvidence& evidence) {
-    Json data{{"environmentId", evidence.environmentId},
-              {"threadId", evidence.threadId},
-              {"runId", evidence.runId},
-              {"kind", enumName(evidenceKinds, evidence.kind)}};
-    if (evidence.itemId) data["itemId"] = *evidence.itemId;
-    if (evidence.messageId) data["messageId"] = *evidence.messageId;
-    return data;
-}
-
-CompletionEvidence readEvidence(const Json& data, const RecordDecoder& row) {
-    const auto kind = enumValue(evidenceKinds, row.get<std::string>(data, "kind"));
-    if (!kind) row.fail("kind", "unknown completion evidence kind");
-    auto messageId = row.optional<std::string>(data, "messageId");
-    if (*kind == CompletionEvidenceKind::peer_report && !messageId) row.fail("messageId", "required for a peer report");
-    return {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "threadId"),
-            row.get<std::string>(data, "runId"),         *kind,
-            row.optional<std::string>(data, "itemId"),   std::move(messageId)};
-}
-
-CompletionProvenance readCompletionProvenance(const Json& data, const RecordDecoder& row) {
-    if (const auto source = row.find(data, "source"); source != data.end()) return decodeOutboxSourceRun(*source, row.nested("source"));
-    if (const auto dependency = row.find(data, "dependency"); dependency != data.end()) {
-        auto peer = row.nested("dependency").decodeClosed(*dependency, [](const Json& value, const RecordDecoder& ref) {
-            return PeerCompletion{ref.get<Id>(value, "taskId"),
-                                  ref.get<std::string>(value, "exchangeId"),
-                                  ref.get<std::string>(value, "messageId"),
-                                  ref.get<std::string>(value, "botId"),
-                                  ref.get<std::string>(value, "requestKind"),
-                                  ref.get<std::string>(value, "status"),
-                                  {}};
-        });
-        const auto& evidence = row.array(row.require(data, "evidenceRefs"), "evidenceRefs");
-        const auto evidenceRow = row.nested("evidenceRefs");
-        for (const auto& ref : evidence)
-            peer.evidence.push_back(evidenceRow.nested(std::to_string(peer.evidence.size())).decodeClosed(ref, readEvidence));
-        return peer;
-    }
-    return std::monostate{};
-}
-
 void encodeTaskDetails(Json& data, const TaskCompletion& task) {
     data["reason"] = task.reason;
     data["doneWhen"] = task.doneWhen;
-    if (const auto* source = std::get_if<OutboxSourceRun>(&task.provenance)) data["source"] = sourceRunJson(*source);
-    if (const auto* peer = std::get_if<PeerCompletion>(&task.provenance)) {
-        data["dependency"] = {{"taskId", peer->taskId}, {"exchangeId", peer->exchangeId},   {"messageId", peer->messageId},
-                              {"botId", peer->botId},   {"requestKind", peer->requestKind}, {"status", peer->status}};
-        auto refs = Json::array();
-        for (const auto& ref : peer->evidence) refs.push_back(evidenceJson(ref));
-        data["evidenceRefs"] = std::move(refs);
-    }
+    if (task.source) data["source"] = sourceRunJson(*task.source);
 }
 
 CompletionEntry readCompletion(const Json& data, const RecordDecoder& row) {
@@ -87,14 +33,17 @@ CompletionEntry readCompletion(const Json& data, const RecordDecoder& row) {
         return {std::move(text), revision,
                 FanoutCompletion{row.get<std::string>(data, "doneWhen"), decodeRunOutcome(*outcome, row),
                                  row.optional<std::string>(data, "requestedCommit")}};
-    return {
-        std::move(text), revision,
-        TaskCompletion{row.get<std::string>(data, "reason"), row.get<std::string>(data, "doneWhen"), readCompletionProvenance(data, row)}};
+    const auto readSource = [](const Json& data, const RecordDecoder& row) -> std::optional<OutboxSourceRun> {
+        if (const auto source = row.find(data, "source"); source != data.end()) return decodeOutboxSourceRun(*source, row.nested("source"));
+        return std::nullopt;
+    };
+    return {std::move(text), revision,
+            TaskCompletion{row.get<std::string>(data, "reason"), row.get<std::string>(data, "doneWhen"), readSource(data, row)}};
 }
 }
 
 const OutboxSourceRun* CompletionEntry::source() const {
-    if (const auto* task = std::get_if<TaskCompletion>(&details)) return std::get_if<OutboxSourceRun>(&task->provenance);
+    if (const auto* task = std::get_if<TaskCompletion>(&details); task && task->source) return &*task->source;
     return nullptr;
 }
 

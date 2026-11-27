@@ -11,10 +11,9 @@
 #include <vector>
 
 namespace flockv0 {
-enum class WaitReason { user_question, model_failure, bot_notes_unavailable, t3_input, auth, settings, policy_approval };
+enum class WaitReason { user_question, bot_notes_unavailable, t3_input, auth, settings, policy_approval };
 
 enum class SimpleWaitReason { bot_notes_unavailable, t3_input, auth, settings };
-enum class WaitFailureCode { unsupported_reasoning_effort, authentication_required };
 
 std::string_view waitReasonName(WaitReason);
 WaitReason waitReason(SimpleWaitReason);
@@ -24,13 +23,10 @@ struct ModelQuestionWait {
     std::string decisionReason;
     std::string questionId;
 };
-struct ModelFailureWait {
-    std::optional<WaitFailureCode> code;
-};
 struct PolicyApprovalWait {
     std::int64_t approvalId;
 };
-using WaitDetails = std::variant<SimpleWaitReason, ModelQuestionWait, ModelFailureWait, PolicyApprovalWait>;
+using WaitDetails = std::variant<SimpleWaitReason, ModelQuestionWait, PolicyApprovalWait>;
 
 struct WaitRun {
     RunRef run;

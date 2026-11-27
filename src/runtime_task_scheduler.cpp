@@ -45,14 +45,6 @@ WITH slots AS MATERIALIZED (
   UNION
   SELECT id FROM tasks WHERE state='queued' AND replanning=1
     AND (pending_environment_id<>environment_id OR (pending_pinned=1 AND pending_project_id<>project_id))
-  UNION
-  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-  WHERE kind='consult' AND state NOT IN ('completed','cancelled')
-  UNION
-  SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
-  WHERE state='cancelling' AND tasks.active_run IS NULL AND NOT EXISTS (
-    SELECT 1 FROM outbox WHERE outbox.id=tasks.action_id AND phase='started'
-  )
 )
 SELECT task.id,NULL AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
 WHERE NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id AND action_id IS NOT NULL)

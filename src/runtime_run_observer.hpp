@@ -15,7 +15,6 @@ struct Observation;
 
 class Database;
 class JournalStorage;
-class PeerStorage;
 class SecretStorage;
 class T3;
 class TaskEvents;
@@ -26,13 +25,12 @@ class OutboxStorage;
 
 class runtime::RunObserver {
 public:
-    RunObserver(Database& database, JournalStorage& journalStorage, PeerStorage& peerStorage, SecretStorage& secretStorage,
-                TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage, OutboxStorage& outboxStorage, T3& t3,
-                TaskUpdates& updates, TaskQuestions& questions, RunReports& reports, PeerExchanges& peerExchanges,
-                const std::function<Seconds()>& clock, std::stop_token shutdown)
-        : database(database), journalStorage(journalStorage), peerStorage(peerStorage), secretStorage(secretStorage),
-          taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage), outboxStorage(outboxStorage), t3(t3),
-          updates(updates), questions(questions), reports(reports), peerExchanges(peerExchanges), clock(clock), shutdown(shutdown) {}
+    RunObserver(Database& database, JournalStorage& journalStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
+                TaskRecords& taskRecords, WaitStorage& waitStorage, OutboxStorage& outboxStorage, T3& t3, TaskUpdates& updates,
+                TaskQuestions& questions, RunReports& reports, const std::function<Seconds()>& clock, std::stop_token shutdown)
+        : database(database), journalStorage(journalStorage), secretStorage(secretStorage), taskEvents(taskEvents),
+          taskRecords(taskRecords), waitStorage(waitStorage), outboxStorage(outboxStorage), t3(t3), updates(updates), questions(questions),
+          reports(reports), clock(clock), shutdown(shutdown) {}
 
     bool shouldStop(const TaskData& task);
     Observation observeRun(const std::string& bot, const std::string& environment, const Json& config, const RunRef& run);
@@ -47,7 +45,6 @@ private:
 
     Database& database;
     JournalStorage& journalStorage;
-    PeerStorage& peerStorage;
     SecretStorage& secretStorage;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;
@@ -57,7 +54,6 @@ private:
     TaskUpdates& updates;
     TaskQuestions& questions;
     RunReports& reports;
-    PeerExchanges& peerExchanges;
     const std::function<Seconds()>& clock;
     std::stop_token shutdown;
 };

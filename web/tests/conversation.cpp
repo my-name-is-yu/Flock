@@ -7,7 +7,6 @@
 #include "flock/task_list.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
-#include "flock/peer_conversations.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/board_inbox.hpp"
@@ -106,6 +105,13 @@ std::string statusText(const ModelInput& input) {
     return text;
 }
 
+Question scopeQuestion() {
+    return {"scope-question",
+            {{.id = "scope",
+              .prompt = "利用者向けの変更だけを載せますか？",
+              .options = {{"利用者向けのみ", "利用者向けのみ"}, {"すべて", "すべて"}}}}};
+}
+
 struct FixedModel : Model {
     unsigned turns = 0, explained = 0, summarized = 0;
     Id comparisonResult = 0;
@@ -113,24 +119,8 @@ struct FixedModel : Model {
 
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
-        if (input.event["kind"] == "conversation_turn") return converse(input);
-        if (input.event["kind"] == "intake")
-            return {"delegate",
-                    {{"instruction", "Read the working notes"}, {"doneWhen", "Summarize user-facing changes"}},
-                    "The request needs a working report"};
-        if (input.event["kind"] == "question") {
-            if (input.event.contains("userAnswer")) {
-                return {"answer_session_question",
-                        {{"requestId", "scope-question"}, {"answers", {{"scope", input.event["userAnswer"]}}}},
-                        "The user selected the scope"};
-            }
-            return {"ask_user",
-                    {{"question", "利用者向けの変更だけを載せますか？"}, {"choices", {"利用者向けのみ", "すべて"}}},
-                    "掲載範囲の指定が必要"};
-        }
-        if (input.task["request"] == comparisonRequest)
-            return {"complete", {{"report", proposedOptions}}, "The Session compared all three options"};
-        return {"complete", {{"report", "Draft complete"}}, "The Session report matches the criterion"};
+        check(input.event["kind"] == "conversation_turn", "a task without a conversation called the model");
+        return converse(input);
     }
 
     Decision converse(const ModelInput& input) {
@@ -736,7 +726,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto firstWaitTask = TaskIntake(store).submit(web.intake("triage", "掲載する範囲を決める"));
     const auto secondWaitTask = TaskIntake(store).submit({"triage", "次回の掲載範囲を決める", "linked env", "next-scope"});
     tick(runtime, 3);
-    t3.observations["thread-triage"] = {.kind = Observation::Kind::Question, .question = {"scope-question", {{.id = "scope"}}}};
+    t3.observations["thread-triage"] = {.kind = Observation::Kind::Question, .question = scopeQuestion()};
     t3.observations["thread-next-scope"] = t3.observations.at("thread-triage");
     tick(runtime, 2);
     const auto waitPage = browser.get("/api/view?bot=triage");
@@ -839,7 +829,6 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     };
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
-    web.peers = peers;
     const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
         return Intake{std::string(bot), std::string(request), "local-env", ""};
     };
@@ -887,7 +876,6 @@ void botMessagesStopAtTheExchangeLimit(const std::filesystem::path& path) {
     };
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
-    web.peers = peers;
     const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
         return Intake{std::string(bot), std::string(request), "local-env", ""};
     };
@@ -905,8 +893,7 @@ void conversationBotSetup(const std::filesystem::path& directory) {
     const auto report = [](auto, auto) {};
     const auto catalog = Json::array({{{"slug", "planner-next"}, {"reasoningEfforts", Json::array({"high", "xhigh"})}}});
     Store store(directory / "state.db",
-                {.automationModel = [&](std::string_view bot) { return bots.plannerModel(bot); },
-                 .saveBotSetup = [&](Store& target, std::string_view bot, const BotSetupEdit& edit,
+                {.saveBotSetup = [&](Store& target, std::string_view bot, const BotSetupEdit& edit,
                                      const Json& choices) { bots.saveSetup(&target, bot, edit, unixTime(), report, choices); },
                  .botSetupCatalog = [&] { return catalog; }});
     const Person creator{"creator"};
@@ -915,34 +902,21 @@ void conversationBotSetup(const std::filesystem::path& directory) {
         Decision change;
         Json replyConfig;
         bool changedRoleSeen = false;
-        unsigned taskCalls = 0, conversationCalls = 0;
+        unsigned conversationCalls = 0;
         bool pairReply = false;
-        std::string taskRole = "Verify the release.";
         ModelTurn decide(const ModelInput& input) override {
-            if (input.event.at("kind") == "conversation_turn") {
-                ++conversationCalls;
-                if (input.event.at("turn").empty()) {
-                    if (pairReply) return {{{"reply", {{"text", "I updated my setup"}}, ""}, change}};
-                    return {{change}};
-                }
-                replyConfig = input.config;
-                changedRoleSeen = input.notes.soul == "Run make check before reporting.";
-                return {{{"reply", {{"text", "Processed the setup request"}}, ""}}};
+            check(input.event.at("kind") == "conversation_turn", "a task asked the model for a decision");
+            ++conversationCalls;
+            if (input.event.at("turn").empty()) {
+                if (pairReply) return {{{"reply", {{"text", "I updated my setup"}}, ""}, change}};
+                return {{change}};
             }
-            ++taskCalls;
-            check(std::ranges::find(input.tools, "update_bot_setup") != input.tools.end(), "The task cannot update its Bot");
-            return {
-                {{"update_bot_setup", {{"soul", taskRole}, {"workspaceStrategy", {{"type", "root"}}}}, ""},
-                 {"delegate", {{"instruction", "Verify the release"}, {"doneWhen", "A verification report"}}, "Verification is needed"}}};
+            replyConfig = input.config;
+            changedRoleSeen = input.notes.soul == "Run make check before reporting.";
+            return {{{"reply", {{"text", "Processed the setup request"}}, ""}}};
         }
     } model;
-    struct SetupT3 : FixedT3 {
-        Command launched;
-        Delivery send(const Command& command) override {
-            launched = command;
-            return FixedT3::send(command);
-        }
-    } t3;
+    FixedT3 t3;
     RuntimeOptions options;
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.intake = [&](std::string_view id, std::string_view text) { return bots.get(id).intake(text); };

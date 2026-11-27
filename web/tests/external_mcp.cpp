@@ -50,7 +50,6 @@ constexpr auto statusTool = "flock_get_task";
 constexpr auto answerTool = "flock_answer_question";
 constexpr auto protocol = "2025-11-25";
 constexpr auto releaseLink = "https://app.t3.codes/threads/local-env/thread-release";
-constexpr auto peerLink = "https://app.t3.codes/threads/linked%20env/thread-triage";
 
 class Mcp {
 public:
@@ -267,14 +266,16 @@ void roundTrip() {
           "The queued Task projection was incorrect");
     second.denied(statusTool, task, "A different connection read progress for the queued Task");
 
-    FixedModel model;
+    struct NoModel : Model {
+        ModelTurn decide(const ModelInput&) override { throw std::runtime_error("An external MCP task called the model"); }
+    } model;
     LinkedT3 t3;
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; });
     tick(runtime, 3);
     const auto running = client.success(statusTool, task);
     check(running.at("status") == "running" && running.at("sessionLink") == releaseLink && t3.launches.at("release") == 1,
           "The external Task did not launch one T3 Session");
-    t3.observations["thread-release"] = {.kind = Observation::Kind::Question, .question = {"scope-question", {{.id = "scope"}}}};
+    t3.observations["thread-release"] = {.kind = Observation::Kind::Question, .question = scopeQuestion()};
     tick(runtime, 2);
 
     const auto waiting = client.success(statusTool, task);
@@ -314,7 +315,8 @@ void roundTrip() {
     tick(runtime, 2);
     const auto completed = client.success(statusTool, task);
     check(completed.at("status") == "completed" && completed.at("question").is_null() &&
-              completed.at("result").at("text") == "Draft complete" && completed.at("sessionLink") == releaseLink,
+              completed.at("result").at("text") == "The checked revision contains the user-facing changes" &&
+              completed.at("sessionLink") == releaseLink,
           "The final report or safe Session link was lost");
     second.denied(statusTool, task, "A different connection read the final result");
     client.denied(answerTool, answer, "The ended question accepted another answer");
@@ -326,86 +328,6 @@ void roundTrip() {
     client.denied(statusTool, {{"taskId", independent.at("taskId")}}, "The first connection read the other exchange");
     ExternalMcp(store).disconnect(caller.connectionId);
     client.request("tools/list", Json::object(), 401);
-}
-
-void peerCompletion(const std::optional<std::string>& peerUrl, const Json& expectedLink) {
-    struct PeerModel : FixedModel {
-        bool runsPeer = false;
-
-        ModelTurn decide(const ModelInput& input) override {
-            const auto& kind = input.event.at("kind");
-            if (input.task.at("botId") == "triage") {
-                if (kind == "bot_request" && runsPeer) {
-                    const Decision delegate{
-                        "delegate", {{"instruction", "Verify the release"}, {"doneWhen", "Report findings"}}, "Get independent evidence"};
-                    return {{delegate}};
-                }
-                const Decision reply{"reply_to_bot", {{"kind", "result"}, {"text", "Checked by Triage"}}, "Return verification"};
-                return {{reply}};
-            }
-            if (kind == "intake") return FixedModel::decide(input);
-            if (kind == "result") {
-                const Decision request{"send_bot_message",
-                                       {{"botId", "triage"}, {"kind", "work"}, {"text", "Verify the release"}},
-                                       "Ask for independent verification"};
-                return {{request}};
-            }
-            const Decision complete{"complete", {{"report", "Release verified by Triage"}}, "Accept the verification"};
-            return {{complete}};
-        }
-    } model;
-    model.runsPeer = peerUrl.has_value();
-    TestDirectory dir;
-    Store store(dir.path / "flock.sqlite3");
-    constexpr auto requester = "peer-requester";
-    WebIdentity(store).setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
-        if (person == requester) return false;
-        return std::nullopt;
-    });
-    BotAccess{store}.setMember(localOwner, "release", requester, true);
-    BotAccess{store}.setMember(localOwner, "triage", requester, true);
-    const auto token = ExternalMcp(store).connect(requester, {"release"}).bearerToken;
-    const auto cb = callbacks();
-    const auto server = startWeb(store, 0, cb);
-    Mcp mcp(*server, token);
-    const auto receipt = mcp.success(submitTool, {{"bot", "release"}, {"text", "Verify release"}, {"requestId", "peer-check"}});
-    const Json task{{"taskId", receipt.at("taskId")}};
-    LinkedT3 t3;
-    if (peerUrl) t3.links["triage"] = *peerUrl;
-    RuntimeOptions options;
-    options.peers = [&](std::string_view bot) {
-        if (bot != "release") return std::vector<PeerBot>{};
-        return std::vector<PeerBot>{{"Triage", cb.intake("triage", "")}};
-    };
-    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, std::move(options));
-    tick(runtime, 3);
-    check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The parent Run was missing while active");
-    t3.observations["thread-release"] = {.kind = Observation::Kind::Finished, .status = "completed", .report = "Draft complete"};
-    tick(runtime, 1);
-    check(mcp.success(statusTool, task).at("sessionLink") == releaseLink, "The parent Run was missing after settlement");
-    if (peerUrl) {
-        tick(runtime, 5);
-        check(t3.launches["triage"] == 1, "The peer did not start a Session");
-        t3.observations["thread-triage"] = {
-            .kind = Observation::Kind::Finished, .status = "completed", .report = "Verified", .resultRunId = "result-run-triage"};
-    }
-    tick(runtime, 8);
-    const auto status = mcp.success(statusTool, task);
-    check(status.at("status") == "completed" && status.at("result").at("text") == "Release verified by Triage" &&
-              status.at("sessionLink") == expectedLink,
-          "Peer completion did not use the saved result Session and URL");
-    if (!expectedLink.is_null()) {
-        const auto target = Resource::sessionRead("linked env", "thread-triage").target;
-        PolicyRules{store}.changeNeverRule(localOwner, Action::session_read, target, true);
-        const auto revoked = mcp.success(statusTool, task);
-        check(revoked.at("result") == status.at("result") && revoked.at("sessionLink").is_null(),
-              "A completed task exposed a peer Session link after access was revoked");
-        PolicyRules{store}.changeNeverRule(localOwner, Action::session_read, target, false);
-        BotAccess{store}.setMember(localOwner, "triage", requester, false);
-        const auto hidden = mcp.success(statusTool, task);
-        check(hidden.at("result") == status.at("result") && hidden.at("sessionLink").is_null(),
-              "A completed task exposed a Session link from a Bot the requester can no longer view");
-    }
 }
 
 void replannedTaskDropsPriorRun() {
@@ -479,10 +401,6 @@ int main() {
         pausedBotRefusesExternalMessages();
         roundTrip();
         hostedSessionLinks();
-        peerCompletion(peerLink, peerLink);
-        peerCompletion("http://localhost:3773/linked%20env/thread-triage", nullptr);
-        peerCompletion("https://app.t3.codes/threads/linked%20env/other-thread", nullptr);
-        peerCompletion(std::nullopt, nullptr);
         replannedTaskDropsPriorRun();
         std::cout << "Local external MCP tests passed\n";
     } catch (const std::exception& error) {

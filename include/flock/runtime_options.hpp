@@ -16,7 +16,6 @@ struct BotTools;
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
-    std::string sessionRead = "off";
     PeerResolver peers = {};
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};

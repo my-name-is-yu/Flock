@@ -11,7 +11,6 @@
 #include "session_participation_storage.hpp"
 #include "session_message_storage.hpp"
 #include "secret_storage.hpp"
-#include "peer_storage.hpp"
 #include "model_calls.hpp"
 #include "memory_storage.hpp"
 #include "local_machine_storage.hpp"
@@ -32,7 +31,6 @@
 #include "journal.hpp"
 #include "journal_task.hpp"
 #include "journal_conversation.hpp"
-#include "journal_peer.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"
@@ -250,8 +248,7 @@ const char* ConversationStorage::questionAnswerError(const TaskData& task, const
     if (message.replyTo && (!message.question || message.question->messageId != asked))
         return "This message replies to something else, so it can only answer the question it replies to";
     if (!asked || wait->run != taskWaitRun(task) || wait->eventId != task.eventId) return "That question is no longer current";
-    if (peerStorage.replanReady(task))
-        return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
+    if (task.replanning) return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
 }
 
@@ -259,7 +256,9 @@ std::optional<TaskData> ConversationStorage::wokenTask(const Message& message) c
     const auto wake = message.routing.find("sessionWake");
     if (wake == message.routing.end() || !wake->contains("taskId")) return std::nullopt;
     auto task = taskRecords.load(wake->at("taskId").get<Id>());
-    if (task.botId != message.bot || task.state != TaskState::deciding || !task.actionId.empty() || task.activeRun) return std::nullopt;
+    const bool unconfirmed = field(*wake, "reason") == "unknown";
+    if (task.botId != message.bot || task.state != TaskState::deciding || (!task.actionId.empty() && !unconfirmed) || task.activeRun)
+        return std::nullopt;
     const auto event = TaskEvents(database).currentEvent(task);
     if (!event.is_null() && event.at("consumed") != true) return std::nullopt;
     return task;
@@ -276,14 +275,14 @@ std::optional<ConversationStorage::WorkLearningSource> ConversationStorage::woke
     return WorkLearningSource{row.number(0), report.resultRunId};
 }
 
-Json ConversationStorage::applyWokenTaskDecision(const Message& message, const Decision& decision) {
+Json ConversationStorage::applyWokenTaskDecision(const Message& message, const Decision& decision, Seconds now) {
     auto task = wokenTask(message);
     if (!task) throw ToolError("The task is no longer waiting for this conversation");
     const auto& args = decision.args;
     if (decision.tool == "wait_for_event") {
         if (args.size() != 2 || !args.contains("note") || !args.contains("checkAgainAfterMinutes"))
             throw ToolError("Provide a waiting note and a re-check time");
-        waitForExternalEvent(*task, args, unixTime());
+        waitForExternalEvent(*task, args, now);
         taskRecords.save(*task);
     } else {
         const auto learnings = args.find("learnings");
@@ -293,7 +292,7 @@ Json ConversationStorage::applyWokenTaskDecision(const Message& message, const D
         if (learnings != args.end() && !source) throw ToolError("This task's Session report cannot be learned from");
         const auto completion = taskRecords.completeWithReport(
             *task, text(args, "report", limits::session_prompt::maxDecisionTextBytes, true), decision.reason);
-        if (source) memoryStorage.learnFromWork(*task, completion, source->report, source->runId, *learnings, unixTime());
+        if (source) memoryStorage.learnFromWork(*task, completion, source->report, source->runId, *learnings, now);
     }
     return {{"ok", true}, {"taskId", task->id}, {"effect", taskStateName(task->state)}};
 }
@@ -623,7 +622,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     const auto& routing = message.routing;
     if (tool == "wait_for_event" || tool == "complete")
         return routing.contains("gitEvent") ? gitStorage.applyGitTaskDecision(message, decision)
-                                            : applyWokenTaskDecision(message, decision);
+                                            : applyWokenTaskDecision(message, decision, now);
     if (tool == "read_memory" || tool == "memory_history" || tool == "write_memory" || tool == "revert_memory_edit") {
         auto result = memoryStorage.conversationMemory(message, tool, args, now);
         result["ok"] = true;
@@ -867,17 +866,8 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                           {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
     if (auto woken = wokenTask(message)) {
-        const auto reason = field(message.routing.at("sessionWake"), "reason");
-        if (reason == "finished" || reason == "failed") {
-            auto report = taskRecords.latestReportText(woken->id);
-            taskRecords.completeWithReport(*woken, report.empty() ? "The Session finished without a readable report." : std::move(report),
-                                           "The conversation did not ask for more work");
-        } else {
-            // Nothing settled, so leave the task where the person can see it instead of closing work that never ran.
-            waitStorage.wait(*woken, ModelQuestionWait{},
-                             "This task stopped before its work finished. Reply with what to do next, or cancel it.");
-            taskRecords.save(*woken);
-        }
+        settleUndecided(*woken, field(message.routing.at("sessionWake"), "reason"), taskRecords, waitStorage);
+        if (!terminal(*woken)) taskRecords.save(*woken);
     }
     Json actions = Json::array();
     std::set<Id> touched;

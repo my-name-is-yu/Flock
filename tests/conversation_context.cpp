@@ -92,22 +92,10 @@ struct SessionService : T3 {
 struct Bot : Model {
     Decision action;
     Json history, result;
-    std::function<Decision(const ModelInput&)> conversation, work;
+    std::function<Decision(const ModelInput&)> conversation;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
-        if (input.event.at("kind") == "question")
-            return {"answer_session_question", {{"requestId", "q"}, {"answers", {{"choice", "yes"}}}}, "Answer the Session"};
-        if (input.event.at("kind") != "conversation_turn") {
-            if (work) return work(input);
-            if (input.event.at("kind") == "intake") {
-                Json args{{"instruction", "Handle the requested work"}};
-                if (input.needsDoneWhen) args["doneWhen"] = "Return a report";
-                return {"delegate", std::move(args), "Start the task"};
-            }
-            if (input.event.at("kind") == "result")
-                return {"complete", {{"report", input.event.at("report")}}, "The Session returned its report"};
-            throw std::runtime_error("Unexpected task decision: " + input.event.dump());
-        }
+        if (input.event.at("kind") != "conversation_turn") throw std::runtime_error("Unexpected task decision: " + input.event.dump());
         history = input.history;
         if (conversation) return conversation(input);
         if (input.event.contains("sessionWake")) return {"reply", {{"text", "The work finished"}}, "Tell the person"};

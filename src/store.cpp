@@ -10,7 +10,6 @@
 #include "flock/notifications.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/policy.hpp"
-#include "flock/peer_conversations.hpp"
 #include "flock/channels.hpp"
 #include "flock/local_machines.hpp"
 #include "flock/identity.hpp"
@@ -27,7 +26,6 @@
 #include "task_records.hpp"
 #include "task_operations.hpp"
 #include "secret_storage.hpp"
-#include "peer_storage.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
 #include "session_stop.hpp"
@@ -37,7 +35,6 @@
 #include "store_access.hpp"
 #include "flock/limits.hpp"
 #include "journal.hpp"
-#include "journal_peer.hpp"
 #include "task_storage.hpp"
 #include "task_interaction_storage.hpp"
 #include "task_context_storage.hpp"
@@ -125,20 +122,19 @@ RunRef runRef(const Json& data) {
 Store::Impl::Impl(Store& store, std::filesystem::path file, StoreOptions options)
     : path(std::move(file)), permissions(store), botAccess(store), secretRequests(store),
       memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
-      automationStorage(database, secretStorage, botLifecycle, permissions, std::move(options.automationModel), taskOperations),
+      automationStorage(database, secretStorage, botLifecycle, permissions, taskOperations),
       botSetup(store, database, secretStorage, std::move(options.saveBotSetup), std::move(options.botSetupCatalog)) {
     database.open(path);
 }
 
 void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     const Id id = task.id;
-    const auto peer = peerStorage.peerExchange(id);
     const bool undispatched = task.state == TaskState::queued || taskRouting.isUndispatchedNotesWait(task);
     if (!task.pendingInstructions.empty()) task.cancelledInstructions = task.pendingInstructions;
     waitStorage.clearWait(task, "cancel");
     taskEvents.consumeEvent(task);
     journalStorage.journalCancelRequested(id, stop);
-    if (undispatched && task.actionId.empty() && !peer) {
+    if (undispatched && task.actionId.empty()) {
         task.pendingDestination.reset();
         task.replanning = false;
         task.pendingInstructions.clear();
@@ -147,19 +143,6 @@ void TaskOperations::requestCancellation(TaskData& task, SessionStop stop) {
     } else
         task.state = TaskState::cancelling;
     taskRecords.save(task);
-    if (peer && peer->sender == id) {
-        auto recipient = taskRecords.load(peer->recipient);
-        if (stop.participation && peer->kind == "work") {
-            // The Session exit owns this task's Run, while the peer still owns its own task and Run.
-            database.exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?", {peer->id});
-            if (recipient.state == TaskState::peer_waiting) {
-                taskEvents.event(recipient, "peer-closed/" + peer->id, {{"kind", "intake"}});
-                recipient.state = TaskState::deciding;
-                taskRecords.save(recipient);
-            }
-        } else if (!terminal(recipient) && recipient.state != TaskState::cancelling)
-            requestCancellation(recipient);
-    }
 }
 
 Store::Store(std::filesystem::path db) : Store(std::move(db), {}) {}
@@ -233,8 +216,6 @@ Notifications::Notifications(Store& store)
     : database_(Database::of(store)), secrets_(StoreAccess::get(store).secretStorage), channels_(StoreAccess::get(store).channelStorage),
       permissions_(StoreAccess::get(store).permissions) {}
 
-PeerConversations::PeerConversations(Store& store) : database_(Database::of(store)) {}
-
 const std::filesystem::path& Store::path() const {
     return p_->path;
 }
@@ -307,7 +288,6 @@ WHERE j.conversation_bot_id IS NULL AND (
             IS (j.run_environment_id,j.run_thread_id,j.run_id,j.run_gateway_id)
         ))
   ))
-  OR (j.kind='waiting' AND j.wait_reason='model_failure')
 )
 )
 )SQL";
@@ -352,14 +332,13 @@ Id TaskOperations::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
     if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
     secretStorage.sharedRedactor().requirePublic(requester->id);
-    return submit(item, 0, nullptr, TaskSource::request, {}, requester->id);
+    return submit(item, 0, nullptr, {}, requester->id);
 }
 
-Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSource* source, TaskSource sourceKind,
-                          std::optional<TaskTrigger> trigger, std::optional<std::string> requester) {
-    const bool consultation = sourceKind == TaskSource::consultation;
+Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSource* source, std::optional<TaskTrigger> trigger,
+                          std::optional<std::string> requester) {
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
-        item.request.size() > limits::messages::maxBodyBytes || (!consultation && item.environmentId.empty()) || !item.config.is_object())
+        item.request.size() > limits::messages::maxBodyBytes || item.environmentId.empty() || !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to " + std::to_string(limits::messages::maxBodyBytes) +
                        " bytes), and environment are required");
     if (botLifecycle.botDeleted(item.botId)) throw Conflict("Bot has been deleted");
@@ -367,7 +346,7 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     const auto scrub = secretStorage.redactor(item.botId);
     scrub.requirePublic({item.botId, item.environmentId, item.projectId, item.config});
     const auto request = scrub.text(item.request);
-    TaskData task{.state = consultation ? TaskState::deciding : TaskState::queued,
+    TaskData task{.state = TaskState::queued,
                   .botId = item.botId,
                   .request = request,
                   .intent = request,
@@ -384,15 +363,13 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
     task.trigger = std::move(trigger);
     task.requester = std::move(requester);
     const auto id = taskRecords.insertTask(task);
-    if (sourceKind == TaskSource::request) {
-        Json entry = {{"text", request},
-                      {"messageId", sourceMessageId},
-                      {"source", sourceMessageId ? "conversation"
-                                 : task.trigger  ? "automation"
-                                                 : "manual"}};
-        if (task.trigger) entry["trigger"] = taskTriggerJson(*task.trigger);
-        database.writeJournal(id, "request", entry);
-    }
+    Json entry = {{"text", request},
+                  {"messageId", sourceMessageId},
+                  {"source", sourceMessageId ? "conversation"
+                             : task.trigger  ? "automation"
+                                             : "manual"}};
+    if (task.trigger) entry["trigger"] = taskTriggerJson(*task.trigger);
+    database.writeJournal(id, "request", entry);
     return id;
 }
 
@@ -487,10 +464,10 @@ WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed')
-         OR (kind='waiting' AND wait_reason IN ('user_question','model_failure','bot_notes_unavailable','auth','settings')))
+         OR (kind='waiting' AND wait_reason IN ('user_question','bot_notes_unavailable','auth','settings')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop','bot_setup_undone'))
       OR (conversation_bot_id IS NULL
-        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
+        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
         AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)))
 ), bot_page AS (
@@ -552,71 +529,4 @@ ORDER BY page.id DESC)SQL",
     return result;
 }
 
-Json PeerConversations::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
-                                         std::string_view viewer) const {
-    std::lock_guard lock(database_.mutex);
-    const auto sql = std::string(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data,m.text,original.time
-FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message' AND j.exchange_id=p.id
-LEFT JOIN messages m ON ?5<>'' AND m.id=j.forwarded_source_message_id
-  AND m.id=sender.source_message_id AND m.bot_id=sender.bot_id AND m.person_id=?5
-LEFT JOIN journal original ON original.id=m.id AND original.kind='conversation_message'
-WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
-)SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4" : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
-    auto rows = database_.query(sql.c_str(), {bot, peer, from ? from : before, std::clamp(limit, 1u, 200u), viewer});
-    Json result = Json::array();
-    while (rows.next()) {
-        auto event = journalRow(rows);
-        if (!rows.null(6)) {
-            const auto forwarded = decodeBotMessage(rows.number(0), event.at("data")).forwarded;
-            if (forwarded && forwarded->text == rows.string(5) && forwarded->time == rows.number(6)) event["forwardedFromViewer"] = true;
-        }
-        result.push_back(std::move(event));
-    }
-    if (!from) std::reverse(result.begin(), result.end());
-    return result;
-}
-
-Id PeerConversations::peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const {
-    std::lock_guard lock(database_.mutex);
-    // Each participant has a journal row. The shared DM displays the sender task's copy.
-    auto row = database_.query(R"SQL(
-SELECT j.id
-FROM journal source
-JOIN peer_exchanges p ON p.id=source.exchange_id
-JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
-  AND j.exchange_id=p.id AND j.peer_message_id=source.peer_message_id
-WHERE source.id=?3 AND source.kind='bot_message' AND source.task_id IN (p.sender_task,p.recipient_task)
-  AND ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
-LIMIT 1
-)SQL",
-                               {bot, peer, event});
-    return row.next() ? row.number(0) : 0;
-}
-
-std::vector<std::pair<std::string, std::string>> PeerConversations::peerExchangePairs() const {
-    std::lock_guard lock(database_.mutex);
-    auto rows = database_.query(R"SQL(
-SELECT DISTINCT sender.bot_id,recipient.bot_id
-FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-)SQL");
-    std::vector<std::pair<std::string, std::string>> result;
-    while (rows.next()) result.emplace_back(rows.string(0), rows.string(1));
-    return result;
-}
-
-bool PeerConversations::hasPeerExchange(std::string_view bot, std::string_view peer) const {
-    std::lock_guard lock(database_.mutex);
-    return database_
-        .query(R"SQL(
-SELECT 1
-FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-WHERE (sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1)
-LIMIT 1
-)SQL",
-               {bot, peer})
-        .next();
-}
 } // namespace flockv0

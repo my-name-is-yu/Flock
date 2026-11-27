@@ -59,8 +59,7 @@ bool validatedCallsConflict(const Decision& a, const Decision& b) {
 CallClass classify(const Decision& call) {
     const auto& tool = call.tool;
     if (tool == "reply") return CallClass::terminal;
-    if (gitOperation(call) == "read")
-        return tool == "git_find_repos" || tool == "git_read_result" ? CallClass::parallel_read : CallClass::gated_read;
+    if (gitOperation(call) == "read") return tool == "git_find_repos" ? CallClass::parallel_read : CallClass::gated_read;
     if (const auto* read = conversationReadSpec(tool)) return read->classification;
 
     constexpr std::string_view gated[]{"read_channel_attachment", "mcp_call_tool"};

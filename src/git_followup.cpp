@@ -1,7 +1,7 @@
+#include "journal_git.hpp"
 #include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
-#include "journal_peer.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
 #include "flock/git_host.hpp"

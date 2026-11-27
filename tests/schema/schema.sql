@@ -18,22 +18,19 @@ VALUES
     ('index', 'git_events_repo', 'git_webhook_events', 'CREATE INDEX git_events_repo ON git_webhook_events(host,repo)'),
     ('index', 'git_pr_history', 'git_pr_operations', 'CREATE INDEX git_pr_history ON git_pr_operations(task_id,host,base_repo,base_ref,head_repo,head_ref)'),
     ('index', 'git_pr_watches_by_task', 'git_pr_watches', 'CREATE INDEX git_pr_watches_by_task ON git_pr_watches(task_id)'),
-    ('index', 'git_task_reads_by_task', 'git_task_reads', 'CREATE INDEX git_task_reads_by_task ON git_task_reads(task_id,id)'),
     ('index', 'inbox_decisions_by_bot', 'inbox_decisions', 'CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id)'),
     ('index', 'journal_bot', 'journal', 'CREATE INDEX journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL'),
     ('index', 'journal_instruction_delivered', 'journal', 'CREATE INDEX journal_instruction_delivered ON journal(task_id,message_id,instruction_step,revision_id)
   WHERE kind=''instruction_delivered'''),
     ('index', 'journal_instruction_message', 'journal', 'CREATE INDEX journal_instruction_message ON journal(message_id,task_id,instruction_step)
   WHERE kind IN (''instruction_accepted'',''instruction_delivered'')'),
-    ('index', 'journal_peer_evidence', 'journal', 'CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind=''read_bot_evidence'''),
-    ('index', 'journal_peer_message', 'journal', 'CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind=''bot_message'''),
     ('index', 'journal_pr_followup', 'journal', 'CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind=''git_pr_followup_requested'''),
     ('index', 'journal_report_result', 'journal', 'CREATE INDEX journal_report_result ON journal(task_id,run_environment_id,run_thread_id,result_run_id,id)
   WHERE kind=''report'''),
     ('index', 'journal_report_run', 'journal', 'CREATE INDEX journal_report_run ON journal(task_id,run_environment_id,run_thread_id,run_id,revision_id)
   WHERE kind=''report'''),
     ('index', 'journal_sent_action', 'journal', 'CREATE INDEX journal_sent_action ON journal(task_id,action_id,id) WHERE kind=''send_started'''),
-    ('index', 'journal_session_changes', 'journal', 'CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN (''completed'',''cancelled'',''peer_completed'')'),
+    ('index', 'journal_session_changes', 'journal', 'CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN (''completed'',''cancelled'')'),
     ('index', 'journal_task', 'journal', 'CREATE INDEX journal_task ON journal(task_id,id)'),
     ('index', 'journal_task_results', 'journal', 'CREATE INDEX journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN (''completed'',''report'',''cancelled'')'),
@@ -45,7 +42,6 @@ VALUES
       WHERE status IN (''pending'',''approved'')'),
     ('index', 'memory_revisions_document', 'memory_revisions', 'CREATE INDEX memory_revisions_document ON memory_revisions(doc_key,id DESC)'),
     ('index', 'outbox_task', 'outbox', 'CREATE INDEX outbox_task ON outbox(task_id)'),
-    ('index', 'peer_sender_open', 'peer_exchanges', 'CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>''closed'''),
     ('index', 'pending_secret', 'protected_inputs', 'CREATE UNIQUE INDEX pending_secret ON protected_inputs(bot,name) WHERE status=''pending'''),
     ('index', 'policy_denied', 'policy_approvals', 'CREATE INDEX policy_denied ON policy_approvals(bot,scope,action,target,status)'),
     ('index', 'policy_pending', 'policy_approvals', 'CREATE INDEX policy_pending ON policy_approvals(status,bot)'),
@@ -88,7 +84,6 @@ VALUES
     ('index', 'sqlite_autoindex_git_pr_heads_1', 'git_pr_heads', NULL),
     ('index', 'sqlite_autoindex_git_pr_operations_1', 'git_pr_operations', NULL),
     ('index', 'sqlite_autoindex_git_pr_watches_1', 'git_pr_watches', NULL),
-    ('index', 'sqlite_autoindex_git_task_reads_1', 'git_task_reads', NULL),
     ('index', 'sqlite_autoindex_git_webhook_deliveries_1', 'git_webhook_deliveries', NULL),
     ('index', 'sqlite_autoindex_git_webhook_events_1', 'git_webhook_events', NULL),
     ('index', 'sqlite_autoindex_git_webhook_events_2', 'git_webhook_events', NULL),
@@ -99,8 +94,6 @@ VALUES
     ('index', 'sqlite_autoindex_messages_1', 'messages', NULL),
     ('index', 'sqlite_autoindex_messages_2', 'messages', NULL),
     ('index', 'sqlite_autoindex_outbox_1', 'outbox', NULL),
-    ('index', 'sqlite_autoindex_peer_exchanges_1', 'peer_exchanges', NULL),
-    ('index', 'sqlite_autoindex_peer_exchanges_2', 'peer_exchanges', NULL),
     ('index', 'sqlite_autoindex_policy_approvals_1', 'policy_approvals', NULL),
     ('index', 'sqlite_autoindex_policy_rules_1', 'policy_rules', NULL),
     ('index', 'sqlite_autoindex_protected_inputs_1', 'protected_inputs', NULL),
@@ -235,10 +228,6 @@ VALUES
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
  url TEXT NOT NULL, event_cursor INTEGER NOT NULL,
  PRIMARY KEY(host,repo,pr_number))'),
-    ('table', 'git_task_reads', 'git_task_reads', 'CREATE TABLE git_task_reads(
- id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
- invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
- UNIQUE(task_id,invocation))'),
     ('table', 'git_webhook_deliveries', 'git_webhook_deliveries', 'CREATE TABLE git_webhook_deliveries(
  event INTEGER NOT NULL REFERENCES git_webhook_events(id) ON DELETE CASCADE, pr_number INTEGER NOT NULL,
  PRIMARY KEY(event,pr_number))'),
@@ -259,7 +248,6 @@ VALUES
   action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   message_id INTEGER, instruction_step INTEGER,
-  exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER,
@@ -312,18 +300,13 @@ VALUES
   role_hash TEXT, role_section TEXT, role_excerpt_bytes INTEGER,
   CHECK((memory_version IS NULL)=(memory_section IS NULL) AND (memory_version IS NULL)=(memory_excerpt_bytes IS NULL)),
   CHECK((role_hash IS NULL)=(role_section IS NULL) AND (role_hash IS NULL)=(role_excerpt_bytes IS NULL)))'),
-    ('table', 'peer_exchanges', 'peer_exchanges', 'CREATE TABLE peer_exchanges(
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
-  sender_task INTEGER NOT NULL REFERENCES tasks(id),
-  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
-  sender_environment TEXT NOT NULL, sender_revision INTEGER)'),
     ('table', 'policy_approvals', 'policy_approvals', 'CREATE TABLE policy_approvals(
  id INTEGER PRIMARY KEY, operation TEXT NOT NULL UNIQUE, bot TEXT NOT NULL,
  action TEXT NOT NULL,target TEXT NOT NULL,fingerprint TEXT NOT NULL,preview TEXT NOT NULL,
  scope TEXT NOT NULL, requester TEXT NOT NULL, anchor INTEGER NOT NULL, turn INTEGER NOT NULL,
  task INTEGER NOT NULL, revision INTEGER NOT NULL,generation INTEGER NOT NULL,
  created_at INTEGER NOT NULL,expires_at INTEGER,mode_revision INTEGER NOT NULL,
- status TEXT NOT NULL DEFAULT ''pending'', resume TEXT,
+ status TEXT NOT NULL DEFAULT ''pending'',
  wait_id INTEGER NOT NULL DEFAULT 0, card_generation INTEGER NOT NULL, resume_state TEXT NOT NULL DEFAULT ''''
 )'),
     ('table', 'policy_journal', 'policy_journal', 'CREATE TABLE policy_journal(id INTEGER PRIMARY KEY,time INTEGER,actor TEXT,bot TEXT,action TEXT,details TEXT)'),
@@ -382,7 +365,6 @@ VALUES
   ref TEXT PRIMARY KEY, bot TEXT NOT NULL, kind INTEGER NOT NULL,
   environment TEXT NOT NULL, thread TEXT NOT NULL, payload TEXT NOT NULL,
   UNIQUE(bot,kind,environment,thread,payload))'),
-    ('table', 'sqlite_sequence', 'sqlite_sequence', 'CREATE TABLE sqlite_sequence(name,seq)'),
     ('table', 't3_connected_environments', 't3_connected_environments', 'CREATE TABLE t3_connected_environments(environment_id TEXT PRIMARY KEY)'),
     ('table', 't3_connector', 't3_connector', 'CREATE TABLE t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
@@ -485,19 +467,8 @@ WITH candidates AS (
     AND route.status IN (''queued'',''running'',''confirmation_pending'')
 )
 SELECT task.id,task.environment_id,task.project_id,task.action_id,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.slot_state,task.slot_state)=''queued'',
-           COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.slot_state=''cancelling'' THEN 0
-                WHEN task.slot_state=''peer_waiting'' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task
-  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND peer.phase<>''closed''
-WHERE COALESCE(peer.kind,'''')<>''consult'''),
+       ROW_NUMBER() OVER (PARTITION BY task.environment_id,task.project_id ORDER BY task.slot_state=''queued'', task.id) AS position
+FROM candidates task'),
     ('view', 'project_route_slots', 'project_route_slots', 'CREATE VIEW project_route_slots AS
 WITH queue AS (
   SELECT id,environment_id,project_id,action_id,

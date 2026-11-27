@@ -1,7 +1,6 @@
 #include "runtime_run_observer.hpp"
 #include "outbox_storage.hpp"
 #include "journal.hpp"
-#include "runtime_peer_exchanges.hpp"
 #include "runtime_run_reports.hpp"
 #include "runtime_task_questions.hpp"
 #include "runtime_task_state.hpp"
@@ -21,7 +20,6 @@
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "journal_storage.hpp"
-#include "peer_storage.hpp"
 #include "run_ref_storage.hpp"
 #include "secret_storage.hpp"
 #include "task_events.hpp"
@@ -37,11 +35,7 @@
 
 namespace flockv0 {
 bool runtime::RunObserver::shouldStop(const TaskData& task) {
-    if (peerStorage.replanReady(task)) return true;
-    if (task.state != TaskState::cancelling) return false;
-    std::lock_guard lock(database.mutex);
-    const auto peer = peerStorage.peerExchange(task.id);
-    return !peer || peer->recipient == task.id;
+    return task.replanning || task.state == TaskState::cancelling;
 }
 
 Observation runtime::RunObserver::observeRun(const std::string& bot, const std::string& environment, const Json& config,
@@ -77,7 +71,6 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
     if (task.generation != snapshot.generation || task.eventId != snapshot.eventId || task.currentRevision != snapshot.currentRevision ||
         task.activeRun != snapshot.activeRun)
         return false;
-    std::optional<DecisionCheckpoint> resumedDecision;
     const bool changed = [&] {
         const auto run = task.activeRun.value().ref;
         const auto state = task.state;
@@ -150,7 +143,7 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
                 auto saved = task.question->target;
                 saved.waitId.reset();
                 if (saved != questionTarget(task)) return false;
-                resumedDecision = questions.resumeQuestion(task);
+                questions.resumeQuestion(task);
                 return true;
             }
             database.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'question',?)",
@@ -199,7 +192,7 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
         }
         return leftQueue;
     }();
-    if (changed) updates.saveTask(task, std::move(resumedDecision));
+    if (changed) updates.saveTask(task);
     tx.commit();
     return changed;
 }
@@ -211,8 +204,7 @@ bool runtime::RunObserver::questionStillOpen(const TaskData& task) {
     auto target = questionTarget(task);
     const auto& savedTarget = task.question->target;
     if (savedTarget == target) return true;
-    target.eventId = savedTarget.eventId;
-    return savedTarget == target && peerExchanges.forwardedQuestionAnswer(task, savedTarget);
+    return false;
 }
 
 void runtime::RunObserver::interruptRun(const TaskData& task) {
@@ -265,17 +257,11 @@ void runtime::RunObserver::cancelDone(TaskData& task) {
     task.activeRun.reset();
     task.state = TaskState::cancelled;
     journalStorage.journalCancelled(task.id);
-    if (const auto peer = peerStorage.peerExchange(task.id); peer && peer->recipient == task.id)
-        peerExchanges.finishPeer(*peer, task, taskRecords.load(peer->sender), "cancelled",
-                                 task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot’s request was cancelled.",
-                                 actionId());
 }
 
 void runtime::RunObserver::finishReplan(const TaskData& task) {
     updates.change(task, [&](TaskData& current) {
         const auto id = current.id;
-        const auto peer = peerStorage.peerExchange(id);
-        if (peer && !peer->allowsReplan(id)) return false;
         const auto oldEnvironment = current.environmentId;
         const auto oldProject = current.projectId;
         const auto oldGateway =
@@ -284,8 +270,6 @@ void runtime::RunObserver::finishReplan(const TaskData& task) {
         const bool moving =
             destination && (destination->route.environmentId != oldEnvironment || destination->route.gatewayEnvironmentId != oldGateway ||
                             (destination->pinned && destination->route.projectId != oldProject));
-        const auto event = taskEvents.currentEvent(current);
-        const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true && event["kind"] == "bot_answer";
         if (moving) {
             current.environmentId = destination->route.environmentId;
             current.projectId = destination->pinned ? destination->route.projectId : std::string{};
@@ -304,19 +288,16 @@ void runtime::RunObserver::finishReplan(const TaskData& task) {
         }
         if (destination && (destination->pinned || destination->route.projectId.empty())) current.pendingDestination.reset();
         questions.closeQuestion(current, "user_instruction");
-        if (!preservePeerAnswer) {
-            updates.consumeEvent(current);
-            const auto report = reports.settledSessionReport(current);
-            taskEvents.event(current, "replan/" + std::to_string(current.generation),
-                             report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
-        }
+        updates.consumeEvent(current);
+        const auto report = reports.settledSessionReport(current);
+        taskEvents.event(current, "replan/" + std::to_string(current.generation),
+                         report ? encodeRunReport(report->data) : Json{{"kind", "intake"}});
         const bool needsQueue = moving || current.state == TaskState::queued || current.projectId.empty();
         current.state = needsQueue ? TaskState::queued : TaskState::deciding;
         current.replanning = false;
         current.replanningDetail.reset();
         current.runStop.reset();
         current.t3CheckAt.reset();
-        current.feedback.reset();
         return true;
     });
 }

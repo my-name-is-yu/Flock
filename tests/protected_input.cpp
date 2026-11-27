@@ -63,8 +63,7 @@ struct ToolModel : Model {
     Json result;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
-        for (auto& data :
-             {input.task, input.event, input.history, input.evidence, input.config, Json(input.notes.soul), Json(input.feedback)})
+        for (auto& data : {input.task, input.event, input.history, input.config, Json(input.notes.soul), Json(input.feedback)})
             check(data.dump().find(credential) == std::string::npos, "value reached model");
         if (next.tool.empty()) {
             result = input.event;
@@ -86,14 +85,7 @@ struct Adapter : T3 {
 const Person owner{"local-owner", true}, admin{"alice"}, viewer{"bob"};
 const Resource readRepo{Action::repository_read, "github.com/org/private"};
 struct WorkModel : Model {
-    ModelTurn decide(const ModelInput& in) override { return {{choose(in)}}; }
-    Decision choose(const ModelInput& in) {
-        if (in.task.value("request", "") == "ask reviewer")
-            return {"send_bot_message",
-                    {{"kind", "work"}, {"botId", "Reviewer"}, {"text", "review repository"}, {"doneWhen", "reviewed"}},
-                    "Request peer review"};
-        return {"delegate", {{"instruction", "read repository"}, {"doneWhen", "read complete"}}, "Read the requested repository"};
-    }
+    ModelTurn decide(const ModelInput&) override { throw std::runtime_error("a task without a conversation called the model"); }
 };
 struct RunningAdapter : Adapter {
     std::map<std::string, RunRef> running;
@@ -109,16 +101,11 @@ void runningSessions(const std::filesystem::path& path) {
     Policy policy{store};
     WorkModel model;
     RunningAdapter adapter;
-    RuntimeOptions options;
-    options.peers = [](std::string_view sender) -> std::vector<PeerBot> {
-        if (sender == "Ernest") return {{"Reviewer", {"Reviewer", "", "env", "peer-project"}}};
-        return {};
-    };
-    Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
+    Runtime runtime(store, model, adapter, [](auto) { return std::string{}; });
     TaskIntake(store).submit({"Ernest", "read repository", "env", "project"});
-    TaskIntake(store).submit({"Ernest", "ask reviewer", "env", "other-project"});
+    TaskIntake(store).submit({"Reviewer", "review repository", "env", "other-project"});
     for (int i = 0; i < 30 && adapter.running.size() < 2; ++i) runtime.tick();
-    check(adapter.running.size() == 2, "peer and sender did not launch under distinct owners");
+    check(adapter.running.size() == 2, "two Bots' tasks did not launch under distinct owners");
     std::vector<std::string> completed;
     auto read = [&](const std::string& bot, bool upstream = true) {
         policy.executeSessionResource(

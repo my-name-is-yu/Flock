@@ -29,7 +29,6 @@
 #include <iostream>
 #include <map>
 #include <sqlite3.h>
-#include <spawn.h>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -39,9 +38,6 @@
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <sys/wait.h>
-
-extern char** environ;
 
 using namespace git_fixture;
 
@@ -49,8 +45,6 @@ void testGitPrFollowup();
 
 namespace {
 constexpr auto fixtureReason = "Use the verified fixture evidence";
-constexpr auto mutationChildFlag = "--task-mutation-child";
-std::string executable;
 
 ModelTurn decodeCall(const Json& request, std::string_view tool, const Json& args) {
     const Json call{{"type", "function_call"}, {"namespace", "flock"}, {"status", "completed"}, {"name", tool}, {"arguments", args.dump()}};
@@ -67,7 +61,6 @@ public:
     std::function<void()> onNotification;
     std::function<void()> beforeTaskWait;
     std::function<Decision(const ModelInput&)> rawNotification;
-    std::function<Decision(const ModelInput&)> onTaskResult;
 
     ModelTurn decide(const ModelInput& input) override {
         if (rawNotification && input.event.contains("gitEvent")) return {{rawNotification(input)}};
@@ -80,23 +73,24 @@ public:
 private:
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
-        if (event.at("kind") == "intake")
-            return {"delegate", {{"instruction", "Push change"}, {"doneWhen", "Open a PR for the pushed branch"}}, {}};
-        if (event.at("kind") == "result") {
-            if (onTaskResult) return onTaskResult(input);
-            const auto steps = event.value("gitResults", Json::array());
-            if (openAfterSession && steps.empty()) return {"git_open_pr", openArgs(), {}};
-            if (!steps.empty()) {
-                results["session-pr"] = steps.at(0).at("result");
+        const auto& steps = event.at("turn");
+        if (event.contains("sessionWake")) {
+            if (openAfterSession && steps.empty()) {
+                auto args = openArgs();
+                args["taskId"] = event.at("task").at("taskId");
+                return {"git_open_pr", std::move(args), {}};
+            }
+            if (!steps.empty() && steps.back().at("tool") == "git_open_pr") {
+                results["session-pr"] = steps.back().at("result");
                 check(results["session-pr"].value("ok", false), "task PR open failed: " + results["session-pr"].dump());
             }
+            if (!steps.empty() && steps.back().at("tool") != "git_open_pr") return {"reply", {{"text", "Waiting for review."}}, {}};
             if (openAfterSession) {
                 if (beforeTaskWait) beforeTaskWait();
                 return {"wait_for_event", {{"note", "Waiting for review"}, {"checkAgainAfterMinutes", 5}}, {}};
             }
             return {"complete", {{"report", "Change prepared and checked"}}, {}};
         }
-        const auto& steps = event.at("turn");
         if (event.contains("gitEvent")) {
             const auto& gitEvent = event.at("gitEvent");
             if (steps.empty()) {
@@ -136,6 +130,10 @@ Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::
     runtime.runConversations();
     if (!model.results.contains(id)) throw std::runtime_error("No result for " + id);
     return model.results.at(id);
+}
+
+Id startTask(Store& store, Runtime& runtime, Script& model, std::string key) {
+    return invoke(store, runtime, model, std::move(key), "start_task", {{"request", "Ship the tested change"}}).at("taskId").get<Id>();
 }
 
 bool recordedMutationReason(const Json& history, std::string_view tool) {
@@ -206,8 +204,8 @@ void runner() {
     Id task, other;
     {
         Store store(path);
-        task = TaskIntake(store).submit(intake());
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+        task = startTask(store, runtime, script, "ship");
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
               "Session-to-PR flow did not wait: " + TaskHistory(store).history(task).dump());
@@ -343,8 +341,8 @@ void pausedGitNotifications() {
     Id task;
     {
         Store store(path);
-        task = TaskIntake(store).submit(intake());
         Runtime runtime(store, script, sessions, {}, options(host));
+        task = startTask(store, runtime, script, "ship");
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
               "Git notification fixture did not start its watch");
@@ -382,18 +380,16 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
     script.openAfterSession = true;
     Sessions sessions;
     Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = TaskIntake(store).submit(intake());
+    const auto task = startTask(store, runtime, script, "ship");
     host->inspect = [&](const GitContext&, const GitOpenPr&) {
-        check(GitEvents(store).receiveGitWebhook({hostName, "early-ci", repoName, "ci", "completed", {}, sha, "Early head", 0}),
+        check(GitEvents(receiver).receiveGitWebhook({hostName, "early-ci", repoName, "ci", "completed", {}, sha, "Early head", 0}),
               "Could not receive a webhook while the PR was opening");
-        runtime.runConversations();
-        check(historyCount(store, task, "git_webhook") == 0, "An unwatched event was delivered");
     };
     script.beforeTaskWait = [&] {
-        runtime.runConversations();
         check(historyCount(store, task, "git_webhook") == 0, "An early event was delivered before the waiting decision");
     };
     for (int i = 0; i < 8; ++i) runtime.tick();
+    runtime.runConversations();
     check(historyCount(store, task, "git_webhook") == 1, "A new watch did not receive the previously unmatched event");
     runtime.runConversations();
 
@@ -744,280 +740,6 @@ void newAttempts() {
     check(next.at("prNumber") == 2 && host->createCalls == 3, "Branch pair was locked after the previous task's PR merged");
 }
 
-void taskMutationAttempts() {
-    Directory directory;
-    Store store(directory.path / "state.db");
-    auto host = std::make_shared<FakeHost>();
-    Script script;
-    Sessions sessions;
-    const auto task = TaskIntake(store).submit(intake());
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const std::vector<std::string> states{"closed", "open", "closed"};
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        const auto previous = input.event.value("gitResults", Json::array());
-        if (previous.empty()) return {"git_open_pr", openArgs(), {}};
-        if (previous.back().at("tool") == "git_manage_issue") {
-            check(previous.back().at("result").at("ok") == true, "task issue mutation did not use implicit task identity");
-            return {"complete", {{"report", "PR is closed"}}, {}};
-        }
-        if (previous.size() > 1) {
-            const auto& result = previous.back().at("result");
-            check(result.at("ok") == true && result.at("data").at("state") == states.at(previous.size() - 2),
-                  "task did not receive its own PR update result");
-        }
-        if (previous.size() <= states.size())
-            return {
-                "git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", states.at(previous.size() - 1)}}, {}};
-        return {"git_manage_issue", {{"host", hostName}, {"repo", repoName}, {"action", "create"}, {"title", "Follow-up"}}, {}};
-    };
-    for (int i = 0; i < 14 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(Tasks(store).task(task).task.state == TaskState::completed && host->prStateUpdates == states &&
-              host->prs.at(0).state == FakeHost::State::closed,
-          "separate decisions on one event did not all update the PR");
-}
-
-int taskMutationChild(const std::filesystem::path& path, const std::filesystem::path& effects, const std::string& title) {
-    auto host = std::make_shared<FakeHost>();
-    host->prs.push_back({GitPullRequest{}, "Change", FakeHost::State::open});
-    host->onPrStateUpdate = [&](std::string_view state) {
-        std::ofstream(effects, std::ios::app) << state << '\n';
-        _exit(73);
-    };
-    Script script;
-    script.onTaskResult = [&](const ModelInput&) -> Decision {
-        return {"git_update_pr", {{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "closed"}, {"title", title}}, {}};
-    };
-    Sessions sessions;
-    Store store(path);
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 10; ++i) runtime.tick();
-    return 1;
-}
-
-void taskMutationRestart(bool protectTitleOnRestart) {
-    Directory directory;
-    const auto path = directory.path / "state.db";
-    const auto effects = directory.path / "host-effects";
-    const std::string title = "fixture-title-protected-after-restart";
-    auto host = std::make_shared<FakeHost>();
-    Script script;
-    Sessions sessions;
-    Id task;
-    {
-        Store store(path);
-        task = TaskIntake(store).submit(intake());
-        Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-        auto args = openArgs();
-        args["taskId"] = task;
-        check(invoke(store, runtime, script, "fixture-pr", "git_open_pr", args).at("ok") == true, "fixture PR did not open");
-    }
-    const auto writeEffect = [&](std::string_view state) { std::ofstream(effects, std::ios::app) << state << '\n'; };
-    const std::string pathArg = path.string(), effectsArg = effects.string();
-    char* const argv[]{executable.data(),
-                       const_cast<char*>(mutationChildFlag),
-                       const_cast<char*>(pathArg.c_str()),
-                       const_cast<char*>(effectsArg.c_str()),
-                       const_cast<char*>(title.c_str()),
-                       nullptr};
-    pid_t child = 0;
-    check(posix_spawn(&child, executable.c_str(), nullptr, nullptr, argv, environ) == 0, "could not start the crash fixture");
-    int status = 0;
-    check(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 73,
-          "fixture did not crash after dispatching the saved decision");
-    host->onPrStateUpdate = writeEffect;
-    int calls = 0;
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        ++calls;
-        if (protectTitleOnRestart) {
-            const auto& feedback = input.event.at("decisionFeedback").back();
-            check(feedback.at("result").at("delivery") == "unknown" && !feedback.at("args").contains("title"),
-                  "Rejecting a saved mutation lost the unknown outcome or exposed its arguments");
-        } else {
-            const auto& result = input.event.at("gitResults").back().at("result");
-            check(result.at("ok") == false && result.at("status") == "unknown", "interrupted mutation did not retain unknown outcome");
-        }
-        return {"complete", {{"report", "PR update outcome unknown"}}, {}};
-    };
-    Store store(path);
-    if (protectTitleOnRestart) GitEvents(store).protectGitCredential(title);
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 5 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    std::ifstream log(effects);
-    const std::string actions((std::istreambuf_iterator<char>(log)), {});
-    check(Tasks(store).task(task).task.state == TaskState::completed && calls == 1 && actions == "closed\n",
-          "restart repeated inference or dispatched the saved Git mutation twice");
-}
-
-void taskReadRecovery() {
-    Directory directory;
-    const auto path = directory.path / "state.db";
-    auto host = std::make_shared<FakeHost>();
-    const std::string secret = "fixture-private-git-log-value";
-    for (Id job = 81; job <= 85; ++job) host->jobLogs.emplace(job, GitLog{"job " + std::to_string(job) + " " + secret.substr(0, 12), true});
-    Script script;
-    Sessions sessions;
-    Id task;
-    {
-        Store store(path);
-        GitEvents(store).protectGitCredential(secret);
-        task = TaskIntake(store).submit(intake());
-        script.onTaskResult = [&](const ModelInput&) -> Decision {
-            return {
-                "git_read_ci_logs", {{"host", "GITHUB.COM"}, {"repo", "ORG/FLOCK"}, {"jobId", 81 + host->logCalls}, {"maxBytes", 32}}, {}};
-        };
-        Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-        for (int i = 0; i < 14 && host->logCalls < 5; ++i) runtime.tick();
-        check(host->logCalls == 5, "fixture did not read five jobs");
-    }
-    Store store(path);
-    const auto blockRead = [&](bool block) {
-        PolicyRules{store}.changeNeverRule(localOwner, Action::repository_read, repositoryTarget, block);
-    };
-    int phase = 0;
-    Id saved = 0;
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        const auto& event = input.event;
-        const auto& recent = event.at("gitResults");
-        if (phase == 0) {
-            check(recent.size() == 4 && recent.front().at("target").at("jobId") == 82,
-                  "first Git read did not leave the recent projection");
-            check(event.at("gitReadRefs").size() == 5, "saved references were lost on restart");
-            saved = event.at("gitReadRefs").front().get<Id>();
-        } else if (phase == 1) {
-            const auto& replay = recent.back();
-            check(replay.at("readId") == saved && replay.at("sourceTool") == "git_read_ci_logs" &&
-                      replay.at("target") == Json{{"host", hostName}, {"repo", repoName}, {"jobId", 81}, {"maxBytes", 32}} &&
-                      replay.at("result").at("data") == Json{{"text", "job 81 [redacted]"}, {"truncated", true}},
-                  "reopened database did not recover the original authorized, redacted read");
-            blockRead(true);
-        } else {
-            check(std::ranges::all_of(recent,
-                                      [](const Json& entry) { return !entry.contains("target") && entry.at("result").at("ok") == false; }),
-                  "revoked read access leaked previous Git evidence");
-            if (phase == 2) {
-                blockRead(false);
-                host->upstreamPermitted = false;
-            } else
-                return {"complete", {{"report", "Checked historical job evidence and revocation"}}, {}};
-        }
-        ++phase;
-        return {"git_read_result", {{"host", hostName}, {"readId", saved}}, {}};
-    };
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 8 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(Tasks(store).task(task).task.state == TaskState::completed && phase == 3 && host->logCalls == 5,
-          "recovery did not use saved snapshots through both access checks");
-}
-
-void approvedTaskReadProjects() {
-    Directory directory;
-    Store store(directory.path / "state.db");
-    auto host = std::make_shared<FakeHost>();
-    Script script;
-    Sessions sessions;
-    int phase = 0;
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        if (phase++ == 0) return {"git_repo_info", {{"host", hostName}, {"repo", repoName}}, {}};
-        const auto& read = input.event.at("gitResults").back();
-        check(read.at("sourceTool") == "git_repo_info" && read.at("result").at("ok") == true, "Ask-first hid its approved Git read");
-        return {"complete", {{"report", "Reviewed repository information"}}, {}};
-    };
-    PolicyRules policyRules{store};
-    policyRules.setMode(localOwner, "supervised");
-    policyRules.changeRule(localOwner, RuleKind::allow, Action::environment_launch, intake().environmentId, true);
-    policyRules.changeRule(localOwner, RuleKind::ask, Action::repository_read, GitRepository{hostName, repoName}.resource(), true);
-    Runtime runtime(store, script, sessions, [](auto) { return std::string{}; }, options(host));
-    const auto task = TaskIntake(store).submit(intake(), &localOwner);
-    for (int i = 0; i < 8 && Inbox(store).inbox(localOwner).empty(); ++i) runtime.tick();
-    const auto items = Inbox(store).inbox(localOwner);
-    check(items.size() == 1 && host->hostCalls == 0, "Git read reached the host before approval");
-    const auto& card = items.at(0);
-    Inbox(store).decideInbox(localOwner,
-                             {card.at("botId"), InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
-                              card.at("targetRevision"), card.at("targetGeneration")},
-                             "allow_once");
-    for (int i = 0; i < 8 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(phase == 2 && host->hostCalls == 1 && Tasks(store).task(task).task.state == TaskState::completed,
-          "Approved Git read did not settle through the task");
-}
-
-void discoveryReplayRevocation() {
-    Directory directory;
-    Store store(directory.path / "state.db");
-    auto host = std::make_shared<FakeHost>();
-    Script script;
-    Sessions sessions;
-    int phase = 0;
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        if (phase++ == 0) {
-            host->storedDiscoveryPermitted = false;
-            return {"git_find_repos", {{"host", hostName}, {"query", "flock"}}, {}};
-        }
-        const auto& recent = input.event.at("gitResults").back();
-        check(recent.at("result").at("ok") == false && !recent.contains("target"),
-              "Discovery replay exposed a repository after upstream revocation");
-        return {"complete", {{"report", "Checked discovery authorization"}}, {}};
-    };
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    const auto task = TaskIntake(store).submit(intake());
-    for (int i = 0; i < 10 && Tasks(store).task(task).task.state != TaskState::completed; ++i) runtime.tick();
-    check(phase == 2 && Tasks(store).task(task).task.state == TaskState::completed, "Discovery replay was not exercised");
-}
-
-void boundedTaskReadAndForeignReference(bool comments) {
-    Directory directory;
-    Store store(directory.path / "state.db");
-    auto host = std::make_shared<FakeHost>();
-    Json page = Json::array();
-    for (int number = 1; number <= 30; ++number) {
-        if (comments)
-            page.push_back({{"id", number}, {"author", "reviewer-" + std::to_string(number)}, {"body", std::string(1500, '\1')}});
-        else
-            page.push_back({{"number", number}, {"title", std::string(800, '"')}, {"body", std::string(1500, '"')}});
-    }
-    host->result = {{"items", std::move(page)}, {"nextPage", 2}};
-    Script script;
-    Sessions sessions;
-    const auto first = TaskIntake(store).submit(intake());
-    Id saved = 0;
-    script.onTaskResult = [&](const ModelInput& input) -> Decision {
-        const bool owner = input.task.at("id") == first;
-        const auto recent = input.event.value("gitResults", Json::array());
-        if (recent.empty()) {
-            if (owner) {
-                Json args{{"host", hostName}, {"repo", repoName}, {"action", comments ? "list_comments" : "list"}};
-                if (comments) args["issueNumber"] = 42;
-                return {"git_manage_issue", std::move(args), {}};
-            }
-            check(saved > 0 && !input.event.contains("gitReadRefs"), "another task discovered the saved reference");
-            return {"git_read_result", {{"host", hostName}, {"readId", saved}}, {}};
-        }
-        const auto& result = recent.back().at("result");
-        if (owner) {
-            saved = recent.back().at("readId");
-            check(result.at("ok") == true && result.at("truncated") == true && result.dump().size() <= 24576 &&
-                      result.at("data").at("nextPage") == 2,
-                  "oversized Git read lost its bound or pagination");
-            const auto& items = result.at("data").at("items");
-            check(items.size() == 30, "bounded Git result omitted items from the page");
-            for (int number = 1; number <= 30; ++number) {
-                const auto& item = items.at(number - 1);
-                check(item.at(comments ? "id" : "number") == number, "bounded Git result lost a page item's identifier");
-                if (comments) check(item.at("author") == "reviewer-" + std::to_string(number), "bounded Git result lost a comment author");
-            }
-        } else
-            check(result.at("ok") == false && !recent.back().contains("target"), "another task opened a saved read");
-        return {"complete", {{"report", "Checked the Git read"}}, {}};
-    };
-    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
-    for (int i = 0; i < 10 && Tasks(store).task(first).task.state != TaskState::completed; ++i) runtime.tick();
-    check(Tasks(store).task(first).task.state == TaskState::completed, "bounded read did not reach the task");
-    const auto other = TaskIntake(store).submit(intake("owner", "other-project"));
-    for (int i = 0; i < 10 && Tasks(store).task(other).task.state != TaskState::completed; ++i) runtime.tick();
-    check(Tasks(store).task(other).task.state == TaskState::completed && host->hostCalls == 1,
-          "task-scoped Git lookup reached the wrong repository read");
-}
-
 void redaction() {
     Directory directory;
     const auto path = directory.path / "state.db";
@@ -1140,7 +862,6 @@ void schemas() {
                      .notes = {},
                      .tools = gitTools(),
                      .feedback = {},
-                     .evidence = Json::array(),
                      .config = intake().config};
     const auto request = app::responseRequest(input);
     const auto functions = request.at("tools").at(0).at("tools");
@@ -1198,10 +919,8 @@ void schemas() {
 }
 }
 
-int main(int argc, char** argv) {
+int main() {
     try {
-        if (argc == 5 && std::string_view(argv[1]) == mutationChildFlag) return taskMutationChild(argv[2], argv[3], argv[4]);
-        executable = argv[0];
         freshPrSchema();
         schemas();
         runner();
@@ -1218,14 +937,6 @@ int main(int argc, char** argv) {
         recovery(FakeHost::State::open, false, false, true);
         accessAndActions();
         newAttempts();
-        taskMutationAttempts();
-        taskMutationRestart(false);
-        taskMutationRestart(true);
-        taskReadRecovery();
-        approvedTaskReadProjects();
-        discoveryReplayRevocation();
-        boundedTaskReadAndForeignReference(false);
-        boundedTaskReadAndForeignReference(true);
         redaction();
         notificationCannotControlASession();
         notificationEvidenceAndRevocation();

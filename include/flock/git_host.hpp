@@ -89,11 +89,11 @@ struct GitWebhook {
     std::optional<GitReviewLocation> reviewLocation = {};
 };
 
-const std::vector<std::string>& gitTools(bool conversation = true);
+const std::vector<std::string>& gitTools();
 bool isGitTool(std::string_view tool);
 std::string_view gitOperation(const Decision&);
 void appendGitNotificationTools(const Json& event, std::vector<std::string>& tools);
 bool gitNotificationToolAllowed(const Decision&, const Json& event);
-Json gitToolSchema(std::string_view tool, bool conversation);
+Json gitToolSchema(std::string_view tool);
 
 }

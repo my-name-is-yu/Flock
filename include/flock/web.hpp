@@ -31,7 +31,6 @@ struct WebCallbacks {
     std::function<Json(const Person& editor, std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)>
         updateBot = {};
     std::function<std::optional<AvatarImage>(std::string_view botId)> botAvatar = {};
-    std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
     std::function<Person(std::string_view authorization)> authenticate = {};
     std::function<Seconds()> clock = unixTime;
     std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};

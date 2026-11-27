@@ -102,15 +102,6 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
     } else if (task.trigger) {
         auto owner = database.query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
         origin.requester = owner.next() ? owner.string(0) : localOwner.id;
-    } else {
-        auto exchange = database.query("SELECT sender_task FROM peer_exchanges WHERE recipient_task=? AND sender_task<?", {id, id});
-        if (exchange.next()) {
-            const auto parent = taskPolicyOrigin(taskRecords.load(exchange.number(0)));
-            origin.requester = parent.requester;
-            origin.background = parent.background;
-            origin.anchor = parent.anchor;
-            origin.scope = parent.scope;
-        }
     }
     return origin;
 }
@@ -167,7 +158,6 @@ void PolicyApprovals::releasePolicyTask(Id approval, std::string_view resolution
     if (task.state != TaskState::waiting || !wait || wait->id != row.number(1)) return;
     waitStorage.clearWait(task, resolution);
     task.state = decodeTaskState(task.id, row.string(2));
-    if (row.string(3).starts_with(taskSetupOperation) && task.pendingDecision) task.pendingDecision->generation = task.generation + 1;
     taskRecords.save(task);
     database.exec("UPDATE policy_approvals SET generation=? WHERE id=?", {task.generation, approval});
 }
@@ -282,8 +272,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
     if (origin.turn && waitMode == ApprovalWait::pause)
         database.exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'", {origin.turn});
     if (origin.task) {
-        if (!origin.turn &&
-            (operation.starts_with("outbox/") || operation.starts_with("git/") || operation.starts_with(taskSetupOperation))) {
+        if (!origin.turn && operation.starts_with("outbox/")) {
             auto task = taskRecords.load(origin.task);
             if (task.state != TaskState::waiting) {
                 const auto resume = taskStateName(task.state);

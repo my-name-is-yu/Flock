@@ -122,20 +122,12 @@ bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& s
     return true;
 }
 
-void applyPlannerModel(Json& config, const PlannerModel& planner) {
-    config["model"] = planner.model;
-    config["modelProvider"] = planner.provider;
-    if (planner.reasoningEffort)
-        config["reasoningEffort"] = *planner.reasoningEffort;
-    else
-        config.erase("reasoningEffort");
-}
 }
 
 AutomationStorage::AutomationStorage(Database& database, const SecretStorage& secretStorage, const BotLifecycleStorage& lifecycle,
-                                     const Policy& permissions, AutomationModelResolver model, TaskOperations& taskOperations)
-    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), permissions_(permissions), model_(std::move(model)),
-      taskOperations(taskOperations) {}
+                                     const Policy& permissions, TaskOperations& taskOperations)
+    : database_(database), secretStorage_(secretStorage), lifecycle_(lifecycle), permissions_(permissions), taskOperations(taskOperations) {
+}
 
 Json Automations::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
     std::lock_guard lock(database_.mutex);
@@ -389,17 +381,6 @@ ORDER BY next_run_at,id
     return due;
 }
 
-void AutomationStorage::refreshPlannerModel(std::string_view bot, Json& config) const {
-    if (model_)
-        if (const auto planner = model_(bot)) applyPlannerModel(config, *planner);
-}
-
-Json AutomationStorage::automationRoute(std::string_view bot, Json routing) const {
-    if (!model_) return routing;
-    if (const auto current = model_(bot)) applyPlannerModel(routing.at("config"), *current);
-    return routing;
-}
-
 void AutomationStorage::processDueAutomation(Id id, Seconds now, bool skip) {
     auto row = database_.query(R"SQL(
 SELECT bot_id,definition,routing,next_run_at
@@ -431,8 +412,8 @@ FROM automations WHERE id=? AND status='active' AND next_run_at<=?
                                          scrub.text(def.at("timezone").get<std::string>()),
                                          {}};
                 if (def.contains("label")) trigger.label = scrub.text(def.at("label").get<std::string>());
-                const auto routing = automationRoute(bot, row.json(2));
-                const auto task = taskOperations.submit(intake(bot, field(def, "request"), routing), 0, nullptr, TaskSource::request,
+                const auto routing = row.json(2);
+                const auto task = taskOperations.submit(intake(bot, field(def, "request"), routing), 0, nullptr,
                                                         TaskTrigger{id, now, std::move(trigger)});
                 const auto receipts = Json::array({{{"taskId", task}, {"botId", bot}, {"triggerId", id}}});
                 database_.exec("INSERT INTO automation_firings VALUES(?,?,?,?)", {key, bot, now, receipts});
@@ -478,14 +459,14 @@ AND json_extract(definition,'$.source')=? ORDER BY id
             receipts = nullptr;
             continue;
         }
-        const auto routing = automation_.automationRoute(bot, rows.json(3));
+        const auto routing = rows.json(3);
         const Json destination = {bot, routing};
         if (scrub.record(destination, SecretRedactor::Fields::external) != destination) continue;
         const auto request = bounded(scrub.text(field(def, "request")), maxRequestBytes);
         if (request.find_first_not_of(" \r\n\t") == request.npos) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const auto task = tasks_.submit(intake(bot, request, routing), 0, nullptr, TaskSource::request,
+        const auto task = tasks_.submit(intake(bot, request, routing), 0, nullptr,
                                         TaskTrigger{id, now, WebhookTaskTrigger{scrub.text(source), *payload}});
         receipts.push_back({{"taskId", task}, {"botId", bot}, {"triggerId", id}});
     }

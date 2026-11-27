@@ -155,39 +155,6 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
     return {std::move(actor), std::move(bot)};
 }
 
-Json ExternalMcp::completionRun(const OwnedTask& owner, const CompletionEntry& completion) const {
-    if (const auto* source = completion.source()) return sourceRunJson(*source);
-    const auto* task = std::get_if<TaskCompletion>(&completion.details);
-    if (!task) return nullptr;
-    const auto* dependency = std::get_if<PeerCompletion>(&task->provenance);
-    if (!dependency) return nullptr;
-
-    const auto& peerBot = dependency->botId;
-    const auto& message = dependency->messageId;
-    const Policy policy{store_};
-    if (message.empty() || !policy.allows(owner.actor, Action::bot_view, peerBot)) return nullptr;
-    const auto source = std::ranges::find_if(dependency->evidence, [&](const CompletionEvidence& ref) {
-        return ref.kind == CompletionEvidenceKind::peer_report && ref.messageId == message;
-    });
-    if (source == dependency->evidence.end()) return nullptr;
-
-    const auto& environment = source->environmentId;
-    const auto& thread = source->threadId;
-    const auto& resultRunId = source->runId;
-    if (environment.empty() || thread.empty() || resultRunId.empty() || !policy.allows(peerBot, Resource::sessionRead(environment, thread)))
-        return nullptr;
-
-    auto row = Database::of(store_).query(R"SQL(
-SELECT json_extract(j.data,'$.run.link') FROM journal j JOIN tasks t ON t.id=j.task_id
-WHERE j.task_id=? AND t.bot_id=? AND j.kind='report' AND j.run_environment_id=?
-  AND j.run_thread_id=? AND j.result_run_id=?
-ORDER BY j.id DESC LIMIT 1
-)SQL",
-                                          {dependency->taskId, peerBot, environment, thread, resultRunId});
-    if (!row.next()) return nullptr;
-    return {{"environmentId", environment}, {"threadId", thread}, {"link", row.string(0)}};
-}
-
 Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) const {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
@@ -219,7 +186,7 @@ Json ExternalMcp::status(const ExternalMcpConnection& connection, Id taskId) con
         if (row.next()) {
             const auto completion = decodeCompletion(row.number(0), row.json(1));
             data["result"] = {{"text", publicText(completion.text)}};
-            run = completionRun(owner, completion);
+            if (const auto* source = completion.source()) run = sourceRunJson(*source);
         }
     } else
         run = currentRun(task);

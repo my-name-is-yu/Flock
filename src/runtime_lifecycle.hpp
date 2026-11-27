@@ -47,7 +47,7 @@ public:
 
     void requestStop() { shutdown.request_stop(); }
     std::stop_token stopToken() const { return shutdown.get_token(); }
-    void drain(TaskTurn& taskTurn);
+    void drain();
     bool isActive(const TaskScheduler::Work& work) const { return tasks.contains(work); }
 
     void collectCompleted();

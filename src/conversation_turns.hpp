@@ -33,7 +33,6 @@ class JournalStorage;
 class LocalMachineStorage;
 class MemoryStorage;
 class ModelCalls;
-class PeerStorage;
 class PolicyApprovals;
 class SecretStorage;
 class SessionMessageStorage;
@@ -80,15 +79,15 @@ public:
                         BotSetupStorage& botSetup, ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
                         ConversationTools& conversationTools, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
                         LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
-                        PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
-                        SessionMessageStorage& sessionMessageStorage, SessionParticipationStorage& sessionParticipationStorage,
-                        SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
-                        TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity)
+                        PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionMessageStorage& sessionMessageStorage,
+                        SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
+                        TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
+                        WebIdentityState& webIdentity)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
           permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
-          modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          modelCalls(modelCalls), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
           waitStorage(waitStorage), webIdentity(webIdentity) {}
@@ -117,7 +116,7 @@ public:
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
     // The task this wake reports on, while it waits for the conversation to decide what happens next.
     std::optional<TaskData> wokenTask(const conversation::Message&) const;
-    Json applyWokenTaskDecision(const conversation::Message&, const Decision&);
+    Json applyWokenTaskDecision(const conversation::Message&, const Decision&, Seconds now);
     struct WorkLearningSource {
         Id report;
         std::string runId;
@@ -167,7 +166,6 @@ private:
     LocalMachineStorage& localMachineStorage;
     MemoryStorage& memoryStorage;
     ModelCalls& modelCalls;
-    PeerStorage& peerStorage;
     PolicyApprovals& policyApprovals;
     SecretStorage& secretStorage;
     SessionMessageStorage& sessionMessageStorage;

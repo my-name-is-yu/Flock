@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 28;
+constexpr Id schemaVersion = 29;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -44,7 +44,6 @@ CREATE TABLE journal(
   action_id TEXT, run_environment_id TEXT, run_thread_id TEXT, run_id TEXT, run_gateway_id TEXT,
   result_run_id TEXT, run_status TEXT, revision_id INTEGER, stop_requested INTEGER CHECK(stop_requested IN (0,1)),
   message_id INTEGER, instruction_step INTEGER,
-  exchange_id TEXT, peer_message_id TEXT, forwarded_source_message_id INTEGER REFERENCES messages(id),
   git_event_id TEXT, operation_id TEXT,
   reply_to_message_id INTEGER, conversation_route TEXT, conversation_status TEXT,
   session_participation_id INTEGER, session_stop_id INTEGER, feedback_event_id INTEGER,
@@ -94,15 +93,7 @@ CREATE TABLE session_read_refs(
   ref TEXT PRIMARY KEY, bot TEXT NOT NULL, kind INTEGER NOT NULL,
   environment TEXT NOT NULL, thread TEXT NOT NULL, payload TEXT NOT NULL,
   UNIQUE(bot,kind,environment,thread,payload));
-CREATE TABLE peer_exchanges(
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
-  sender_task INTEGER NOT NULL REFERENCES tasks(id),
-  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
-  sender_environment TEXT NOT NULL, sender_revision INTEGER);
-CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('completed','cancelled','peer_completed');
-CREATE INDEX journal_peer_message ON journal(task_id,exchange_id,id) WHERE kind='bot_message';
-CREATE INDEX journal_peer_evidence ON journal(task_id,exchange_id,peer_message_id,id) WHERE kind='read_bot_evidence';
+CREATE INDEX journal_session_changes ON journal(id,task_id) WHERE kind IN ('completed','cancelled');
 CREATE INDEX journal_pr_followup ON journal(task_id,operation_id,git_event_id) WHERE kind='git_pr_followup_requested';
 CREATE INDEX journal_tool_feedback ON journal(task_id,feedback_event_id,id) WHERE kind='tool_error';
 
@@ -117,7 +108,7 @@ CREATE TABLE policy_approvals(
  scope TEXT NOT NULL, requester TEXT NOT NULL, anchor INTEGER NOT NULL, turn INTEGER NOT NULL,
  task INTEGER NOT NULL, revision INTEGER NOT NULL,generation INTEGER NOT NULL,
  created_at INTEGER NOT NULL,expires_at INTEGER,mode_revision INTEGER NOT NULL,
- status TEXT NOT NULL DEFAULT 'pending', resume TEXT,
+ status TEXT NOT NULL DEFAULT 'pending',
  wait_id INTEGER NOT NULL DEFAULT 0, card_generation INTEGER NOT NULL, resume_state TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX policy_pending ON policy_approvals(status,bot);
@@ -364,11 +355,6 @@ CREATE TABLE git_pr_heads(
 CREATE TABLE git_mutations(
  invocation TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), dedupe TEXT, result TEXT,
  PRIMARY KEY(task_id,invocation), UNIQUE(task_id,dedupe));
-CREATE TABLE git_task_reads(
- id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
- invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
- UNIQUE(task_id,invocation));
-CREATE INDEX git_task_reads_by_task ON git_task_reads(task_id,id);
 CREATE TABLE git_webhook_events(
  id INTEGER PRIMARY KEY, host TEXT NOT NULL, event_id TEXT NOT NULL, repo TEXT NOT NULL,
  data TEXT NOT NULL, payload_digest TEXT, UNIQUE(host,event_id), UNIQUE(host,payload_digest));
@@ -411,19 +397,8 @@ WITH candidates AS (
     AND route.status IN ('queued','running','confirmation_pending')
 )
 SELECT task.id,task.environment_id,task.project_id,task.action_id,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.slot_state,task.slot_state)='queued',
-           COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.slot_state='cancelling' THEN 0
-                WHEN task.slot_state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task
-  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND peer.phase<>'closed'
-WHERE COALESCE(peer.kind,'')<>'consult';
+       ROW_NUMBER() OVER (PARTITION BY task.environment_id,task.project_id ORDER BY task.slot_state='queued', task.id) AS position
+FROM candidates task;
 CREATE VIEW project_route_slots AS
 WITH queue AS (
   SELECT id,environment_id,project_id,action_id,

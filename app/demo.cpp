@@ -103,46 +103,6 @@ class DemoModel final : public Model {
             }
             return {{{"start_task", {{"request", request}}, {}}}};
         }
-        if (event == "result" && in.task.contains("userInstructions")) {
-            const bool follow = std::ranges::find(in.tools, "follow_up") != in.tools.end();
-            return {{{follow ? "follow_up" : "delegate",
-                      {{"instruction", "Apply the pending user instructions."}},
-                      "The demo report predates the accepted instructions."}}};
-        }
-        if (event == "result" && std::ranges::find(in.tools, "complete") != in.tools.end()) {
-            const auto report = in.event.value("report", "");
-            Json args{{"report", report}};
-            if (!in.learningRunId.empty() && report == verificationReport)
-                args["learnings"] =
-                    Json::array({{{"text", "./scripts/verify.sh runs the demo project's full check."}, {"runId", in.learningRunId}}});
-            return {{{"complete", std::move(args), "The demo Session reported that it completed the requested work."}}};
-        }
-        if (std::ranges::find(in.tools, "delegate") != in.tools.end()) {
-            std::string answer;
-            for (const auto& row : in.history)
-                if (row.value("kind", "") == "user_answer") answer = row.value("data", Json::object()).value("text", "");
-            const auto request = in.task.value("request", "");
-            if (answer.empty() && request.starts_with("ask:")) {
-                auto question = request.substr(4);
-                if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo focus on?";
-                return {{{"ask_user", {{"question", question}}, "The demo request calls for a user answer before work begins."}}};
-            }
-            Json args = {{"instruction", request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
-            if (const auto projects = in.task.find("projects"); projects != in.task.end()) {
-                const auto& choice = answer.empty() ? request : answer;
-                const auto selected = std::ranges::find_if(*projects, [&](const Json& project) {
-                    const auto title = field(project, "title");
-                    return !title.empty() && choice.find(title) != choice.npos;
-                });
-                if (selected == projects->end())
-                    return {{{"ask_user",
-                              {{"question", "Should I use Demo project or Demo documentation?"}},
-                              "The request does not identify a project."}}};
-                args["projectId"] = selected->at("projectId");
-            }
-            if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
-            return {{{"delegate", std::move(args), "A demo Session can handle this request."}}};
-        }
         throw ModelError("No fixed demo decision for this event", false);
     }
 };

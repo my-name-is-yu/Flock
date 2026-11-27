@@ -88,14 +88,12 @@ template <class T> std::vector<T> readArray(const Json& data, const RecordDecode
 
 OutboxContext readContext(const Json& data, const RecordDecoder& row) {
     row.object(data);
-    return {row.optional<Id>(data, "answerEventId"), row.optional<Id>(data, "sourceMessageId"),
-            row.optional<std::string>(data, "peerMessageId")};
+    return {row.optional<Id>(data, "answerEventId"), row.optional<Id>(data, "sourceMessageId")};
 }
 
 Json contextJson(const OutboxContext& context) {
     Json result = Json::object();
     writeOptional(result, "answerEventId", context.answerEventId);
-    writeOptional(result, "peerMessageId", context.peerMessageId);
     writeOptional(result, "sourceMessageId", context.sourceMessageId);
     return result;
 }
