@@ -352,7 +352,7 @@
   padding: .12em .35em; border-radius: var(--radius-sm);
   background: light-dark(rgb(0 0 0 / .06), rgb(255 255 255 / .09));
 }
-.msg.user .bubble .markdown-body code { background: rgb(255 255 255 / .18); }
+.msg.user .bubble .markdown-body :not(pre) > code { background: rgb(255 255 255 / .18); }
 .markdown-body pre {
   max-width: 100%; margin: .5em 0; padding: .65rem .8rem; overflow-x: auto; overscroll-behavior-x: contain; white-space: pre;
   border: 1px solid light-dark(rgb(0 0 0 / .07), rgb(255 255 255 / .08)); border-radius: var(--radius-md);
