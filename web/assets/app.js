@@ -2429,7 +2429,7 @@ function renderComposer() {
   elements['composer-banner'].dataset.state = banner ?? '';
   action.hidden = !canAct;
   action.textContent = banner === 'setup' ? 'Choose a model' : 'Resume';
-  const title = banner === 'paused' ? 'This Bot is paused' : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
+  const title = banner === 'paused' ? `${bot.name} is paused` : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
   if (elements['composer-banner-title'].textContent !== title) elements['composer-banner-title'].textContent = title;
   const bannerDescription = elements['composer-banner-description'];
   const description = banner === 'paused' ? context.resumeError ||
