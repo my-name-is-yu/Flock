@@ -38,6 +38,5 @@ private:
     WaitStorage& waitStorage;
 };
 
-void requireInstructionAcknowledgments(const TaskData&, const Json& args);
 void waitForExternalEvent(TaskData&, const Json& args, Seconds now);
 }

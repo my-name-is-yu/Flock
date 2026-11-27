@@ -118,7 +118,6 @@ void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, c
 }
 
 void runtime::TaskDecisions::complete(TaskData& current, const Json& event, const TaskDecision& decision) {
-    requireInstructionAcknowledgments(current, decision.args);
     if (conversationTurns.conversationPending(current.botId)) return;
     auto source = completionProvenance(current, event);
     const auto learnings = decision.args.find("learnings");
@@ -169,8 +168,8 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         {"delegate", {"instruction", "doneWhen", "projectId"}},
         {"answer_session_question", {"requestId", "answers"}},
         {"follow_up", {"instruction"}},
-        {"complete", {"report", "acknowledgedInstructions", "learnings"}},
-        {"wait_for_event", {"note", "checkAgainAfterMinutes", "acknowledgedInstructions"}},
+        {"complete", {"report", "learnings"}},
+        {"wait_for_event", {"note", "checkAgainAfterMinutes"}},
         {"ask_user", {"question", "choices"}},
         {"session_read", {"threadId", "runId", "itemId", "cursor", "view", "offset"}},
         {"send_bot_message", {"botId", "kind", "text", "doneWhen", "forwardUserMessage"}},
@@ -180,9 +179,8 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
         if (!arguments.at(tool).contains(item.key())) throw Conflict("Unknown action argument");
     }
     const bool setsCriteria = tool == "delegate" || (tool == "send_bot_message" && field(args, "kind") == "work");
-    const bool requireCriteria = setsCriteria && needsDoneWhen(snapshot);
-    if (requireCriteria != args.contains("doneWhen") || (requireCriteria && !present(field(args, "doneWhen"))))
-        throw Conflict("Only first work without saved criteria requires doneWhen");
+    if (args.contains("doneWhen") && !(setsCriteria && needsDoneWhen(snapshot)))
+        throw Conflict("Only first work without saved criteria can set doneWhen");
     if (tool == "session_read") {
         if (field(args, "view") == "report") return reports.retryRunReport(snapshot, event, decision);
         if (sessionRead != "on_demand" && !(sessionRead != "off" && event.at("kind") == "delivery_unconfirmed"))

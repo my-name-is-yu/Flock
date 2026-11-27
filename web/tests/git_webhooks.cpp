@@ -540,11 +540,8 @@ void acknowledgeInstructionsBeforeWaitingAgain() {
             if (input.event.at("kind") != "user_instruction") return fallback.decide(input);
             const auto& instruction = input.task.at("userInstructions").at(0);
             check(instruction.at("text") == "Wait for the merge", "The Bot did not see the new instruction");
-            Json args{{"note", "Still waiting for the merge"}, {"checkAgainAfterMinutes", 5}};
-            if (++instructionDecisions == 2)
-                args["acknowledgedInstructions"] =
-                    Json::array({{{"messageId", instruction.at("messageId")}, {"step", instruction.at("step")}}});
-            return {{Decision{"wait_for_event", std::move(args), {}}}};
+            ++instructionDecisions;
+            return {{Decision{"wait_for_event", {{"note", "Still waiting for the merge"}, {"checkAgainAfterMinutes", 5}}, {}}}};
         }
     } model;
     Directory directory;
@@ -564,13 +561,13 @@ void acknowledgeInstructionsBeforeWaitingAgain() {
     runtime.runConversations();
     for (int i = 0; i < 6; ++i) runtime.tick();
     const auto updated = Tasks(store).task(task).task;
-    check(model.instructionDecisions == 2 && updated.state == TaskState::external_waiting && updated.pendingInstructions.empty(),
-          "Waiting again did not require and consume exact instruction acknowledgments");
+    check(model.instructionDecisions == 1 && updated.state == TaskState::external_waiting && updated.pendingInstructions.empty(),
+          "Waiting again did not consume the instruction the Bot was shown");
     check(GitEvents(store).receiveGitWebhook(
               {hostName, "merge-after-instruction", repoName, "pull_request", "merged", {1}, sha, "Change", 0}),
           "The merge notification was not accepted");
     runtime.runConversations();
-    check(Tasks(store).task(task).task.state == TaskState::completed, "Acknowledged instructions still blocked completion");
+    check(Tasks(store).task(task).task.state == TaskState::completed, "A consumed instruction still blocked completion");
 }
 
 void multipleWatchedPullRequests() {

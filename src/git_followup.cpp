@@ -175,7 +175,7 @@ Json GitStorage::applyGitTaskDecision(const conversation::Message& message, cons
         taskRecords.save(task);
     } else {
         if (!gitNotificationCanComplete(message)) throw ToolError("This notification does not confirm a pull request closed or merged");
-        if (args.size() != 1 || !validDecisionReason(decision.reason)) throw ToolError("Provide a report and a brief reason");
+        if (args.size() != 1) throw ToolError("Provide a report");
         if (!task.pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
         auto report = text(args, "report", limits::session_prompt::maxDecisionTextBytes, true);
         CompletionProvenance source;

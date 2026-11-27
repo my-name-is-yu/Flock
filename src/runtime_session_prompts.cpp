@@ -152,7 +152,8 @@ runtime::SessionPrompts::WorkPrompt runtime::SessionPrompts::workPrompt(const Ta
     const bool moved = task.newSessionRequired;
     if (contract || moved || !task.lastRun || task.lastRun->assignment.revisionId != task.currentRevision) {
         const auto criteria = contract ? contract->doneWhen : effectiveDoneWhen(task);
-        instruction += "\n\nTask intent:\n" + (contract ? contract->intent : task.intent) + "\n\nCompletion criteria:\n" + criteria;
+        instruction += "\n\nTask intent:\n" + (contract ? contract->intent : task.intent);
+        if (!criteria.empty()) instruction += "\n\nCompletion criteria:\n" + criteria;
         reservedBytes += std::max(criteria.size(), limits::session_prompt::maxDecisionTextBytes) - criteria.size();
     }
     if (contract || moved) {

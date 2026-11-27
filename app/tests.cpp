@@ -619,7 +619,7 @@ void responseContract() {
     input.task["requestedDoneWhen"] = "Use independently verified measurements";
     input.tools = {"delegate", "ask_user"};
     const auto initial = responseRequest(input);
-    check(toolParameters(initial, "delegate").at("required") == Json::array({"reason", "instruction"}),
+    check(toolParameters(initial, "delegate").at("required") == Json::array({"instruction"}),
           "saved requested criteria must not require model authorship");
     check(Json::parse(requestText(initial)).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
               initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
@@ -829,11 +829,11 @@ void responseContract() {
     const auto& send = toolParameters(peerRequest, "send_bot_message");
     check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult", "work"} &&
               send["properties"]["doneWhen"]["type"] == "string" && !send["properties"].contains("forwardUserMessage") &&
-              send["required"].get<Names>() == Names{"reason", "botId", "kind", "text"},
+              send["required"].get<Names>() == Names{"botId", "kind", "text"},
           "first peer work may set a criterion while consultation only needs a question");
     const auto& reply = toolParameters(peerRequest, "reply_to_bot");
     check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question", "result", "failed"} &&
-              reply["required"].get<Names>() == Names{"reason", "kind", "text"},
+              reply["required"].get<Names>() == Names{"kind", "text"},
           "peer replies must specify their kind and text");
     const auto& evidence = toolParameters(peerRequest, "read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" && evidence["required"].get<Names>() == Names{"messageId"},
@@ -847,8 +847,7 @@ void responseContract() {
     input.task["forwardableUserMessage"] = {{"text", "Saved user message"}, {"time", 123}};
     const auto forwardRequest = responseRequest(input);
     const auto& forward = toolParameters(forwardRequest, "send_bot_message");
-    check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" &&
-              forward["required"].get<Names>() == Names{"reason", "botId", "kind"},
+    check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" && forward["required"].get<Names>() == Names{"botId", "kind"},
           "forwarding a saved user message must support an optional Bot note");
 
     const Json call = {{"type", "function_call"},
@@ -868,13 +867,13 @@ void responseContract() {
     const auto learningRequest = responseRequest(input);
     const auto& completion = toolParameters(learningRequest, "complete");
     const auto& learningSchema = completion.at("properties").at("learnings");
-    check(completion.at("required") == Json::array({"reason", "report"}) && learningSchema.at("maxItems") == 12 &&
+    check(completion.at("required") == Json::array({"report"}) && learningSchema.at("maxItems") == 12 &&
               learningSchema.at("items").at("properties").at("text").at("maxLength") == 1000 &&
               learningSchema.at("items").at("properties").at("runId").at("enum") == Json::array({"verified-run"}) &&
               responseDecision(learningCall, learningRequest).calls.at(0).args.at("learnings") == learnings,
           "Completion did not round-trip optional learnings scoped to the verified Run");
-    rejects<ModelError>([&] { responseDecision(modelCall("complete", {{"report", "Done"}}), completeRequest); },
-                        "Completion without a reason was accepted");
+    check(responseDecision(modelCall("complete", {{"report", "Done"}}), completeRequest).calls.at(0).reason.empty(),
+          "Completion without a reason was rejected");
     rejects<ModelError>([&] { responseDecision(modelCall("complete", {{"report", "Done"}, {"reason", " \t"}}), completeRequest); },
                         "Completion with a blank reason was accepted");
     for (const auto* key : {"namespace", "status"}) {

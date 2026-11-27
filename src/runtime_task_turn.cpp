@@ -440,8 +440,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
             if (!decision->args.is_object() || decision->args.dump().size() > 20000 ||
                 std::ranges::find(tools, decision->tool) == tools.end())
                 throw Conflict("Return exactly one permitted action with valid arguments");
-            if (recordsTaskDecisionReason(decision->tool) && !validDecisionReason(decision->reason))
-                throw Conflict("This action requires a brief reason");
+            if (!decision->reason.empty() && !validDecisionReason(decision->reason)) throw Conflict("The reason is too long");
             if (decision->setup && !botSetup.applyForTask(task, *decision->setup, clock(), decision->attemptId)) return;
             const auto defaults = decision->tool == "delegate" ? launchDefaults(task) : std::nullopt;
             decisions.accept(task, event, *decision, {}, defaults ? &*defaults : nullptr, projects);
