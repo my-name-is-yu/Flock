@@ -170,7 +170,12 @@
 .settings-workspace-facts dt { color: var(--text-2); }
 .settings-workspace .settings-workspace-facts dd.unset { font-family: var(--font-sans); color: var(--text-3); }
 .settings-workspace-facts dd { margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; align-self: center; }
-.settings-workspace-facts dd:nth-of-type(n+3) { font-family: var(--font-mono); }
+.settings-workspace .settings-workspace-facts dd:nth-of-type(n+3) { font-family: var(--font-mono); }
+.setup-details > summary { cursor: pointer; }
+.setup-details > .settings-workspace-facts:not(:empty) { margin-top: .6rem; }
+.setup-details > form { margin-top: 1rem; }
+.setup-details > form > .button { justify-self: end; }
+.setup-details label[hidden] { display: none; }
 .settings-workspace-form { display: grid; gap: .6rem; }
 .settings-workspace-model { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
 @media (max-width: 640px) {

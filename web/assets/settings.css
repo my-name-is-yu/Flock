@@ -268,17 +268,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .settings-row .connection-actions, .connection-states { justify-content: flex-start; }
 }
 
-.setup-details > summary {
-  cursor: pointer;
-}
-
-.setup-details > form {
-  margin-top: 1rem;
-}
-
-.setup-details label[hidden] {
-  display: none;
-}
 .installation-dialog, .installation-dialog::backdrop {
   transition: opacity var(--dur-medium) ease-out, transform var(--dur-medium) cubic-bezier(0.22, 1.15, 0.36, 1),
     overlay var(--dur-medium) allow-discrete, display var(--dur-medium) allow-discrete;

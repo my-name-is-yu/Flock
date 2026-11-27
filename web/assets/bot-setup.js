@@ -119,7 +119,7 @@ export function createSetupSettings(save) {
   const branch = input('Branch');
   const path = input('Worktree path');
   const origin = input('Start from origin', 'checkbox');
-  const submit = element('button', 'Save Session settings', 'button primary');
+  const submit = element('button', 'Save', 'button primary');
   const status = element('p', '', 'settings-workspace-hint');
   status.setAttribute('role', 'status');
   form.append(submit, status);
@@ -138,7 +138,7 @@ export function createSetupSettings(save) {
       const authored = setupChangedBy[field];
       const session = field === 'sessionModel' || field === 'workspaceStrategy';
       if (!authored && !session) continue;
-      const description = authored === 'bot' ? 'Last changed by Bot' : authored === 'person' ? 'Last changed by person' : '';
+      const description = authored === 'bot' ? 'Last changed by the Bot' : authored === 'person' ? 'Last changed in settings' : '';
       facts.append(element('dt', label),
         element('dd', [session && settingValue(field, bot[field]), description].filter(Boolean).join(' · ')));
     }
