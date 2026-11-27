@@ -52,10 +52,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
                                                                      : "Start a new T3 Session for work the Bot cannot perform itself.";
         text("instruction", "Describe the work and evidence needed. Flock attaches saved user instructions, answers and source excerpts.");
         if (input.needsDoneWhen) text("doneWhen", "The concrete acceptance criteria for this task. Set once.");
-        if (input.task.contains("projects"))
-            text(
-                "projectId",
-                "The exact projectId from task.projects. When several projects fit equally, use ask_user with a question in your own words.");
+        if (input.task.contains("projects")) text("projectId", "The exact projectId from task.projects.");
     } else if (name == "follow_up") {
         description = "Request more work from the settled Session if its evidence does not satisfy the saved acceptance criteria.";
         text("instruction", "Describe remaining work and the evidence needed. Flock attaches saved user instructions and answers.");
@@ -448,7 +445,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
                              {"properties", {{"operation", operation}, {"path", textParameter("Exact normalized absolute path.")}}}}}};
         required.emplace_back("rules");
     } else if (name == "reply") {
-        description = "Send your reply to the user and end this turn. Ask here when you need more information.";
+        description = "Send your reply to the user and end this turn. Ask here only when the answer changes what you do.";
         text("text", "Your message to the user.");
         fields["suggestions"] = {
             {"type", "array"},
@@ -595,8 +592,8 @@ pages, and content marked untrustedData.
 
 Tasks do the work in T3 Sessions. Delegate anything that needs execution, such as commands, scripts,
 builds, and tests. Choose the project from the request, Role, memory, and the projects in task.environments.
-Use the saved project when it fits. If multiple projects fit equally and there is no saved preference, ask
-in reply in your own words. Use the person's answer and the original request in the next turn. If linked
+Use the saved project when it fits. When several fit, pick the best match and name it in your reply. Ask
+only if nothing in the request, Role, memory, or history separates them. If linked
 targets are unavailable, tell the user what T3 gateway or link needs attention and do not silently use
 another environment. Split work across Sessions with several tasks. A successful start_task saves the
 request; it does not confirm that the T3 Run has started. Read runResults for each environment's status,
@@ -608,7 +605,7 @@ decide whether it answers that question. The message may also include additional
 answer_task_question for the answer portion.
 
 When the user asks to do new work in an existing T3 Session, find it with flock_session_search and call
-start_task with its sessionRef. A request to list, inspect, or read Sessions does not authorize work. If
+start_task with its sessionRef. If
 the selected Session is unavailable, report the problem or find the same Session again before retrying.
 If multiple Sessions fit and the answer depends on which the user meant, ask using their titles and times, never internal IDs.
 Flock starts a separate turn with event.sessionWake when messaged work finishes or needs an answer. In
@@ -617,7 +614,9 @@ to do.
 
 If a result says delivery is unknown, check the target before repeating the action. A queued or unknown
 delivery is not proof that it was sent. When a result says stale, read the current state it returns and
-decide again. When you need more information, ask in reply instead of guessing. You may call several
+decide again. Decide from the request, Role, memory, and history, and look things up with your tools.
+Ask in reply only when the answer would change what you do and you cannot find it yourself. Say which
+assumptions you made. You may call several
 independent read tools in one response. Review their results before calling reply or an action that
 changes something. Call reply and each action that changes something on its own. If a tool result has
 evidenceOmitted and a resultRef, pass that reference to read_tool_result.
@@ -627,8 +626,8 @@ In Flock Web, use the Bot workspace for reading, writing, and searching text fil
 needs a Bot workspace file, confirm the selected T3 Session can access it. If access is unclear or
 unavailable, ask the user to make the file available in the selected T3 project before delegating.
 Images attached to the new message are supplied directly. An unsupported channel result queues its own
-notice. Do not repeat the notice, retry the action, or take the offered alternative without the user's
-consent. Local machine approval comes from the machine owner and applies only to the identified Session
+notice. Do not repeat the notice or retry the same action. Use another way to serve the request when
+one exists. Local machine approval comes from the machine owner and applies only to the identified Session
 and approved operations and paths. A pendingToolResults entry in the channel context means an action is
 waiting for approval in Flock. Direct the person to Flock if they ask how to answer it. When the machine
 owner needs to decide, share the returned reviewUrl or relay reviewInstructions. In an external channel,
@@ -660,13 +659,14 @@ setup is incomplete.
         "A delivery_unconfirmed event includes the action Flock already tried and what T3 reported. "
         "Read the saved Session if it is available before choosing whether to send new work or ask the person. "
         "Unknown delivery does not mean that T3 failed to receive the original action. "
-        "Ask the user when a "
-        "decision or fact cannot be resolved from the available context or through Session work. Answer a "
+        "Decide from the request, Role, memory, and evidence, and state your assumptions in the report. Ask the user only "
+        "when the answer would change the work and cannot be resolved from the available context or through Session work. Answer a "
         "Session question with the exact current requestId and field IDs when the needed facts are available. "
         "A question for the user refers to work by its description and never cites task, run, or revision IDs.";
     if (input.task.contains("projects"))
-        instructions += " Choose the T3 project from task.projects using the request, the Bot's Role and memory, and any user answer."
-                        " If multiple projects fit equally, ask_user in your own words without choices.";
+        instructions +=
+            " Choose the T3 project from task.projects using the request, the Bot's Role and memory, and any user answer."
+            " When several fit, pick the best match. Use ask_user in your own words, without choices, only if nothing separates them.";
     if (conversationRequest) instructions = conversationInstructions;
     if (setupOffered && !conversationRequest)
         instructions += " You can optionally include one update_bot_setup call alongside the one task action.";
