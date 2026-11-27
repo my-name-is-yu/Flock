@@ -25,7 +25,7 @@
   width: min(56rem, calc(100% - 3rem));
   height: min(37rem, calc(100dvh - 3rem));
   max-height: none;
-  grid-template-columns: 13rem minmax(0, 1fr);
+  grid-template-columns: 14rem minmax(0, 1fr);
   grid-template-areas: "head head" "nav body";
 }
 .detail::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
@@ -44,7 +44,7 @@
 .detail-nav { grid-area: nav; display: flex; flex-direction: column; gap: 2px; padding: .85rem .55rem; background: var(--detail-nav); }
 .detail-tab {
   display: flex; align-items: center; gap: .6rem; width: 100%; border: 0; border-radius: var(--radius-md);
-  padding: .5rem .65rem; background: none; color: var(--text-2); font-size: var(--text-md); text-align: left;
+  padding: .5rem .65rem; background: none; color: var(--text-2); font-size: var(--text-md); text-align: left; white-space: nowrap;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .detail-tab:hover { background: var(--hover); color: var(--text); }
