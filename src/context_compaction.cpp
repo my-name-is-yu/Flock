@@ -112,15 +112,16 @@ Json ConversationContextStorage::conversationHistory(const conversation::Message
                    {"summary", saved.at("summary")}};
         remaining -= summary.dump().size();
     }
-    auto rows = database_.query(R"SQL(
+    auto rows = database_.query(
+        R"SQL(
 SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text,entry.wait_id FROM compactable_messages entry
 LEFT JOIN channel_messages source ON source.message_id=entry.source_message_id
 WHERE entry.bot_id=? AND entry.id>?
   AND (entry.kind NOT IN ('conversation_message','conversation_reply') OR entry.source_message_id<?)
   AND (?='' OR (source.scope_key=? AND entry.kind!='user_answer'))
-ORDER BY entry.id DESC LIMIT 24
+ORDER BY entry.id DESC LIMIT ?
 )SQL",
-                                {message.bot, boundary, message.id, message.channelScope, message.channelScope});
+        {message.bot, boundary, message.id, message.channelScope, message.channelScope, limits::conversation_context::maxEntries});
     while (rows.next()) {
         const auto kind = rows.string(2);
         const auto id = rows.number(0);
@@ -148,7 +149,8 @@ ORDER BY entry.id DESC LIMIT 24
             if (!reply.suggestions.is_null()) entry["suggestions"] = scrub.record(reply.suggestions);
         } else if (!rows.null(5))
             entry["waitId"] = rows.number(5);
-        const std::size_t limit = user ? 4000 : isReply ? 1500 : 700;
+        using namespace limits::conversation_context;
+        const std::size_t limit = user ? maxUserTextBytes : isReply ? maxReplyTextBytes : maxTaskTextBytes;
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes > remaining) break;
         entry["text"] = boundedJsonText(scrub.text(rows.string(4)), limit, remaining - bytes);

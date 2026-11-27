@@ -387,7 +387,7 @@ void notesAcrossConversationAndWork() {
     const auto folder = temp.path / "bots";
     BotNotes first{"Verify evidence before reporting.\n", "Lead with the conclusion.\n"};
     first.soul.resize(8191, 's');
-    first.memory.resize(8192, 'm');
+    first.memory.resize(32768, 'm');
     const BotNotes second{"Verify independently.", "Use a short explanation."};
     createBot(folder / "first", botConfig("first-model"), first.soul + "界tail", first.memory + "tail");
     createBot(folder / "second", botConfig("second-model"), second.soul, second.memory);
@@ -410,7 +410,7 @@ void notesAcrossConversationAndWork() {
         if (!notes.soul.empty()) notes.soul += std::string(64, 'X');
         if (!notes.memory.empty()) notes.memory += std::string(64, 'X');
         notes.soul = bounded(notes.soul, 8192);
-        notes.memory = bounded(notes.memory, 8192);
+        notes.memory = bounded(notes.memory, 32768);
         return notes;
     };
 
@@ -868,8 +868,8 @@ void responseContract() {
     const auto learningRequest = responseRequest(input);
     const auto& completion = toolParameters(learningRequest, "complete");
     const auto& learningSchema = completion.at("properties").at("learnings");
-    check(completion.at("required") == Json::array({"reason", "report"}) && learningSchema.at("maxItems") == 3 &&
-              learningSchema.at("items").at("properties").at("text").at("maxLength") == 300 &&
+    check(completion.at("required") == Json::array({"reason", "report"}) && learningSchema.at("maxItems") == 12 &&
+              learningSchema.at("items").at("properties").at("text").at("maxLength") == 1000 &&
               learningSchema.at("items").at("properties").at("runId").at("enum") == Json::array({"verified-run"}) &&
               responseDecision(learningCall, learningRequest).calls.at(0).args.at("learnings") == learnings,
           "Completion did not round-trip optional learnings scoped to the verified Run");

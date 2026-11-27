@@ -1467,7 +1467,7 @@ void evidenceResume() {
     Fixture f;
     f.read = "on_demand";
     f.restart();
-    constexpr std::size_t excerptBytes = 8'192;
+    constexpr std::size_t excerptBytes = 32'768;
     f.t3.historyPages = {
         {"First page", {}, {}, "item-1", "2", 0, true}, {"Second page", {}, {}, "item-2", "3", 0, true},
         {"Third page", {}, {}, "item-3", "4", 0, true}, {std::string(excerptBytes + 1, 'x'), {}, {}, "item-4", "5", 0, true},

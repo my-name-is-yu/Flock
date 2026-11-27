@@ -789,7 +789,7 @@ class Fixture(BaseHTTPRequestHandler):
                 if status == "failed":
                     rows.append(self.item(thread, 8, final_run, "error", f"{env} tests failed", status="failed"))
             if evidence != "missing-report":
-                report = "x" * 8193 if evidence == "truncated-report" else f"{env} verification {status}"
+                report = "x" * 65537 if evidence == "truncated-report" else f"{env} verification {status}"
                 rows.append(self.item(thread, 9, "unrelated-run" if evidence == "foreign-report" else final_run,
                                       "assistant_message", report))
             if evidence == "empty-final-report":

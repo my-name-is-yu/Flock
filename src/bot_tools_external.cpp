@@ -60,7 +60,7 @@ const ToolSpec& spec(std::string_view name) {
 
 std::size_t argumentLimit(std::string_view name) {
     if (name == "url" || name == "uri") return 2048;
-    if (name == "text") return 8192;
+    if (name == "text") return 65536;
     if (name == "path" || name == "cursor") return 1024;
     if (name == "query") return 256;
     return 128;

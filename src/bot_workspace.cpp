@@ -29,7 +29,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr std::size_t maxEntries = 2048;
 constexpr std::size_t maxSearchBytes = 1024 * 1024;
-constexpr std::size_t maxFileBytes = 8192;
+constexpr std::size_t maxFileBytes = 65536;
 
 std::string replaceInvalidUtf8(std::string_view value) {
     return Json::parse(Json(std::string(value)).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
