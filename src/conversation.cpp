@@ -117,7 +117,7 @@ Json ConversationStorage::receive(const Person& actor, std::string_view bot, std
 
 Id ConversationStorage::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                             std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
-                                            const ConversationInvitationEntry* invitation) {
+                                            const ConversationInvitationEntry* invitation, const ConversationBotMessageEntry* botMessage) {
     if (botLifecycle.botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
@@ -158,6 +158,12 @@ WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
         saved["sessionInvitation"] = encodeConversationInvitation(publicInvitation);
         saved["sessionInvitationDepth"] = publicInvitation.depth;
         event.detail = std::move(publicInvitation);
+    } else if (botMessage) {
+        auto publicMessage = *botMessage;
+        publicMessage.fromBotId = scrub.text(publicMessage.fromBotId);
+        publicMessage.fromName = scrub.text(publicMessage.fromName);
+        saved["botMessage"] = encodeConversationBotMessage(publicMessage);
+        event.detail = std::move(publicMessage);
     }
     scrub.requirePublic({routing.botId, actor.id, clientId, saved});
     const auto id = journalStorage.journalConversationMessage(routing.botId, event);

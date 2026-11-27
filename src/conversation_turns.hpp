@@ -53,6 +53,7 @@ enum class ConversationReplyRoute;
 enum class SessionExit;
 struct BotTools;
 struct ConversationCallContext;
+struct ConversationBotMessageEntry;
 struct ConversationInvitationEntry;
 struct Decision;
 struct TaskDestinations;
@@ -94,7 +95,8 @@ public:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
-                           Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
+                           Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr,
+                           const ConversationBotMessageEntry* botMessage = nullptr);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
@@ -121,6 +123,7 @@ private:
                                 const ConversationCallContext&, const Decision* reply = nullptr);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&, std::string_view key,
                                              const ConversationCallContext&);
+    CallOutcome executeMessageBot(const conversation::Message&, int step, const Decision&, const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
                                          const std::function<Seconds()>&, const Json* setup = nullptr);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,

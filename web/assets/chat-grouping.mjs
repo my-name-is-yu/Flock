@@ -9,7 +9,7 @@ export function isSystemNotice(event) {
 }
 
 export function messageSide(event) {
-  if (event.kind === 'cancelled' || isSystemNotice(event) || event.data.sessionWake || event.data.sessionInvitation)
+  if (event.kind === 'cancelled' || isSystemNotice(event) || event.data.sessionWake || event.data.sessionInvitation || event.data.botMessage)
     return 'system';
   if (event.kind === 'bot_message') return 'peer';
   if (event.kind === 'conversation_message' && event.data.channel?.channelKind)

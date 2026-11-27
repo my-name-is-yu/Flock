@@ -652,6 +652,7 @@ void responseContract() {
                    "withdraw_task_question",
                    "message_session",
                    "invite_bot",
+                   "message_bot",
                    "leave_session",
                    "interrupt_session",
                    "read_result",
@@ -687,6 +688,7 @@ void responseContract() {
               turnTool("request_secret_input")["required"] == Json::array({"name"}) &&
               turnTool("message_session")["required"] == Json::array({"environmentId", "threadId", "text"}) &&
               turnTool("invite_bot")["required"] == Json::array({"botId", "environmentId", "threadId", "note"}) &&
+              turnTool("message_bot")["required"] == Json::array({"botId", "text"}) &&
               turnTool("leave_session")["required"] == Json::array({"environmentId", "threadId"}) &&
               turnTool("start_task")["required"] == Json::array({"request"}) &&
               turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&

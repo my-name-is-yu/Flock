@@ -1577,6 +1577,14 @@ function eventCard(event, context, place, report) {
     });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
+  if (data.botMessage) {
+    const note = node('article', 'system-note session-event', `From ${data.botMessage.fromName} · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    note.append(node('p', 'session-invitation-note', data.text ?? ''));
+    return note;
+  }
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 thread “${session.title || session.threadId}”`;

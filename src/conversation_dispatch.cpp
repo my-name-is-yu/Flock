@@ -1,7 +1,10 @@
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/avatar_style.hpp"
+#include "flock/intake.hpp"
+#include "flock/limits.hpp"
 #include "conversation_call.hpp"
+#include "bot_lifecycle_storage.hpp"
 #include "bot_setup_storage.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
@@ -132,6 +135,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
         return sessionParticipationStorage.inviteSessionBot(message, step, decision, ctx.t3, ctx.intake, ctx.peers, ctx.shutdown) ? advance
                                                                                                                                   : stop;
     }
+    if (tool == "message_bot") return executeMessageBot(message, step, decision, ctx);
     if (tool == "leave_session") {
         return sessionParticipationStorage.leaveSession(sessionReadStorage, message, step, decision, ctx.t3, ctx.shutdown) ? advance : stop;
     }
@@ -159,6 +163,62 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     if (!authorizeTurn(message)) {
         transaction.commit();
         return stop;
+    }
+    saveConversationCallResult(message, step, std::move(result));
+    transaction.commit();
+    return advance;
+}
+
+CallOutcome ConversationStorage::executeMessageBot(const Message& message, int step, const Decision& decision,
+                                                   const ConversationCallContext& ctx) {
+    using enum CallOutcome;
+    // Each hop from the person's message counts, so two Bots cannot keep messaging each other.
+    constexpr Id maxDepth = 6;
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (ctx.shutdown.stop_requested()) return stop;
+    if (!authorizeTurn(message)) {
+        transaction.commit();
+        return stop;
+    }
+    Json result;
+    try {
+        const auto& args = decision.args;
+        if (!args.is_object() || args.size() != 2) throw Conflict("Invalid message_bot arguments");
+        const auto bot = text(args, "botId", 128, true);
+        const auto body = text(args, "text", limits::messages::maxBodyBytes, true);
+        if (!validBotId(bot) || body.find('\0') != body.npos) throw Conflict("Invalid message_bot arguments");
+        if (message.principalSource != conversation::PrincipalSource::web &&
+            message.principalSource != conversation::PrincipalSource::trusted)
+            throw Conflict("Message other Bots from a Flock Web conversation");
+        if (bot == message.bot) throw Conflict("A Bot cannot message itself");
+        const auto actor = turnActor(message);
+        if (!permissions.allows(actor, Action::bot_decide, message.bot) || !permissions.allows(actor, Action::bot_decide, bot))
+            throw Conflict("Bot access is required");
+        if (!ctx.peers || std::ranges::none_of(ctx.peers(message.bot), [&](const PeerBot& peer) { return peer.intake.botId == bot; }))
+            throw Conflict("The destination Bot is unavailable or not allowed");
+        if (botLifecycle.botPaused(bot)) throw Conflict("The destination Bot is paused");
+        const auto previous = message.routing.find("botMessage");
+        const Id depth = (previous == message.routing.end() ? 0 : previous->at("depth").get<Id>()) + 1;
+        if (depth > maxDepth)
+            throw Conflict("Bots can message each other at most " + std::to_string(maxDepth) +
+                           " times after the person's message. Reply to the person instead.");
+        const auto key = "bot-message:" + std::to_string(message.id) + ":" + std::to_string(step);
+        auto sent = database.query("SELECT id FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?", {bot, actor.id, key});
+        if (sent.next()) {
+            result = {{"ok", true}, {"messageId", sent.number(0)}, {"depth", depth}};
+        } else {
+            if (!ctx.intake) throw Conflict("Bot intake is unavailable");
+            const auto routing = ctx.intake(bot, body);
+            if (routing.botId != bot) throw Conflict("The destination Bot is unavailable");
+            const ConversationBotMessageEntry origin{message.bot, message.routing.at("config").value("botDisplayName", message.bot), depth};
+            const auto id = enqueueConversation(actor, routing, message.principalSource, key, body, 0, nullptr, nullptr, &origin);
+            result = {{"ok", true}, {"messageId", id}, {"depth", depth}};
+        }
+    } catch (const Conflict& error) {
+        result = toolFailure(error.what());
+    } catch (const ToolError& error) {
+        result = toolErrorResult(error);
     }
     saveConversationCallResult(message, step, std::move(result));
     transaction.commit();

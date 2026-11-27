@@ -962,6 +962,108 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
         check(browser.get(anchored).at("messages") == shared, "a forwarded quote with a mismatched timestamp was attributed to the author");
     }
 }
+void conversationMessagesAnotherBot(const std::filesystem::path& path) {
+    struct ScriptedModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
+    } model;
+    // The fixture has no display names, so each Bot is recognized by the one Bot it can reach.
+    const auto botOf = [](const ModelInput& input) {
+        return input.task.at("bots").at(0).at("botId") == "reviewer" ? std::string("Ernest") : std::string("Reviewer");
+    };
+    model.script = [&](const ModelInput& input) -> Decision {
+        check(input.event.at("kind") == "conversation_turn", "Bot messaging started a task decision");
+        const bool answered = !input.event.at("turn").empty();
+        const auto from = input.event.contains("botMessage") ? input.event.at("botMessage").at("fromBotId").get<std::string>() : "";
+        if (botOf(input) == "Ernest" && from.empty()) {
+            if (answered) return {"reply", {{"text", "Reviewer に聞いています。"}}, "Tell the person"};
+            check(input.task.at("bots") == Json::array({{{"botId", "reviewer"}, {"name", "Reviewer"}}}) &&
+                      std::ranges::find(input.tools, "message_bot") != input.tools.end(),
+                  "the conversation could not see the Bot it may message");
+            return {"message_bot", {{"botId", "reviewer"}, {"text", "Can we ship today?"}}, "Ask Reviewer"};
+        }
+        if (botOf(input) == "Reviewer") {
+            check(from == "ernest" && input.event.at("text") == "Can we ship today?" &&
+                      input.event.at("botMessage").at("fromName") == "ernest",
+                  "Reviewer did not receive Ernest's message as a Bot message");
+            if (answered) return {"reply", {{"text", "Ernest に答えました。"}}, "Tell the person"};
+            return {"message_bot", {{"botId", "ernest"}, {"text", "Yes, ship it."}}, "Answer Ernest"};
+        }
+        check(from == "reviewer" && input.event.at("text") == "Yes, ship it." && input.event.at("botMessage").at("depth") == 2,
+              "Reviewer's answer did not reach Ernest");
+        return {"reply", {{"text", "Reviewer says we can ship today."}}, "Relay the answer"};
+    };
+
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "ernest") return {{"Reviewer", {"reviewer", "", "local-env", "ernest"}}};
+        if (bot == "reviewer") return {{"Ernest", {"ernest", "", "local-env", "reviewer"}}};
+        return {};
+    };
+    auto web = callbacks();
+    web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
+    web.peers = peers;
+    const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "local-env", ""};
+    };
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers, .intake = intake});
+    const auto server = startWeb(store, 0, web);
+    Browser browser(*server);
+
+    const auto asked = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "ship"}, {"text", "Ask Reviewer"}}, 201);
+    for (int i = 0; i < 6; ++i) runtime.runConversations();
+    const auto reviewer = browser.get("/api/view?bot=reviewer").at("events");
+    const auto inbound = std::ranges::find_if(
+        reviewer, [](const Json& event) { return event.at("kind") == "conversation_message" && event.at("data").contains("botMessage"); });
+    check(inbound != reviewer.end() && inbound->at("data").at("botMessage").at("fromBotId") == "ernest" &&
+              inbound->at("data").at("text") == "Can we ship today?",
+          "Reviewer's conversation did not show who sent the Bot message");
+    const auto ernest = browser.get("/api/view?bot=ernest");
+    check(conversationReply(ernest, asked.at("messageId")).at("text") == "Reviewer に聞いています。" &&
+              hasEvent(ernest.at("events"), "conversation_reply", "Reviewer says we can ship today."),
+          "Ernest did not relay Reviewer's answer to the person");
+    check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
+}
+
+void botMessagesStopAtTheExchangeLimit(const std::filesystem::path& path) {
+    struct ScriptedModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
+    } model;
+    Json lastResult;
+    int sends = 0;
+    model.script = [&](const ModelInput& input) -> Decision {
+        const auto& turn = input.event.at("turn");
+        if (!turn.empty()) {
+            lastResult = turn.back();
+            return {"reply", {{"text", "Done."}}, "Tell the person"};
+        }
+        ++sends;
+        return {"message_bot", {{"botId", input.task.at("bots").at(0).at("botId")}, {"text", "Thanks!"}}, "Keep talking"};
+    };
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "ernest") return {{"Reviewer", {"reviewer", "", "local-env", "ernest"}}};
+        if (bot == "reviewer") return {{"Ernest", {"ernest", "", "local-env", "reviewer"}}};
+        return {};
+    };
+    auto web = callbacks();
+    web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
+    web.peers = peers;
+    const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "local-env", ""};
+    };
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers, .intake = intake});
+    const auto server = startWeb(store, 0, web);
+    Browser browser(*server);
+    browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "chat"}, {"text", "Say thanks to Reviewer"}}, 201);
+    for (int i = 0; i < 20; ++i) runtime.runConversations();
+    check(sends == 7 && lastResult.dump().find("at most 6 times") != std::string::npos,
+          "two Bots kept messaging each other past the exchange limit");
+}
+
 void conversationBotSetup(const std::filesystem::path& directory) {
     app::Bots bots(directory / "bots");
     const auto report = [](auto, auto) {};
@@ -1815,7 +1917,7 @@ void demoUsesSeparateTasksForImplementationAndVerification(const std::filesystem
     const auto& actions = reply.at("actions");
     check(actions.size() == 2 && actions[0].at("tool") == "start_task" && actions[1].at("tool") == "start_task",
           "The Demo did not start two ordinary tasks in one conversation");
-    check(model.definitions == 46, "The default Web conversation provider catalog changed");
+    check(model.definitions == 47, "The default Web conversation provider catalog changed");
 
     const Id implementation = actions[0].at("taskId"), verification = actions[1].at("taskId");
     tick(runtime, 3);
@@ -2017,6 +2119,8 @@ int main(int argc, char** argv) {
                                 "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221", PeerAccess::shared);
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite", {}, PeerAccess::local);
         botMediatedConversation(directory.path / "bot-mediated-paused.sqlite", {}, PeerAccess::paused);
+        conversationMessagesAnotherBot(directory.path / "message-bot.sqlite");
+        botMessagesStopAtTheExchangeLimit(directory.path / "message-bot-limit.sqlite");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");
         botRoleSavesRequireCompleteOriginal(directory.path / "role-edit");

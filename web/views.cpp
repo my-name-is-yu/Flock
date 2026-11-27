@@ -232,6 +232,8 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 copyFields(details["sessionWake"] = Json::object(), *wake, {"threadId", "title", "reason", "sourceMessageId"});
             if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())
                 copyFields(details["sessionInvitation"] = Json::object(), *invitation, {"threadId", "title", "inviterName", "note"});
+            if (const auto bot = data.find("botMessage"); bot != data.end() && bot->is_object())
+                copyFields(details["botMessage"] = Json::object(), *bot, {"fromBotId", "fromName"});
         }
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(), *channel, {"channelKind", "fromViewer"});

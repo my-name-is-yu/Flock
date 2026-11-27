@@ -116,23 +116,10 @@ TaskResult taskResult(Id id, std::string_view kind, const Json& data) {
     return RecordDecoder("journal", rowId).decodeClosed(data, [](const Json&, const RecordDecoder&) { return TaskResult{}; });
 }
 
-const std::vector<std::string> turnTools{"start_task",
-                                         "send_to_task",
-                                         "change_task",
-                                         "answer_task_question",
-                                         "record_task_blocker",
-                                         "withdraw_task_question",
-                                         "cancel_task",
-                                         "message_session",
-                                         "invite_bot",
-                                         "leave_session",
-                                         "interrupt_session",
-                                         "read_result",
-                                         "find_tasks",
-                                         "flock_session_search",
-                                         "flock_session_events",
-                                         "read_tool_result",
-                                         "reply"};
+const std::vector<std::string> turnTools{
+    "start_task",  "send_to_task",    "change_task",          "answer_task_question", "record_task_blocker", "withdraw_task_question",
+    "cancel_task", "message_session", "invite_bot",           "message_bot",          "leave_session",       "interrupt_session",
+    "read_result", "find_tasks",      "flock_session_search", "flock_session_events", "read_tool_result",    "reply"};
 const std::vector<std::string> webTools{"compact_conversation",
                                         "expand_context",
                                         "continue_fresh_session",
@@ -553,7 +540,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     Json event{{"kind", "conversation_turn"}, {"messageId", message.id},       {"text", message.text},
                {"currentTime", now},          {"replyTo", std::move(replyTo)}, {"turn", std::move(turn)}};
     if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
-    for (const auto* key : {"sessionWake", "sessionInvitation"})
+    for (const auto* key : {"sessionWake", "sessionInvitation", "botMessage"})
         if (message.routing.contains(key)) event[key] = message.routing.at(key);
     event.update(channel);
     if (web) event["attachments"] = attachments.attachmentViews(message.id);
@@ -1173,6 +1160,15 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 std::vector<ModelImage> images;
                 auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
                 if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
+                if (peers) {
+                    auto bots = Json::array();
+                    for (const auto& peer : peers(message.bot)) {
+                        Json bot{{"botId", peer.intake.botId}, {"name", peer.name}};
+                        if (!peer.role.empty()) bot["role"] = peer.role;
+                        bots.push_back(std::move(bot));
+                    }
+                    if (!bots.empty()) context["task"]["bots"] = std::move(bots);
+                }
                 if (std::ranges::find(offered, "write_memory") != offered.end()) context["event"]["memoryVersion"] = botNotes.memoryVersion;
                 input = {.task = context.at("task"),
                          .event = context.at("event"),

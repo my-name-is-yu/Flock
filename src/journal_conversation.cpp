@@ -46,6 +46,10 @@ ConversationInvitationEntry readInvitation(const Json& data, const RecordDecoder
             row.get<Id>(data, "depth")};
 }
 
+ConversationBotMessageEntry readBotMessage(const Json& data, const RecordDecoder& row) {
+    return {row.get<std::string>(data, "fromBotId"), row.get<std::string>(data, "fromName"), row.get<Id>(data, "depth")};
+}
+
 ConversationWakeEntry readWake(const Json& data, const RecordDecoder& row) {
     return {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "threadId"), row.get<std::string>(data, "title"),
             row.get<std::string>(data, "reason"), row.get<Id>(data, "sourceMessageId")};
@@ -66,14 +70,21 @@ Json encodeConversationWake(const ConversationWakeEntry& entry) {
             {"sourceMessageId", entry.sourceMessageId}};
 }
 
+Json encodeConversationBotMessage(const ConversationBotMessageEntry& entry) {
+    return {{"fromBotId", entry.fromBotId}, {"fromName", entry.fromName}, {"depth", entry.depth}};
+}
+
 ConversationMessageEntry decodeConversationMessage(Id id, const Json& data) {
     const auto rowId = std::to_string(id);
     return RecordDecoder("journal", rowId).decodeClosed(data, [](const Json& payload, const RecordDecoder& row) {
         const auto invite = row.find(payload, "sessionInvitation");
         const auto wake = row.find(payload, "sessionWake");
-        if (invite != payload.end() && wake != payload.end()) row.fail("sessionWake", "an invitation cannot be a Session wake");
+        const auto bot = row.find(payload, "botMessage");
+        if ((invite != payload.end()) + (wake != payload.end()) + (bot != payload.end()) > 1)
+            row.fail("sessionWake", "a conversation message has at most one origin");
         if (invite != payload.end()) return ConversationMessageEntry{row.nested("sessionInvitation").decodeClosed(*invite, readInvitation)};
         if (wake != payload.end()) return ConversationMessageEntry{row.nested("sessionWake").decodeClosed(*wake, readWake)};
+        if (bot != payload.end()) return ConversationMessageEntry{row.nested("botMessage").decodeClosed(*bot, readBotMessage)};
         return ConversationMessageEntry{};
     });
 }
@@ -105,6 +116,8 @@ Id JournalStorage::journalConversationMessage(std::string_view bot, const Conver
         data["sessionInvitation"] = encodeConversationInvitation(*invite);
     else if (const auto* wake = std::get_if<ConversationWakeEntry>(&entry.detail))
         data["sessionWake"] = encodeConversationWake(*wake);
+    else if (const auto* bot = std::get_if<ConversationBotMessageEntry>(&entry.detail))
+        data["botMessage"] = encodeConversationBotMessage(*bot);
     return database.writeJournal(std::nullopt, JournalKind::conversation_message, data, {}, bot);
 }
 
