@@ -176,12 +176,12 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
         if (observed.kind == Observation::Kind::Unavailable) {
             if (observed.status == "auth" && reason != WaitReason::auth) {
                 questions.suspendQuestion(task);
-                waitStorage.wait(task, SimpleWaitReason::auth, "Sign in again in T3 Code or reconnect this environment in Flock Settings.");
+                waitStorage.wait(task, SimpleWaitReason::auth, "Sign in again in T3 Code or reconnect this environment in Flock settings.");
                 return true;
             }
             if (observed.status == "settings" && reason != WaitReason::settings) {
                 questions.suspendQuestion(task);
-                waitStorage.wait(task, SimpleWaitReason::settings, "Check this T3 environment under Connections in Flock Settings.");
+                waitStorage.wait(task, SimpleWaitReason::settings, "Check this T3 environment under Connections in Flock settings.");
                 return true;
             }
         }

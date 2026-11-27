@@ -119,7 +119,7 @@ void runtime::TaskTurn::recordFailure(TaskData& task, const Json& event, std::st
             task, ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort},
             "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.");
     else if (cause == FailureCause::Authentication)
-        waitStorage.wait(task, ModelFailureWait{WaitFailureCode::authentication_required}, "Open Flock Settings and sign in to ChatGPT.");
+        waitStorage.wait(task, ModelFailureWait{WaitFailureCode::authentication_required}, "Open Flock settings and sign in to ChatGPT.");
     else if (cause == FailureCause::BotNotes)
         waitStorage.wait(task, SimpleWaitReason::bot_notes_unavailable, "Restore access to this Bot’s Role and memory. " + why);
     else

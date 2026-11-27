@@ -39,7 +39,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, con
     {
         std::lock_guard lock(database.mutex);
         if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(gateway))
-            return "Connect this T3 environment under Connections in Flock Settings.";
+            return "Connect this T3 environment under Connections in Flock settings.";
         if (!permissions.allows(bot, Action::environment_inspect, environment) ||
             permissions.forbidden(bot, Action::environment_launch, environment))
             return "Flock cannot use this T3 environment under the current permissions.";
@@ -50,7 +50,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, con
         std::erase_if(projects, [&](const T3Project& project) { return project.id.empty() || scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
-        return "Flock could not list projects. Check the T3 connection in Flock Settings.";
+        return "Flock could not list projects. Check the T3 connection in Flock settings.";
     }
 }
 

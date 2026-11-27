@@ -159,10 +159,10 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
         <fieldset class="studio-workspace" hidden>
           <legend>Where does it work? <span>Optional</span></legend>
-          <label class="settings-workspace-field">Environment
+          <label class="settings-workspace-field">T3 environment
             <select name="environmentId"></select>
           </label>
-          <label class="settings-workspace-field">Project
+          <label class="settings-workspace-field">T3 project
             <select name="projectId"></select>
           </label>
           <p class="settings-workspace-hint" role="status" hidden></p>
