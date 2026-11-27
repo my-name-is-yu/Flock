@@ -67,12 +67,12 @@ async function compressScreenshot(bitmap, longestEdge, mimeType) {
 }
 
 export async function resizeScreenshot(file) {
-  if (file.type && !allowedMimeTypes.has(file.type)) throw new ScreenshotError('Choose a PNG, JPEG, or WebP image.');
+  if (file.type && !allowedMimeTypes.has(file.type)) throw new ScreenshotError('Choose a PNG, JPEG or WebP image.');
   if (file.size > maxSourceBytes) throw new ScreenshotError('Choose an image up to 20 MB.');
 
   const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
   const mimeType = detectImageMimeType(bytes);
-  if (!mimeType || (file.type && file.type !== mimeType)) throw new ScreenshotError('Choose a valid PNG, JPEG, or WebP image.');
+  if (!mimeType || (file.type && file.type !== mimeType)) throw new ScreenshotError('Choose a valid PNG, JPEG or WebP image.');
 
   const bitmap = await createImageBitmap(file);
   try {
@@ -109,7 +109,7 @@ export async function stageScreenshots(draft, files, maxAttachments, isCurrent) 
       const preview = URL.createObjectURL(prepared);
       draft.images = [...draft.images, { attachment, preview }];
     } catch (error) {
-      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Couldn’t open this PNG, JPEG, or WebP image.';
+      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Couldn’t open this PNG, JPEG or WebP image.';
     }
   }
 }
