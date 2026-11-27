@@ -96,8 +96,8 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     'Save sent an unchanged field');
   const facts = card.element.querySelectorAll('dd');
   check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === 'Model default' &&
-    facts.length === 4 && facts[2].textContent === 'new-environment' && facts[3].textContent === 'draft-project',
-    'Save did not show the current settings');
+    facts.length === 4 && facts[2].textContent === 'new-environment' && facts[3].textContent === 'Draft project' && facts[3].classList.contains('place-name'),
+    'Save did not show the current settings by their T3 names');
 
   edit.click();
   await settle();

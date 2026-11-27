@@ -58,6 +58,7 @@ export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels)
   const save = form.querySelector('button[type="submit"]');
   const feedback = element.querySelector('.settings-card-feedback');
   let workspace;
+  const placeNames = new Map();
   let draft;
   let catalog = { models: [], fallbackReasoningEfforts: [] };
   let editable = false;
@@ -77,9 +78,14 @@ export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels)
     missing.hidden = !!draft || configured;
     modelText.textContent = catalogModel(workspace.model)?.displayName ?? workspace.model;
     effortText.textContent = effortLabel(workspace.reasoningEffort);
-    for (const [text, value] of [[environmentText, workspace.environmentId], [projectText, workspace.projectId]]) {
-      text.textContent = value || 'Chosen per request';
+    const places = [
+      [environmentText, workspace.environmentId, placeNames.get(`environment:${workspace.environmentId}`)],
+      [projectText, workspace.projectId, placeNames.get(`project:${workspace.environmentId}/${workspace.projectId}`)],
+    ];
+    for (const [text, value, name] of places) {
+      text.textContent = name || value || 'Chosen per request';
       text.classList.toggle('unset', !value);
+      text.classList.toggle('place-name', !!name);
     }
   }
   function update({ model = '', reasoningEffort = '', environmentId = '', projectId = '' }, canEdit = editable) {
@@ -89,6 +95,7 @@ export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels)
     workspace = current;
     if (!editable) draft = null;
     showView();
+    if (editable && workspace.environmentId && !placeNames.has(`environment:${workspace.environmentId}`)) void loadNames(workspace);
     if (editable && workspace.model && !catalogRequested && !catalog.models.length) {
       catalogRequested = true;
       loadModels().then((data) => {
@@ -108,6 +115,20 @@ export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels)
     showView();
     if (active === document.body || element.contains(active)) edit.focus();
   }
+  function rememberNames(kind, items, environmentId = '') {
+    for (const { id, name } of items) {
+      if (name) placeNames.set(kind === 'project' ? `project:${environmentId}/${id}` : `environment:${id}`, name);
+    }
+  }
+  async function loadNames(expected) {
+    const environments = await loadWorkspaces().catch(() => null);
+    if (environments) rememberNames('environment', environments.environments ?? []);
+    if (expected.environmentId) {
+      const projects = await loadWorkspaces(expected.environmentId).catch(() => null);
+      if (projects) rememberNames('project', projects.projects ?? [], expected.environmentId);
+    }
+    if (workspace === expected && !draft) showView();
+  }
   function fillPlaces(select, items, selected) {
     const options = [new Option('Chosen per request', ''), ...items.map(({ id, name }) => new Option(name || id, id))];
     if (selected && !items.some(({ id }) => id === selected)) options.push(new Option(selected, selected));
@@ -121,12 +142,14 @@ export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels)
     if (!environmentId) return;
     const data = await loadWorkspaces(environmentId).catch(() => null);
     if (draft !== opened || environment.value !== environmentId) return;
+    rememberNames('project', data?.projects ?? [], environmentId);
     fillPlaces(project, data?.projects ?? [], project.value);
     if (!data) workspaceFeedback.textContent = 'Couldn’t load T3 projects. Check the T3 connection in Flock settings.';
   }
   async function loadPlaces(opened) {
     const data = await loadWorkspaces().catch(() => null);
     if (draft !== opened) return;
+    rememberNames('environment', data?.environments ?? []);
     fillPlaces(environment, data?.environments ?? [], environment.value);
     if (!data) workspaceFeedback.textContent = 'Couldn’t load T3 environments. Check the T3 connection in Flock settings.';
     else await loadProjects(opened, opened.initial.projectId);
