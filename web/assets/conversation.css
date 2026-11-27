@@ -419,13 +419,11 @@
 .question-actions .button { min-height: 0; }
 .timeline .question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .15rem 0 0; padding-left: var(--avatar-col); }
 .timeline .question-actions .button:not(.question-confirm) {
-  background: transparent; color: var(--text); font-weight: 500; border-radius: var(--radius-full);
-  padding: .34rem .85rem; box-shadow: inset 0 0 0 1px var(--hairline);
+  background: transparent; font-weight: 500; border-radius: var(--radius-full); padding: .34rem .85rem;
 }
-.timeline .question-actions .button:not(.question-confirm):hover:not(:disabled) { background: var(--hover); }
 .question-actions .question-confirm {
-  padding: .34rem .85rem; border-radius: var(--radius-full); box-shadow: inset 0 0 0 1px var(--hairline);
-  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  padding: .34rem .85rem; border-radius: var(--radius-full);
+  background: var(--accent-soft); color: var(--accent);
 }
 .question-actions .question-confirm:hover:not(:disabled) { background: var(--accent-soft-hover); }
 .question-actions .question-reply { color: var(--text-2); font-weight: 500; }
