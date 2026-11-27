@@ -999,6 +999,7 @@ function requestGroups(history, activeTasks, parallelTasks, canStop = false) {
     stop.innerHTML = sidebarIcons.stop;
     stop.setAttribute('aria-label', 'Stop request');
     stop.dataset.tooltip = 'Stop request';
+    stop.dataset.tooltip = 'Stop request';
     if (item.classList.contains('request-task')) {
       item.classList.add('has-stop');
       item.append(stop);
@@ -2348,6 +2349,7 @@ function renderScreenshots(draft, disabled) {
         }
       });
       remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
+      remove.dataset.tooltip = 'Remove image';
       remove.dataset.tooltip = `Remove ${image.attachment.name}`;
       item.append(preview, remove);
       return item;
