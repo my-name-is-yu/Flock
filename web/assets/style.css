@@ -9,6 +9,9 @@
   --hover: light-dark(#ededea, #202020);
   --selected: light-dark(#e7e7e3, #272727);
   --hairline: light-dark(#e3e3df, #2a2a2a);
+  --border-floating: light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
+  --surface-glass: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
+  --scrim: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58));
 
   --text: light-dark(#1f1e24, #ececec);
   --text-2: light-dark(#55535c, #b8b8b8);
