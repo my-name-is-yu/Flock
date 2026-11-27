@@ -176,7 +176,7 @@ function scheduleForm(addSchedule) {
 async function readSchedules(api, bot, signal) {
   const params = new URLSearchParams({ bot, active: '1' });
   const first = await api(`schedules?${params}`, undefined, { signal });
-  const { canManage, unscheduledRequests, automations } = first;
+  const { canManage, needsWorkspace, unscheduledRequests, automations } = first;
   let { before } = first;
   while (before) {
     params.set('before', before);
@@ -184,7 +184,7 @@ async function readSchedules(api, bot, signal) {
     automations.push(...page.automations);
     before = page.before;
   }
-  return { canManage, unscheduledRequests, automations };
+  return { canManage, needsWorkspace, unscheduledRequests, automations };
 }
 
 export function createRecurringRequests(bot, api) {
@@ -217,7 +217,7 @@ export function createRecurringRequests(bot, api) {
       list.querySelector('.cron-poll-error')?.remove();
       const next = JSON.stringify(data);
       if (next === signature) return;
-      const { canManage, unscheduledRequests, automations } = data;
+      const { canManage, needsWorkspace, unscheduledRequests, automations } = data;
       const focused = list.contains(document.activeElement) && document.activeElement.dataset.scheduleId;
       const rows = automations.map((item) => scheduleRow(item, canManage, remove));
       for (const request of unscheduledRequests) {
@@ -227,13 +227,16 @@ export function createRecurringRequests(bot, api) {
         rows.push(row);
       }
       if (!rows.length && !canManage) rows.push(node('p', 'cron-empty', 'No recurring requests.'));
+      if (canManage && needsWorkspace) {
+        rows.unshift(node('p', 'cron-empty', 'Recurring requests run in one T3 project. Choose its environment and project under General → How it runs, then add one here.'));
+      }
       list.replaceChildren(...rows);
       if (focused) {
         const control = [...list.querySelectorAll('[data-schedule-id]')].find((button) => button.dataset.scheduleId === focused);
         (control ?? list).focus({ preventScroll: true });
       }
       count.data = automations.length ? String(automations.length) : '';
-      form.hidden = !canManage;
+      form.hidden = !canManage || needsWorkspace;
       signature = next;
     } catch {
       if (current.signal.aborted) return;

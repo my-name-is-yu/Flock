@@ -1214,6 +1214,17 @@ void recurringRequestStatus(const std::filesystem::path& path) {
     const auto first = browser.get(pathForActive);
     check(first.at("canManage") == true && first.at("unscheduledRequests") == Json::array({"Invalid weekday", "Check staging"}),
           "missing or incorrect configured request warnings");
+    check(first.at("needsWorkspace") == false, "a Bot with a T3 project was told to choose one");
+    {
+        auto unplaced = web;
+        unplaced.intake = [](std::string_view bot, std::string_view request) -> Intake {
+            return {std::string(bot), std::string(request), "local-env", "", Json::object()};
+        };
+        const auto unplacedServer = startWeb(store, 0, unplaced);
+        Browser unplacedBrowser(*unplacedServer);
+        check(unplacedBrowser.get(pathForActive).at("needsWorkspace") == true,
+              "a Bot without a T3 project was offered recurring requests it cannot save");
+    }
     const auto& recent = first.at("automations");
     check(recent.size() == 20 && std::ranges::all_of(recent, [](const Json& row) { return row.at("status") == "active"; }),
           "canceled entries consumed the active page");
