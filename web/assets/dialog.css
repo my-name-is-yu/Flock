@@ -156,6 +156,7 @@
 .memory-history-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .memory-history-list li { padding-block: .65rem; }
 .memory-history-list li + li { border-top: 1px solid var(--hairline); }
+.memory-history-list strong { font-weight: 600; }
 .memory-history-list p { margin: .25rem 0 0; }
 .memory-history-meta, .memory-history-source { color: var(--text-3); font-size: var(--text-xs); }
 .memory-history .text-button, .memory-history .link { color: var(--text); font-size: inherit; }

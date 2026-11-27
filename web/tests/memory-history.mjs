@@ -4,7 +4,7 @@ import { assetUrl, dumpFixture } from './dom-harness.mjs';
 const output = await dumpFixture(process.argv[2], `<!doctype html><html><body><script type="module">
   import { createMemoryHistory } from ${JSON.stringify(assetUrl('memory-history.js'))};
   const opened = [];
-  const revisions = [{ author: 'bot:release', source: { taskId: 1, runId: 'run' }, createdAt: 1, diffSummary: '-0 +1 lines',
+  const revisions = [{ author: 'bot:release', source: { taskId: 1, runId: 'run' }, createdAt: 1, diffSummary: '+1 line',
     learning: { taskTitle: 'Verify this project', requestEventId: 3, reportEventId: 7, added: [], removed: [] } }];
   const history = createMemoryHistory(async () => ({ revisions, before: 0 }), id => opened.push(id), () => null, 'Release Bot');
   document.body.append(history);

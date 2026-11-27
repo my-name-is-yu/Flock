@@ -67,8 +67,13 @@ std::string diffSummary(std::string_view before, std::string_view after) {
     const auto prefix = std::mismatch(oldLines.begin(), oldLines.end(), newLines.begin(), newLines.end());
     const auto suffix = std::mismatch(oldLines.rbegin(), std::make_reverse_iterator(prefix.first), newLines.rbegin(),
                                       std::make_reverse_iterator(prefix.second));
-    return "-" + std::to_string(std::distance(prefix.first, suffix.first.base())) + " +" +
-           std::to_string(std::distance(prefix.second, suffix.second.base())) + " lines";
+    const auto removed = std::distance(prefix.first, suffix.first.base());
+    const auto added = std::distance(prefix.second, suffix.second.base());
+    std::string summary;
+    if (removed) summary = "−" + std::to_string(removed);
+    if (added) summary += (summary.empty() ? "+" : " +") + std::to_string(added);
+    if (summary.empty()) return "No line changes";
+    return summary + (removed + added == 1 ? " line" : " lines");
 }
 
 void checkVersion(Id expected, Id current) {
