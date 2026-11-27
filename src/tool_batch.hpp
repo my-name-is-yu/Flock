@@ -33,9 +33,8 @@ struct PlannedCall {
 
 std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls);
 
-// Splits one model response into the steps that run it. Calls that can share a batch run first in one step,
-// then each remaining call runs alone in the order given. Each entry is an index into tools.
-std::vector<std::vector<std::size_t>> planSteps(std::span<const std::string> tools);
+using StepCallIndexes = std::vector<std::size_t>;
+std::vector<StepCallIndexes> planSteps(std::span<const std::string> tools);
 
 std::string turnCallKey(Id message, int step, std::optional<std::size_t> index = std::nullopt);
 }

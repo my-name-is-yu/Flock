@@ -372,8 +372,8 @@ bool MemoryStorage::canEditFrom(const conversation::Message& message) {
 
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
     if (!permissions.allows(task.botId, Action::private_memory_write, task.botId)) return false;
-    // A schedule, reminder or trigger was set up by someone who manages the Bot.
-    if (task.trigger) return true;
+    const bool automationSetUpByBotManager = task.trigger.has_value();
+    if (automationSetUpByBotManager) return true;
     if (!task.sourceMessageId) return false;
     const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
     return message.bot == task.botId && canEditFrom(message);
@@ -394,8 +394,8 @@ void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report
     notice.erase("docKey");
     notice.update(source);
     notice["taskTitle"] = bounded(scrub.text(std::string_view(task.request).substr(0, task.request.find('\n'))), 300);
-    // Automated work has no request message, so its notice links to the completed work.
-    notice["requestEventId"] = task.sourceMessageId.value_or(completion);
+    const Id requestOrAutomatedCompletion = task.sourceMessageId.value_or(completion);
+    notice["requestEventId"] = requestOrAutomatedCompletion;
     notice["completionEventId"] = completion;
     notice["reportEventId"] = report;
     notice["added"] = std::move(learned.added);

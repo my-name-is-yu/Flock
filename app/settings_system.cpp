@@ -25,7 +25,6 @@ unsigned portSetting(const Json& value) {
     return value.get<unsigned>();
 }
 
-// A Bot may read a settled Session beyond its final report unless the person turns this off.
 constexpr auto defaultSessionRead = "on_demand";
 
 std::string sessionReadSetting(const Json& value) {

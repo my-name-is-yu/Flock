@@ -92,10 +92,9 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
         }
         if (event.contains("sessionReadViews")) tools.push_back("session_read");
     }
-    if (!receiving) {
-        std::lock_guard lock(database.mutex);
-        if (decisions.canComplete(task)) tools.push_back("complete");
-        if (!peer && !task.replanning) tools.push_back("wait_for_event");
+    if (!receiving && !task.replanning) {
+        tools.push_back("complete");
+        if (!peer) tools.push_back("wait_for_event");
     }
     if (canRead) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");
