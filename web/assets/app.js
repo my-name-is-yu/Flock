@@ -3098,7 +3098,7 @@ function renderDetail() {
     const peers = botPeers(view.id).map(({ id }) => participant(id));
     if (changed('detail', detail, botName, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
-      elements['detail-title'].textContent = `${botName} talks with`;
+      elements['detail-title'].textContent = `${botName}’s talks with other Bots`;
       const list = node('ul', 'peer-picker-list');
       for (const bot of peers) {
         const item = node('li');
