@@ -2005,7 +2005,7 @@ void sessionLearningsReplaceCaseOnlyCorrections() {
           "case-only correction was dropped or displaced another retained fact");
 }
 
-void sessionLearningsRequireAnAuthorizedHumanRequest() {
+void sessionLearningsFollowTheRequestersAuthority() {
     Fixture f;
     constexpr auto fact = "The project runs release checks with CMake.";
     constexpr auto report = "The release checks passed with CMake.";
@@ -2020,19 +2020,6 @@ void sessionLearningsRequireAnAuthorizedHumanRequest() {
     BotAccess(*f.store).setMember(localOwner, "alpha", member.id, true);
     const auto memberTask = requestLearningTask(f, "Check the member's build", member);
     settleLearningTask(f, memberTask, report);
-
-    Automations automations(*f.store);
-    automations.createAutomation(localOwner, f.routing(), {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check the deploy"}},
-                                 f.now);
-    const auto webhook = automations.receiveWebhook(localOwner, "deploy", "example-delivery", {{"status", "success"}}, f.now);
-    settleLearningTask(f, webhook.at("tasks").front().at("taskId"), report);
-    const auto schedule = automations.createAutomation(
-        localOwner, f.routing(), {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}},
-        f.now);
-    f.now = schedule.at("nextRunAt");
-    automations.fireDueAutomations(f.now);
-    settleLearningTask(f, TaskList(*f.store).tasks("alpha").front().task.id, report);
-    automations.cancelAutomation(localOwner, "alpha", schedule.at("id"));
 
     ExternalMcp external(*f.store);
     const auto credential = external.connect(localOwner.id, {"alpha"});
@@ -2055,8 +2042,29 @@ void sessionLearningsRequireAnAuthorizedHumanRequest() {
     f.model.beforeComplete = [&](const ModelInput&) { webRoot = false; };
     settleLearningTask(f, webTask, report);
     const auto memory = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object());
-    check(completions == 5 && learnedNotices(f).empty() && memory.at("version") == 0 && memory.at("content") == "",
+    check(completions == 3 && learnedNotices(f).empty() && memory.at("version") == 0 && memory.at("content") == "",
           "a task without current authority created a learning revision or notice");
+
+    f.model.beforeComplete = nullptr;
+    Automations automations(*f.store);
+    automations.createAutomation(localOwner, f.routing(), {{"kind", "trigger"}, {"source", "deploy"}, {"request", "Check the deploy"}},
+                                 f.now);
+    const auto webhook = automations.receiveWebhook(localOwner, "deploy", "example-delivery", {{"status", "success"}}, f.now);
+    settleLearningTask(f, webhook.at("tasks").front().at("taskId"), report);
+    const auto schedule = automations.createAutomation(
+        localOwner, f.routing(), {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Etc/UTC"}, {"request", "Check the release"}},
+        f.now);
+    f.now = schedule.at("nextRunAt");
+    automations.fireDueAutomations(f.now);
+    const Id scheduled = TaskList(*f.store).tasks("alpha").front().task.id;
+    settleLearningTask(f, scheduled, report);
+    automations.cancelAutomation(localOwner, "alpha", schedule.at("id"));
+    const auto notices = learnedNotices(f);
+    const auto learned = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object());
+    check(completions == 5 && notices.size() == 1 && notices.front().at("data").at("added") == Json::array({fact}) &&
+              notices.front().at("data").at("requestEventId") == notices.front().at("data").at("completionEventId") &&
+              learned.at("version") == 1 && learned.at("content").get<std::string>().find(fact) != std::string::npos,
+          "automated work did not learn its verified fact once");
 }
 
 void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
@@ -4580,7 +4588,7 @@ int main(int argc, char** argv) {
             sessionLearningsDropProtectedAndOversizedItems();
             fullMemoryConsolidatesOnlySupersededLearnings();
             sessionLearningsReplaceCaseOnlyCorrections();
-            sessionLearningsRequireAnAuthorizedHumanRequest();
+            sessionLearningsFollowTheRequestersAuthority();
             std::cout << "Session learning acceptance passed with simulated T3\n";
             return 0;
         }
@@ -4724,7 +4732,7 @@ int main(int argc, char** argv) {
         sessionLearningsDropProtectedAndOversizedItems();
         fullMemoryConsolidatesOnlySupersededLearnings();
         sessionLearningsReplaceCaseOnlyCorrections();
-        sessionLearningsRequireAnAuthorizedHumanRequest();
+        sessionLearningsFollowTheRequestersAuthority();
         pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall();
         unrelatedUpdatesDoNotDisturbATurn();
         staleTargetIsReportedToTheModel();

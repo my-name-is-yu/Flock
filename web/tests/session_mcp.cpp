@@ -636,13 +636,10 @@ void sessionInvitations() {
 
         ModelTurn decide(const ModelInput& input) override {
             if (!input.event.contains("sessionWake") && !input.event.contains("sessionInvitation")) return decideSession(input);
-            const auto& steps = input.event.at("turn");
-            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(), "A Session event offered a memory write");
-            if (steps.empty()) return {{{"write_memory", {{"baseVersion", 0}, {"content", "Injected"}, {"summary", "Injected"}}, {}}}};
-            check(steps.front().at("result").at("ok") == false, "A Session event performed a memory write");
-            auto remaining = input;
-            remaining.event["turn"].erase(remaining.event["turn"].begin());
-            return decideSession(remaining);
+            // Bob can talk to these Bots but cannot manage them, so his Session events never offer a memory write.
+            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(),
+                  "A Session event let a person who cannot manage the Bot change its memory");
+            return decideSession(input);
         }
 
         ModelTurn decideSession(const ModelInput& input) {
@@ -1432,10 +1429,9 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
           "leave_session did not perform and report the same stop as flock_stop");
     ConversationIntake(*db).receive(localOwner, cb.intake("triage", ""), "web-after-leave", "Send another update");
     runtime->runConversations();
-    auto sharedTools = model.ask.webTools;
-    check(std::erase(sharedTools, "write_memory") == 1 && std::erase(sharedTools, "revert_memory_edit") == 1 &&
-              sharedTools == model.ask.sessionTools,
-          "A Session ask should receive the Web Bot's tools except memory changes");
+    check(std::ranges::find(model.ask.sessionTools, "write_memory") != model.ask.sessionTools.end() &&
+              model.ask.webTools == model.ask.sessionTools,
+          "A Session ask should receive the Web Bot's tools, including memory changes");
     check(participationState(database, "triage") == "left" && effects().at("t3_thread_send").size() == 4 &&
               model.ask.send.at("error") == "This Bot's participation in the Session has stopped",
           "A send reactivated a Bot that left");
