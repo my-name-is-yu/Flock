@@ -227,7 +227,7 @@ async function exercise(mountBoardInbox) {
   board.openHistory(trigger);
   await settled();
   check(!layer.hidden && byId(panel.getAttribute('aria-labelledby')).textContent === 'History' &&
-    message.textContent === 'No answered questions or approvals yet.' && !board.composer(),
+    message.textContent === 'No answered questions, secret requests or approvals yet.' && !board.composer(),
     'The Bot’s decision history lost its scoped title or empty state');
   check(calls.some(([path]) => path === 'inbox/history?bot=release'), 'History did not request this Bot’s history');
   byId('decision-close').click();
