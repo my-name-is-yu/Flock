@@ -437,7 +437,7 @@ export function mountBoardInbox({
     const list = pending();
     const item = current();
     const index = list.indexOf(item);
-    position.textContent = `${index + 1}/${list.length}`;
+    position.textContent = `${index + 1} of ${list.length}`;
     previous.disabled = index <= 0;
     next.disabled = index < 0 || index >= list.length - 1;
     syncHistoryControl();
