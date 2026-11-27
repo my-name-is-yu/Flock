@@ -2805,8 +2805,8 @@ function generalContent(bot) {
   let avatarHost;
   if (canEdit) {
     avatarHost = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
-    avatarHost.setAttribute('aria-label', 'Change avatar');
-    avatarHost.dataset.tooltip = 'Change avatar';
+    avatarHost.setAttribute('aria-label', 'Edit appearance');
+    avatarHost.dataset.tooltip = 'Edit appearance';
     avatarHost.dataset.tooltipSide = 'top';
     avatarHost.append(face);
   } else {

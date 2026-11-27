@@ -667,7 +667,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       const messages = {
         invalid_name: 'Enter a name between 1 and 32 characters.',
         invalid_image: 'Choose a PNG, JPEG, WebP or GIF up to 5 MB.',
-        invalid_avatar: 'Check the selected avatar options and try again.',
+        invalid_avatar: 'Check the selected appearance and try again.',
         invalid_workspace: 'Choose an available T3 environment and project.',
         workspaces_unavailable: 'Couldn’t load the selected project. Check the T3 connection and try again.',
         bot_not_found: 'This Bot no longer exists.',
