@@ -1238,33 +1238,6 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                                       .peers = peers,
                                                       .shutdown = shutdown});
         if (outcome != CallOutcome::advance) return;
-        skipQueuedStepsAfterFailure(id, step);
     }
-}
-
-void ConversationStorage::skipQueuedStepsAfterFailure(Id message, int step) {
-    std::lock_guard lock(database.mutex);
-    Transaction transaction(database.db);
-    auto finished = database.query("SELECT result FROM conversation_steps WHERE message_id=? AND step=?", {message, step});
-    // Session reads save their result under "result" next to the evidence they authorize.
-    const auto failure = [](const Json& saved) {
-        const auto failed = [](const Json& result) {
-            return result.is_object() && result.value("ok", true) == false && !result.value("notRun", false);
-        };
-        return failed(saved) || (saved.is_object() && saved.contains("result") && failed(saved.at("result")));
-    };
-    const bool failed = finished.next() && std::ranges::any_of(finished.json(0), failure);
-    if (failed) {
-        auto queued = database.query("SELECT step,json_array_length(decision) FROM conversation_steps"
-                                     " WHERE message_id=? AND step>? AND result IS NULL AND decision IS NOT NULL",
-                                     {message, step});
-        std::vector<std::pair<int, std::size_t>> skipped;
-        while (queued.next()) skipped.emplace_back(static_cast<int>(queued.number(0)), static_cast<std::size_t>(queued.number(1)));
-        auto notRun = toolFailure("Not run because an earlier action in the same response failed.");
-        notRun["notRun"] = true;
-        for (const auto& [later, calls] : skipped)
-            conversationTools.saveTurnResults(message, later, Json(std::vector<Json>(calls, notRun)));
-    }
-    transaction.commit();
 }
 }
