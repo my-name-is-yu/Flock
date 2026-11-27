@@ -136,20 +136,20 @@
 }
 .board-inbox-question .question-reply {
   grid-column: 2; grid-row: 2; justify-self: end;
-  padding: .46rem .95rem; border-radius: var(--radius-full);
-  border: 1px solid var(--hairline);
-  background: var(--canvas); color: var(--text);
-  font-size: var(--text-sm); font-weight: 500; text-decoration: none;
+  min-height: 2.2rem; padding: .4rem .85rem; border-radius: var(--radius-md);
+  border: 1px solid var(--control-border);
+  background: var(--control); color: var(--text);
+  font-size: var(--text-sm); font-weight: 600; text-decoration: none;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-question:not(:has(.question-choice-form)) .question-reply { grid-column: 1 / -1; grid-row: 1; }
 .board-inbox-question .question-reply:hover:not(:disabled) {
-  background: var(--hover); text-decoration: none;
+  background: var(--control-hover); text-decoration: none;
 }
 .board-inbox-question .question-reply:active:not(:disabled) { transform: scale(.97); }
 .board-inbox-question .question-confirm {
   grid-column: 3; grid-row: 2; justify-self: end;
-  padding: .46rem 1.05rem; border: 0; border-radius: var(--radius-full);
+  min-height: 2.2rem; padding: .4rem .85rem; border: 1px solid transparent; border-radius: var(--radius-md);
   background: var(--accent-fill); color: var(--on-accent);
   font-size: var(--text-sm); font-weight: 600;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
@@ -176,14 +176,14 @@
   box-shadow: var(--focus-halo);
 }
 .board-inbox-form button {
-  padding: .46rem 1.05rem;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-full);
-  background: var(--canvas); color: var(--text);
+  min-height: 2.2rem; padding: .4rem .85rem;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control); color: var(--text);
   font-size: var(--text-sm); font-weight: 600;
   transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
-.board-inbox-form button:hover:not(:disabled) { background: var(--hover); }
+.board-inbox-form button:hover:not(:disabled) { background: var(--control-hover); }
 .board-inbox-form button:active:not(:disabled) { transform: scale(.97); }
 .board-inbox-actions button:is(.primary, :first-child:not(.secondary))[type="submit"] {
   border-color: transparent;
