@@ -3473,7 +3473,7 @@ void pauseRecoversTheRetainedSavedFollowup(bool sessionMissing = false) {
     check(f.task(sibling).at("state") == "queued", "the recovered Run released the project before settlement");
     if (sessionMissing) {
         const auto detail = [&] { return destinationRunFor(f.task(taskId), "cloud").at("detail").get<std::string>(); };
-        check(detail() == "Flock could not confirm the Run's status in T3.", "An unconfirmed stop was recorded as Session deletion");
+        check(detail() == "Flock couldn’t confirm the Run’s status in T3.", "An unconfirmed stop was recorded as Session deletion");
         f.t3.interruptOutcome = InterruptOutcome::TargetGone;
         f.now += 5;
         f.tick();

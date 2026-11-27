@@ -300,7 +300,7 @@ Authorization authorizeBrowser(const BrowserOpener& open, const std::string& end
                 if (const auto result = opener.result()) {
                     openerPending = false;
                     if (!*result) {
-                        if (browserRequired) throw ModelError("Flock could not open a browser for ChatGPT sign-in on this machine", false);
+                        if (browserRequired) throw ModelError("Flock couldn’t open a browser for ChatGPT sign-in on this computer", false);
                         std::cerr << url << '\n';
                     }
                 }

@@ -99,7 +99,7 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
         try {
             links = t3.linkedEnvironments(gateway);
         } catch (const std::exception&) {
-            links.unavailable = "Flock could not list linked environments through T3 gateway " + gateway + ".";
+            links.unavailable = "Flock couldn’t list linked environments through T3 gateway " + gateway + ".";
         }
         if (!links.unavailable.empty()) {
             result.unavailable.push_back(scrub.text(links.unavailable));
@@ -140,7 +140,7 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
                     result.linked.push_back({std::move(name), std::move(route)});
                 }
             } catch (const std::exception&) {
-                result.unavailable.push_back(scrub.text("Flock could not list projects for linked target " + link.label +
+                result.unavailable.push_back(scrub.text("Flock couldn’t list projects for linked target " + link.label +
                                                         " through gateway " + gateway + ". Check linked-environment access in T3."));
             }
         }

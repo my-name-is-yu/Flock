@@ -578,7 +578,7 @@ std::string SessionStopResult::summary() const {
                 " already started and may still be processed. Flock requested cancellation for " + std::to_string(stoppedChildSessions) +
                 (stoppedChildSessions == 1 ? " child Session." : " child Sessions.");
     if (notCancellable)
-        text += " Flock could not check " + std::to_string(notCancellable) +
+        text += " Flock couldn’t check " + std::to_string(notCancellable) +
                 (notCancellable == 1 ? " Run's queue status." : " Runs' queue status.");
     if (pending) text += " Flock will retry cancellation for " + std::to_string(pending) + (pending == 1 ? " message." : " messages.");
     return text;

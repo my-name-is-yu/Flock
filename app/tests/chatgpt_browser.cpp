@@ -157,7 +157,7 @@ void openerFailure() {
     {
         CaptureStderr capture;
         expectModelError([&] { authorizeBrowser(failed, authorizationEndpoint, {{"state", "fixture-state"}}, "", false, true, {}); },
-                         "could not open a browser", false);
+                         "couldn’t open a browser", false);
         check(capture.view().find(authorizationEndpoint) == std::string_view::npos, "Web sign-in printed the authorization URL");
     }
     {
