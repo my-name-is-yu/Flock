@@ -101,6 +101,26 @@ std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> valid
     return waves;
 }
 
+std::vector<std::vector<std::size_t>> planSteps(std::span<const std::string> tools) {
+    std::vector<std::size_t> shared;
+    for (std::size_t i = 0; i < tools.size(); ++i)
+        if (tools.size() == 1 || batchable(tools[i])) shared.push_back(i);
+    std::vector<std::vector<std::size_t>> steps;
+    const bool hasReads = !shared.empty() && shared.size() < tools.size();
+    for (std::size_t i = 0; i < tools.size(); ++i) {
+        if (std::ranges::find(shared, i) != shared.end()) continue;
+        // A reply cannot describe results the model has not seen, so it stays with the reads and is not run.
+        if (hasReads && tools[i] == "reply")
+            shared.push_back(i);
+        else
+            steps.push_back({i});
+    }
+    // A reply ends the turn, so it runs after every other action whatever order the model gave.
+    std::ranges::stable_partition(steps, [&](const auto& step) { return tools[step.front()] != "reply"; });
+    if (!shared.empty()) steps.insert(steps.begin(), std::move(shared));
+    return steps;
+}
+
 std::string turnCallKey(Id message, int step, std::optional<std::size_t> index) {
     auto key = "turn/" + std::to_string(message) + "/" + std::to_string(step);
     if (index) key += "/" + std::to_string(*index);

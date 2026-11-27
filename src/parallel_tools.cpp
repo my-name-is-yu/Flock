@@ -30,11 +30,33 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
+namespace {
+constexpr auto saveStepResult = "UPDATE conversation_steps SET result=?,effect=NULL WHERE message_id=? AND step=? AND result IS NULL";
+
+bool actionFailed(const Json& result) {
+    return result.is_object() && result.value("ok", true) == false && !result.value("notRun", false);
+}
+
+bool slotFailed(const Json& slot) {
+    const bool wrapsSessionRead = slot.is_object() && slot.contains("result");
+    return actionFailed(slot) || (wrapsSessionRead && actionFailed(slot.at("result")));
+}
+}
+
 void ConversationTools::saveTurnResults(Id message, int step, const Json& results) {
-    database.exec("UPDATE conversation_steps SET result=?,effect=NULL WHERE message_id=? AND step=? AND result IS NULL",
-                  {results, message, step});
+    database.exec(saveStepResult, {results, message, step});
+    if (!sqlite3_changes(database.db) || std::ranges::none_of(results, slotFailed)) return;
+    auto queued = database.query("SELECT step,json_array_length(decision) FROM conversation_steps"
+                                 " WHERE message_id=? AND step>? AND result IS NULL AND decision IS NOT NULL",
+                                 {message, step});
+    std::vector<std::pair<int, std::size_t>> skipped;
+    while (queued.next()) skipped.emplace_back(static_cast<int>(queued.number(0)), static_cast<std::size_t>(queued.number(1)));
+    auto notRun = toolFailure("Not run because an earlier action in the same response failed.");
+    notRun["notRun"] = true;
+    for (const auto& [later, calls] : skipped) database.exec(saveStepResult, {Json(std::vector<Json>(calls, notRun)), message, later});
 }
 
 void ConversationTools::discardPendingResults(Id message) {
@@ -128,9 +150,7 @@ private:
         if (!call.rejection.empty()) return toolFailure(call.rejection);
         const bool standaloneBotCall = calls_.size() == 1 && isBotTool(call.tool);
         if (!standaloneBotCall && !tool_batch::batchable(call.tool)) {
-            auto result = toolFailure(tool_batch::classify(call) == tool_batch::CallClass::terminal
-                                          ? "Reply after reviewing these results."
-                                          : "Run this action on its own after reviewing these results.");
+            auto result = toolFailure("Reply after reviewing these results.");
             result["notRun"] = true;
             return result;
         }

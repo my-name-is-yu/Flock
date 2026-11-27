@@ -21,6 +21,7 @@
 #include "channel_storage.hpp"
 #include "bot_settings_storage.hpp"
 #include "bot_setup_storage.hpp"
+#include "tool_batch.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "automation_storage.hpp"
 #include "attachment_storage.hpp"
@@ -66,6 +67,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 using conversation_storage::integer;
@@ -1018,6 +1020,19 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         }
         return saved;
     };
+    const auto splitCalls = [](const std::vector<ModelCall>& calls) {
+        std::vector<std::string> names;
+        for (const auto& call : calls) names.push_back(call.tool);
+        std::vector<std::vector<ModelCall>> steps;
+        // Flock delivers this reply itself when it applies the setup change.
+        if (calls.size() == 2 && calls[0].tool == botSetupTool && calls[1].tool == "reply")
+            return std::vector<std::vector<ModelCall>>{calls};
+        for (const auto& indexes : tool_batch::planSteps(names)) {
+            auto& step = steps.emplace_back();
+            for (const auto index : indexes) step.push_back(calls[index]);
+        }
+        return steps;
+    };
     const auto persistModelCheckpoint = [&] {
         std::lock_guard lock(database.mutex);
         const auto entry = conversationCheckpoints.find(id);
@@ -1032,8 +1047,14 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         bool hasDecision = false;
         if (!ownsTurnQueue || authorizeTurn(message)) {
             if (completedCalls) {
+                const auto steps = splitCalls(*completedCalls);
                 database.exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
-                              {encodeCalls(*completedCalls), id, checkpoint.step});
+                              {encodeCalls(steps.front()), id, checkpoint.step});
+                if (sqlite3_changes(database.db))
+                    for (std::size_t later = 1; later < steps.size(); ++later)
+                        database.exec("INSERT INTO conversation_steps(message_id,step,decision) VALUES(?,?,?)"
+                                      " ON CONFLICT(message_id,step) DO NOTHING",
+                                      {id, checkpoint.step + static_cast<int>(later), encodeCalls(steps[later])});
                 database.exec("DELETE FROM conversation_retries WHERE message_id=?", {id});
                 hasDecision = true;
             } else {
@@ -1147,7 +1168,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                "Reason: " +
                                repair.string(2) +
                                ". Return offered tools with valid arguments. "
-                               "Batch independent reads, and propose replies or actions that make changes on their own.";
+                               "Reply only after you have seen the results it describes.";
                 }
                 auto [offered, machines, followupStatus] = available();
                 std::vector<ModelImage> images;
@@ -1203,6 +1224,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 conversationCheckpoints.insert_or_assign(id, std::move(checkpoint));
             }
             if (!persistModelCheckpoint()) return;
+            calls = std::move(splitCalls(calls).front());
         }
 
         if (shutdown.stop_requested()) return;
