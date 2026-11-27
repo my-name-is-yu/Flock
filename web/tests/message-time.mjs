@@ -202,7 +202,7 @@ async function exercise() {
   const [finished, historical, cancelled] = sessionRows();
   check(sessionLabel(finished) === '17:30' && finished.dataset.tooltip.includes('17:30') &&
     finished.querySelector(':scope > .sr-only')?.textContent.includes('Nov 20, 2026, 17:30') &&
-    sessionLabel(historical) === 'Complete' && !historical.dataset.tooltip.includes('Started'),
+    sessionLabel(historical) === 'Done' && !historical.dataset.tooltip.includes('Started'),
     'The sidebar used the request time instead of the Session creation time');
   check(sessionLabel(cancelled) === 'Cancelled · 17:30' && cancelled.dataset.tooltip.includes('17:30'),
     'The Done row showed the Session result instead of the cancelled request');

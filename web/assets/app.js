@@ -83,7 +83,7 @@ const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle:
 const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const sessionEndLabels = {
-  completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
+  completed: 'Done', cancelled: 'Cancelled', failed: 'Failed',
   interrupted: 'Interrupted', rolled_back: 'Rolled back', ended: 'Ended',
 };
 const stateLabels = {
