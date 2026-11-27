@@ -360,7 +360,12 @@ async function refreshConnections() {
 function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDisconnectT3, t3CleanupPending}) {
   const environments = t3?.environments ?? [];
   $('t3-connect-options').hidden = !setup || setup.running;
-  $('t3-connect-local').hidden = environments.some(({authorization}) => authorization?.loopbackHttp);
+  const localConnected = environments.some(({authorization}) => authorization?.loopbackHttp);
+  $('t3-connect-local').hidden = localConnected;
+  $('t3-connect-title').textContent = environments.length ? 'Connect another T3' : 'T3 connection needed';
+  $('t3-connect-detail').textContent = localConnected
+    ? 'Paste the connection URL from T3 Code on another computer.'
+    : 'Connect so your Bots can run their work in T3 Code.';
   $('connections').replaceChildren();
   for (const {environmentId, authorization} of environments) {
     const {label, expiresAt, expired} = authorization ?? {};
