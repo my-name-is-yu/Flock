@@ -37,7 +37,7 @@ const UI_ICONS = {
 
 
 function uiIcon(name) {
-  return `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${UI_ICONS[name] ?? ''}</svg>`;
+  return `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${UI_ICONS[name] ?? ''}</svg>`;
 }
 
 function pickDifferent(items, exclude) {
