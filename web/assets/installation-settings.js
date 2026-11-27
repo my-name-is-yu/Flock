@@ -245,7 +245,7 @@ function editGitHub() {
   }
   const form = buildForm([
     settingField('token', 'Access token', {type: 'password', placeholder: tokenSet ? 'Token saved' : '', wide: true}),
-    settingField('webhookSecret', 'Webhook secret', {type: 'password', placeholder: webhookSecretSet ? 'Secret saved' : '', wide: true}),
+    settingField('webhookSecret', 'Webhook secret', {type: 'password', placeholder: webhookSecretSet ? 'Secret saved' : 'Optional', wide: true}),
   ], 'Save', ({token, webhookSecret}) => {
     if (!token.trim() && !webhookSecret.trim()) throw new Error('Enter a token or a webhook secret to save.');
     const changes = {};
@@ -357,7 +357,7 @@ function editChannelOptions() {
   )));
   const fields = [settingField('artifactBaseUrl', 'Shared preview URL', {type: 'url', value: artifactBaseUrl, wide: true})];
   if (canManageHost) fields.push(settingField('sessionCredential', 'Session bridge secret', {
-      type: 'password', placeholder: sessionCredentialSet ? 'Secret saved' : '', wide: true,
+      type: 'password', placeholder: sessionCredentialSet ? 'Secret saved' : 'Optional', wide: true,
     }));
   const form = buildForm(fields, 'Save', ({artifactBaseUrl: url, sessionCredential}) => {
     const body = {action: 'options', artifactBaseUrl: url.trim()};
