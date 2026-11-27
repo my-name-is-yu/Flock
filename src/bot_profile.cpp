@@ -1,5 +1,5 @@
 #include "flock/bot_profile.hpp"
-#include "flock/avatar_presets.hpp"
+#include "flock/avatar_style.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"

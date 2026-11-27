@@ -30,8 +30,6 @@ struct Bot {
     Intake intake(std::string_view request) const;
 };
 
-Json createdBotAvatar(const BotChange& change);
-
 class Bots {
 public:
     using RememberProject = std::function<void(std::string_view bot, std::string_view environment, std::string_view project)>;

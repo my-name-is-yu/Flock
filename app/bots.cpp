@@ -2,7 +2,7 @@
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/automations.hpp"
-#include "flock/avatar_presets.hpp"
+#include "flock/avatar_style.hpp"
 #include "flock/store_options.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_notes_error.hpp"
@@ -521,18 +521,17 @@ bool Bots::reconcileCreation(const BotChange& change) {
     return false;
 }
 
+namespace {
 Json createdBotAvatar(const BotChange& change) {
+    const auto& requested = change.avatar;
+    const bool useDerivedColor = !requested || !requested->color;
     std::uint32_t hash = 2166136261u;
-    for (const unsigned char ch : change.target) hash = (hash ^ ch) * 16777619u;
-    const std::string color = avatarColors[hash / std::size(avatarShapes) % std::size(avatarColors)];
-    if (!change.avatar) return {{"kind", "shape"}, {"example", avatarShapes[hash % std::size(avatarShapes)]}, {"color", color}};
-    const auto& requested = *change.avatar;
-    if (requested.kind != "shape" && requested.kind != "icon")
-        throw BotProfileError("invalid_avatar", "Avatar kind must be shape or icon; upload images from Flock Web");
-    return validatedAvatarStyle({{"avatar",
-                                  {{"kind", requested.kind},
-                                   {requested.kind == "shape" ? "example" : "icon", requested.preset},
-                                   {"color", requested.color.empty() ? color : requested.color}}}});
+    if (useDerivedColor)
+        for (const unsigned char ch : change.target) hash = (hash ^ ch) * 16777619u;
+    const std::string color = useDerivedColor ? avatarColors[hash / std::size(avatarShapes) % std::size(avatarColors)] : *requested->color;
+    if (!requested) return {{"kind", "shape"}, {"example", avatarShapes[hash % std::size(avatarShapes)]}, {"color", color}};
+    return {{"kind", requested->kind}, {requested->kind == "shape" ? "example" : "icon", requested->preset}, {"color", color}};
+}
 }
 
 void Bots::apply(const BotChange& change) try {

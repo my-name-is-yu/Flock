@@ -6,7 +6,7 @@
 #include "flock/limits.hpp"
 #include "flock/session_read.hpp"
 #include "flock/bot_setup.hpp"
-#include "flock/avatar_presets.hpp"
+#include "flock/avatar_style.hpp"
 #include "flock/model.hpp"
 #include "flock/model_error.hpp"
 #include "flock/workspace_tools.hpp"

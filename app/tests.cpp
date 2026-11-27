@@ -1,6 +1,8 @@
 #include "flock/bot_lifecycle.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy.hpp"
+#include "flock/policy_rules.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/secret_requests.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
@@ -19,7 +21,7 @@
 #include "flock/conversations.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/bot_profile.hpp"
-#include "flock/avatar_presets.hpp"
+#include "flock/avatar_style.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
@@ -1149,6 +1151,7 @@ void conversationCreatedBotAvatars() {
     Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
     int sequence = 0;
     const auto create = [&](std::string_view target, const Json& avatar) {
+        model.result = nullptr;
         model.args = {{"operation", "create_bot"}, {"targetBotId", target}, {"name", "New Bot"}};
         if (!avatar.is_null()) model.args["avatar"] = avatar;
         ConversationIntake(store).receive(creator, Intake{"Source", "", "env", "project"}, std::to_string(++sequence), "Create a Bot");
@@ -1160,39 +1163,54 @@ void conversationCreatedBotAvatars() {
             if (card.at("id") == id) return card.at("avatar");
         return Json{};
     };
-    const auto derived = [](std::string_view id) { return createdBotAvatar(BotChange{std::string(id), "Bot", "1-0"}); };
-
     check(create("icon-bot", {{"kind", "icon"}, {"icon", "compass"}, {"color", "#929dee"}}).at("status") == "applied" &&
               stored("icon-bot") == Json{{"kind", "icon"}, {"icon", "compass"}, {"color", "#929dee"}},
           "Conversation creation did not save the requested icon avatar");
-    check(create("mug-bot", {{"kind", "shape"}, {"example", "mug"}}).at("status") == "applied" &&
-              stored("mug-bot") == Json{{"kind", "shape"}, {"example", "mug"}, {"color", derived("mug-bot").at("color")}},
+    check(create("shape-bot", {{"kind", "shape"}, {"example", "mug"}}).at("status") == "applied" &&
+              stored("shape-bot") == Json{{"kind", "shape"}, {"example", "mug"}, {"color", "#acd077"}},
           "A requested shape without a color did not take the color chosen from the Bot ID");
-    check(create("plain-bot", nullptr).at("status") == "applied" && stored("plain-bot") == derived("plain-bot"),
+    check(create("plain-bot", nullptr).at("status") == "applied" &&
+              stored("plain-bot") == Json{{"kind", "shape"}, {"example", "chat"}, {"color", "#acd077"}},
           "An omitted avatar was not chosen from the Bot ID");
 
     for (const auto& invalid : {Json{{"kind", "upload"}}, Json{{"kind", "shape"}, {"example", "rocket"}},
                                 Json{{"kind", "icon"}, {"icon", "unknown"}}, Json{{"kind", "icon"}},
                                 Json{{"kind", "shape"}, {"example", "mug"}, {"color", "blue"}}, Json{{"example", "mug"}}, Json("sprout")}) {
         const auto result = create("invalid-bot", invalid);
-        check(result.at("ok") == false && result.dump().find("vatar") != std::string::npos && stored("invalid-bot").is_null() &&
-                  !Policy{store}.allows(creator, Action::bot_settings, "invalid-bot"),
+        check(result.at("ok") == false && result.at("error").get<std::string>().find("vatar") != std::string::npos &&
+                  stored("invalid-bot").is_null() && !Policy{store}.allows(creator, Action::bot_settings, "invalid-bot"),
               "An invalid avatar created a Bot: " + invalid.dump());
     }
-    check(create("invalid-bot", nullptr).at("status") == "applied" && stored("invalid-bot") == derived("invalid-bot"),
+    check(create("invalid-bot", {{"kind", "icon"}, {"icon", "compass"}, {"color", ""}}) ==
+                  Json{{"ok", false}, {"error", "Avatar color must be a hex color"}} &&
+              stored("invalid-bot").is_null(),
+          "An explicitly empty color must return a tool error");
+    check(create("invalid-bot", nullptr).at("status") == "applied" && stored("invalid-bot").is_object(),
           "A rejected avatar left the Bot ID unusable");
 
     std::set<std::string> shapes, colors;
     for (int index = 0; index < 100; ++index) {
         const auto id = "bot-" + std::to_string(index);
-        const auto avatar = derived(id);
-        check(avatar == derived(id) && avatar.at("kind") == "shape" && validatedAvatarStyle({{"avatar", avatar}}) == avatar,
-              "A derived avatar was unstable or outside the presets");
+        check(create(id, nullptr).at("status") == "applied", "A Bot with a derived avatar failed to publish");
+    }
+    for (const auto& bot : bots.cards()) {
+        if (!bot.at("id").get_ref<const std::string&>().starts_with("bot-")) continue;
+        const auto& avatar = bot.at("avatar");
+        check(avatar.at("kind") == "shape" && validatedAvatarStyle({{"avatar", avatar}}) == avatar,
+              "A derived avatar was outside the presets");
         shapes.insert(avatar.at("example").get<std::string>());
         colors.insert(avatar.at("color").get<std::string>());
     }
     check(shapes.size() == std::size(avatarShapes) && colors.size() == std::size(avatarColors),
           "Derived avatars did not spread across every preset shape and color");
+
+    PolicyRules{store}.setMode(localOwner, "supervised");
+    const auto invalid = create("supervised-bot", {{"kind", "icon"}});
+    check(invalid == Json{{"ok", false}, {"error", "Unsupported avatar icon"}} && Inbox{store}.inbox(creator).empty(),
+          "An invalid avatar in supervised mode must return a tool error without requesting approval");
+    create("supervised-bot", {{"kind", "icon"}, {"icon", "compass"}});
+    check(Inbox{store}.inbox(creator).size() == 1 && stored("supervised-bot").is_null(),
+          "A valid avatar in supervised mode must request approval before creating the Bot");
 }
 
 void botProfilesAndAvatars() {

@@ -8,7 +8,8 @@
 
 namespace flockv0 {
 struct BotAvatarChoice {
-    std::string kind, preset, color;
+    std::string kind, preset;
+    std::optional<std::string> color;
 };
 
 struct BotChange {
