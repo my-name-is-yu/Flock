@@ -978,7 +978,8 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         if (botOf(input) == "Ernest" && from.empty()) {
             if (answered) return {"reply", {{"text", "Reviewer に聞いています。"}}, "Tell the person"};
             check(input.task.at("bots") == Json::array({{{"botId", "reviewer"}, {"name", "Reviewer"}}}) &&
-                      std::ranges::find(input.tools, "message_bot") != input.tools.end(),
+                      std::ranges::find(input.tools, "message_bot") != input.tools.end() &&
+                      std::ranges::find(input.tools, "request_bot_change") != input.tools.end(),
                   "the conversation could not see the Bot it may message");
             return {"message_bot", {{"botId", "reviewer"}, {"text", "Can we ship today?"}}, "Ask Reviewer"};
         }
@@ -986,6 +987,8 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
             check(from == "ernest" && input.event.at("text") == "Can we ship today?" &&
                       input.event.at("botMessage").at("fromName") == "ernest",
                   "Reviewer did not receive Ernest's message as a Bot message");
+            for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
+                check(std::ranges::find(input.tools, tool) == input.tools.end(), "another Bot's message was given the person's authority");
             if (answered) return {"reply", {{"text", "Ernest に答えました。"}}, "Tell the person"};
             return {"message_bot", {{"botId", "ernest"}, {"text", "Yes, ship it."}}, "Answer Ernest"};
         }

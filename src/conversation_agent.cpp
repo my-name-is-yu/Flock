@@ -116,10 +116,23 @@ TaskResult taskResult(Id id, std::string_view kind, const Json& data) {
     return RecordDecoder("journal", rowId).decodeClosed(data, [](const Json&, const RecordDecoder&) { return TaskResult{}; });
 }
 
-const std::vector<std::string> turnTools{
-    "start_task",  "send_to_task",    "change_task",          "answer_task_question", "record_task_blocker", "withdraw_task_question",
-    "cancel_task", "message_session", "invite_bot",           "message_bot",          "leave_session",       "interrupt_session",
-    "read_result", "find_tasks",      "flock_session_search", "flock_session_events", "read_tool_result",    "reply"};
+const std::vector<std::string> turnTools{"start_task",
+                                         "send_to_task",
+                                         "change_task",
+                                         "answer_task_question",
+                                         "record_task_blocker",
+                                         "withdraw_task_question",
+                                         "cancel_task",
+                                         "message_session",
+                                         "invite_bot",
+                                         "leave_session",
+                                         "interrupt_session",
+                                         "read_result",
+                                         "find_tasks",
+                                         "flock_session_search",
+                                         "flock_session_events",
+                                         "read_tool_result",
+                                         "reply"};
 const std::vector<std::string> webTools{"compact_conversation",
                                         "expand_context",
                                         "continue_fresh_session",
@@ -939,16 +952,19 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
     };
     const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
+    // Another Bot's message is not the person's request, so it cannot change Bots, settings or memory.
+    const bool fromBot = message.routing.contains("botMessage");
     auto tools = notification ? std::vector<std::string>{"reply", "read_tool_result"} : turnTools;
     if (gitHost && notification) {
         appendGitNotificationTools(message.routing.at("gitEvent"), tools);
     } else if (gitHost && web)
         tools.insert(tools.end(), gitTools().begin(), gitTools().end());
-    if (web) {
+    if (web) tools.emplace_back("message_bot");
+    if (web && !fromBot) {
         tools.insert(tools.end(), webTools.begin(), webTools.end());
         tools.insert(tools.end(), botToolNames().begin(), botToolNames().end());
     }
-    if (botSetup && (message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted))
+    if (botSetup && !fromBot && (message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted))
         tools.emplace_back(botSetupTool);
     if (!message.channelScope.empty()) tools.insert(tools.end(), channelTools.begin(), channelTools.end());
     bool shouldVerifyFollowup = false;
