@@ -1197,8 +1197,8 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     Mcp mcp(*server, token);
     check(Mcp(*server, "").request("tools/list", Json::object(), 401).contains("error"), "MCP accepted an absent bearer");
     const auto instructions = mcp.request("initialize", {{"protocolVersion", "2025-06-18"}}).at("result").value("instructions", "");
-    check(instructions.find("flock_bots") != std::string::npos && instructions.find("flock_ask") != std::string::npos,
-          "Session MCP does not tell the agent how to reach Flock Bots");
+    for (const auto* tool : {"flock_bots", "flock_ask", "flock_stop"})
+        check(instructions.find(tool) != std::string::npos, std::string("Session MCP instructions omit ") + tool);
     const auto tools = mcp.request("tools/list", Json::object()).at("result").at("tools");
     check(tools.size() == 3 && tools[0].at("name") == "flock_bots" && tools[1].at("name") == "flock_ask" &&
               tools[2].at("name") == "flock_stop",
@@ -1208,8 +1208,8 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
               askSchema.at("additionalProperties") == false,
           "flock_ask still accepts a mode");
     const auto bots = mcp.call("flock_bots").at("structuredContent").at("bots");
-    check(bots.size() == 1 && bots.front().at("id") == "release", "Bot catalog bypassed membership");
-    check(!bots.front().contains("skill"), "Bot catalog still names an exported skill");
+    check(bots == Json::array({{{"id", "release"}, {"name", "Release"}, {"role", "custom"}}}),
+          "Session MCP must list only accessible Bots with their ID, name and role");
 
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", aliceCredential}});

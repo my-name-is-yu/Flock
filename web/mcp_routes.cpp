@@ -1,9 +1,9 @@
 #include "mcp_routes.hpp"
 #include "flock/limits.hpp"
 #include "views.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/participation.hpp"
-#include "flock/bot_id.hpp"
 #include "flock/json.hpp"
 #include "flock/policy.hpp"
 #include "flock/t3_connection.hpp"
@@ -200,11 +200,11 @@ Json callSessionTool(Store& store, const WebCallbacks& callbacks, const T3Connec
     if (tool == listTool) {
         if (!arguments.empty()) throw InvalidToolArguments{};
         const auto actor = participation.person(connection);
-        const auto bots = callbacks.bots();
+        const Policy policy(store);
         auto rows = Json::array();
-        for (const auto& bot : bots) {
+        for (const auto& bot : callbacks.bots()) {
             const auto botId = bot.value("id", std::string{});
-            if (!validBotId(botId) || !Policy{store}.allows(actor, Action::bot_decide, botId)) continue;
+            if (!validBotId(botId) || !policy.allows(actor, Action::bot_decide, botId)) continue;
             try {
                 if (callbacks.intake(botId, "").botId != botId) continue;
             } catch (const std::exception&) {

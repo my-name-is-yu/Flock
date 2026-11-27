@@ -15,7 +15,6 @@
 #include "settings_connections.hpp"
 #include "settings_system.hpp"
 #include "t3_connection_setup.hpp"
-#include "t3_setup.hpp"
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/bot_change.hpp"
@@ -332,12 +331,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         [&] { return activeBotCards(store, bots.cards()); },
         intake,
         [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
-            auto created = BotAccess{store}.createOwnedBot(creator, [&](const auto& publishOwned) {
+            return BotAccess{store}.createOwnedBot(creator, [&](const auto& publishOwned) {
                 return bots.create(profile, image, publishOwned, [&](auto bot, auto environment, auto project) {
                     BotAccess{store}.rememberProjectAssignment(creator, bot, environment, project);
                 });
             });
-            return created;
         },
         {},
         [&](std::string_view botId) { return bots.avatarImage(botId); },
@@ -508,8 +506,8 @@ int runCli(Arguments& args) {
         return 0;
     }
     if (command == "model") return modelCommand(args, home);
-    Bots bots(home / "bots");
     if (command == "t3") return t3Command(args, home);
+    Bots bots(home / "bots");
     if (command == "external-mcp") return externalMcpCommand(args, home, bots);
     if (command == "bots") {
         args.end();
