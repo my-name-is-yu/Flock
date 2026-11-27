@@ -60,11 +60,7 @@
   border: 1px solid var(--hairline); border-radius: var(--radius-md);
   background: var(--overlay); box-shadow: var(--shadow-lg);
   transform-origin: top right;
-  animation: popover-enter .18s cubic-bezier(0.22, 1.2, 0.36, 1);
-}
-@keyframes popover-enter {
-  from { opacity: 0; transform: scale(.93) translateY(-5px); }
-  to { opacity: 1; transform: none; }
+  animation: menu-pop .14s cubic-bezier(.2, .9, .25, 1);
 }
 .conversation-action {
   display: flex; align-items: center; gap: .6rem; padding: .45rem .55rem;
