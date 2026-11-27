@@ -200,7 +200,7 @@ label.settings-row:has(.settings-row-switch:enabled) { cursor: pointer; }
 button.settings-row:active, a.settings-row:active { background: var(--selected); }
 button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
 .settings-row-value { margin-left: auto; color: var(--text-2); }
-.settings-row > .dialog-button { flex: none; }
+.settings-row > .button { flex: none; }
 .settings-row-switch {
   --switch-size: 1.5rem;
   appearance: none; position: relative; flex: none; margin: 0 0 0 auto; cursor: pointer;
@@ -264,7 +264,7 @@ a.settings-row svg { margin-left: auto; }
   min-height: 2.2rem; padding: .3rem .55rem; border: 1px solid var(--hairline); border-radius: var(--radius-md);
   background: var(--field, var(--canvas)); color: var(--text); font: inherit; font-size: var(--text-sm);
 }
-.cron-form-when .dialog-button { margin-inline-start: auto; }
+.cron-form-when .button { margin-inline-start: auto; }
 :is(.cron-request-input, .cron-form-when :is(select, input)):focus-visible {
   outline: 2px solid transparent; border-color: var(--focus-border);
   box-shadow: var(--focus-halo);
@@ -291,26 +291,11 @@ a.settings-row svg { margin-left: auto; }
 @keyframes stop-confirm-in { from { opacity: 0; transform: translateY(3px); } }
 .wait-stop-text { font-size: var(--text-sm); color: var(--text-2); }
 .wait-stop-text strong { color: var(--text); font-weight: 600; }
-.dialog-button.danger { background: var(--danger); color: var(--canvas); }
-.dialog-button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 88%, var(--text)); }
 .dialog-feedback { color: var(--danger); font-size: var(--text-sm); }
 .dialog-feedback:empty { margin-top: calc(-1 * var(--detail-gap)); }
 .bot-pause-dialog { width: min(26rem, calc(100% - 2rem)); }
 .bot-pause-actions { display: flex; justify-content: flex-end; gap: .5rem; }
 
-.dialog-button {
-  display: inline-flex; align-items: center; justify-content: center; gap: .3rem; min-height: 2.3rem;
-  border: 0; border-radius: var(--radius-full); padding: .5rem 1rem;
-  background: var(--accent-soft); color: var(--accent); font-size: var(--text-sm); font-weight: 600;
-  text-decoration: none; overflow-wrap: anywhere;
-  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
-}
-.dialog-button:hover:not(:disabled) { background: var(--accent-soft-hover); }
-.dialog-button:active:not(:disabled) { transform: scale(.97); }
-.dialog-button.primary { background: var(--accent-fill); color: var(--on-accent); }
-.dialog-button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
-.dialog-button.quiet { background: none; color: var(--text-2); }
-.dialog-button.quiet:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 
 .settings-row.danger { color: var(--danger); }
 button.settings-row.danger:hover { background: var(--danger-soft); }
@@ -353,7 +338,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   .wait-stop-confirm { animation: none; }
   @starting-style { .detail[open] { transform: none; } }
   .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active,
-  .settings-name-button:active, .dialog-button:active:not(:disabled), .peer-choice:active { transform: none; }
+  .settings-name-button:active, .peer-choice:active { transform: none; }
   .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
   .settings-row svg { transition: none; transform: none; }
   .detail-tab { transition: none; }

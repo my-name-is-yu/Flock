@@ -416,6 +416,7 @@
   100% { opacity: 1; transform: none; }
 }
 
+.question-actions .button { min-height: 0; }
 .timeline .question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .15rem 0 0; padding-left: var(--avatar-col); }
 .timeline .question-actions .button:not(.question-confirm) {
   background: transparent; color: var(--text); font-weight: 500; border-radius: var(--radius-full);
@@ -516,7 +517,7 @@
 .empty-state p { font-size: var(--text-sm); color: var(--text-2); }
 .empty-state.first-run { gap: 0; }
 .empty-state.first-run p { max-width: 22rem; margin-top: .4rem; line-height: 1.55; text-wrap: balance; }
-.empty-state.first-run .dialog-button { margin-top: var(--space-5); padding-inline: 1.25rem; }
+.empty-state.first-run .button { margin-top: var(--space-5); padding-inline: 1.25rem; }
 .first-run-flock { display: flex; align-items: flex-end; margin-bottom: var(--space-4); }
 .first-run-flock .avatar { width: 3.1rem; height: 3.1rem; margin: 0; border-radius: 0; }
 .first-run-flock .avatar:nth-child(1) { rotate: -8deg; translate: .35rem .1rem; }

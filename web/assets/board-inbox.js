@@ -112,8 +112,8 @@ function stopSection(item, submit, busy) {
     prompt.append(element('strong', 'Stop this request?'),
       ' This requests a stop for this work, including any T3 work assigned to it.');
     confirm.setAttribute('aria-labelledby', prompt.id);
-    const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', () => showDefault(true));
-    const confirmStop = button('Stop request', 'dialog-button danger', () => void submit(item, 'cancel', {}));
+    const keep = button('Keep working', 'button quiet wait-stop-keep', () => showDefault(true));
+    const confirmStop = button('Stop request', 'button danger', () => void submit(item, 'cancel', {}));
     keep.disabled = busy;
     confirmStop.disabled = busy;
     const choices = element('div', '', 'board-inbox-actions');

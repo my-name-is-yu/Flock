@@ -6,7 +6,7 @@ export function hasQuestionChoices(choices) {
 export function questionReplyButton(open, dialog = false) {
   const reply = document.createElement('button');
   reply.type = 'button';
-  reply.className = dialog ? 'dialog-button quiet' : 'text-button question-reply';
+  reply.className = dialog ? 'button quiet' : 'text-button question-reply';
   reply.textContent = 'Write an answer';
   reply.addEventListener('click', open);
   return reply;
@@ -49,7 +49,7 @@ export function questionChoiceForm({ key, prompt, choices, answer, busy, dialog,
 
   const confirm = document.createElement('button');
   confirm.type = 'submit';
-  confirm.className = dialog ? 'dialog-button primary' : 'button question-confirm';
+  confirm.className = dialog ? 'button primary' : 'button question-confirm';
   confirm.textContent = 'Send answer';
   form.append(options, confirm);
   form.addEventListener('change', (event) => {

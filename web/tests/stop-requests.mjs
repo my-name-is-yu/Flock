@@ -156,7 +156,7 @@ async function exercise() {
     'Sidebar stop button did not open stop confirmation dialog');
   check(document.activeElement?.classList.contains('wait-stop-keep'),
     'Keep working button was not focused by default');
-  $('#detail .dialog-button.danger').click();
+  $('#detail .button.danger').click();
   await waitFor(() => window.__operationsCalls.length === 1 && !$('#detail').open,
     'Confirming sidebar stop did not call /api/operations');
   const op1 = window.__operationsCalls[0];
@@ -172,7 +172,7 @@ async function exercise() {
     'Inbox stop button did not open inline confirmation');
   check(document.activeElement?.classList.contains('wait-stop-keep'),
     'Inbox stop confirmation did not focus Keep working');
-  $('#decision-item .board-inbox-stop .dialog-button.danger').click();
+  $('#decision-item .board-inbox-stop .button.danger').click();
   await waitFor(() => window.__operationsCalls.length === 2,
     'Inbox stop did not route cancel to /api/operations');
   check(window.__inboxDecideCalls.length === 0, 'Inbox stop wrongly called /api/inbox/decide');

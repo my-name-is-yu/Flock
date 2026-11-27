@@ -148,7 +148,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
             <span>PNG, JPEG, WebP or GIF, up to 5 MB</span>
             <input id="studio-photo" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
           </label>
-          <button class="dialog-button quiet studio-remove-upload" id="studio-remove-upload" type="button" hidden>Remove image</button>
+          <button class="button quiet-danger studio-remove-upload" id="studio-remove-upload" type="button" hidden>Remove image</button>
           <p class="studio-error" id="studio-upload-error" role="alert" hidden></p>
         </div>
 
@@ -170,8 +170,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
         <p class="studio-error" id="studio-submit-error" role="alert" hidden></p>
         <footer class="studio-footer">
-          <button type="button" class="dialog-button quiet" id="studio-cancel">Cancel</button>
-          <button type="button" class="dialog-button primary" id="studio-save">Create</button>
+          <button type="button" class="button quiet" id="studio-cancel">Cancel</button>
+          <button type="button" class="button primary" id="studio-save">Create</button>
         </footer>
       </div>
     </div>
