@@ -9,7 +9,7 @@ export const pendingKindLabels = {
 };
 const labels = {
   ...pendingKindLabels,
-  answer: 'Answered', cancel: 'Stop requested', deny: 'Denied', supply: 'Supplied',
+  answer: 'Answered', cancel: 'Stop requested', deny: 'Denied', supply: 'Secret saved',
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
