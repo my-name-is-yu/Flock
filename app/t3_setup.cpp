@@ -1,6 +1,5 @@
 #include "t3_setup.hpp"
 #include "flock/json.hpp"
-#include "flock/skill_export.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -357,24 +356,6 @@ void removeT3Providers(const OwnsBearer& owns) {
         codex.restore();
         throw;
     }
-}
-
-void syncT3Skills(const Json& bots) {
-    const auto claude = setting("FLOCK_CLAUDE_CLI", "claude");
-    const auto codex = setting("FLOCK_CODEX_CLI", "codex");
-    std::string errors;
-    const auto sync = [&](const std::string& cli, const char* overrideName, std::string_view path) {
-        if (!installed(cli)) return;
-        try {
-            exportFlockSkills(userPath(overrideName, path), bots);
-        } catch (const std::exception& error) {
-            if (!errors.empty()) errors += "\n";
-            errors += error.what();
-        }
-    };
-    sync(claude, "FLOCK_CLAUDE_SKILLS_DIR", ".claude/skills");
-    sync(codex, "FLOCK_CODEX_SKILLS_DIR", ".agents/skills");
-    if (!errors.empty()) throw Conflict(errors);
 }
 
 }

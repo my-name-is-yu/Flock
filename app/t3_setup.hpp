@@ -1,7 +1,5 @@
 #pragma once
 
-#include "flock/json.hpp"
-
 #include <functional>
 #include <string>
 #include <string_view>
@@ -24,6 +22,5 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
                                               const std::function<bool(std::string_view)>& owns = {});
 bool t3ProvidersNeedRefresh(const std::function<bool(std::string_view)>& owns);
 void removeT3Providers(const std::function<bool(std::string_view)>& owns);
-void syncT3Skills(const Json& bots);
 
 }

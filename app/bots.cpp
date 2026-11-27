@@ -488,26 +488,6 @@ Json Bots::cards() const {
     return items;
 }
 
-Json Bots::skillCards() const {
-    std::lock_guard lock(mutex_);
-    auto items = Json::array();
-    const auto botIds = ids();
-    if (botIds.empty()) return items;
-    // A cached skill may still carry this ID after the profile directory is removed.
-    const auto issued = directory_ / ".flock-issued-ids";
-    std::filesystem::create_directories(issued);
-    for (const auto& id : botIds) {
-        writeNewFile(issued / id, "");
-        try {
-            const auto card = cardLocked(id);
-            items.push_back({{"id", id}, {"name", card.at("name")}, {"role", card.value("role", std::string("custom"))}});
-        } catch (const Conflict&) {
-            items.push_back({{"id", id}, {"name", id}, {"role", "custom"}});
-        }
-    }
-    return items;
-}
-
 bool Bots::reconcileCreation(const BotChange& change) {
     if (!validBotId(change.target) || !validBotId(change.requestKey)) throw Conflict("Invalid Bot creation request");
     std::lock_guard lock(mutex_);
