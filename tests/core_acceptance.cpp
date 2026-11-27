@@ -634,12 +634,24 @@ void workNeedsNoCriteriaOrReason() {
     check(f.logs(id, "tool_error") == 0, "a decision without criteria or a reason was rejected");
 }
 
+void botJudgesCompletionWithoutSessionWork() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput& input) {
+        check(input.event["kind"] == "intake" && hasTool(input, "complete") && hasTool(input, "wait_for_event"),
+              "the Bot could not finish or wait before sending work");
+        return complete();
+    };
+    f.reach(id, "completed");
+    check(f.t3.launches == 0 && f.logs(id, "tool_error") == 0, "completing without Session work was rejected or started a Session");
+}
+
 void invalidDecisions() {
     Fixture f;
     const auto id = f.submit();
     f.model.script = [&](const ModelInput& input) -> Decision {
         check(input.event["kind"] == "intake", "wrong decision event");
-        if (f.model.calls == 1) return complete();
+        if (f.model.calls == 1) return work("follow_up", false);
         if (f.model.calls == 3) throw ModelError("Malformed model response", ModelErrorCode::invalid_tool_output);
         if (f.model.calls < 9) return {"invented", Json::object(), "unknown tool"};
         check(input.event.at("decisionFeedback").back().at("tool") == "invented", "The Bot lost its latest rejected decision");
@@ -1284,7 +1296,7 @@ void settledReportCanRecoverAfterRestart() {
             if (i.event.at("kind") == "intake") return work();
             check(i.event.at("kind") == "result" && i.event.at("resultRunId") == "run-1-result" && i.event.at("status") == "completed",
                   "report recovery lost the terminal result identity");
-            check(hasTool(i, "complete") == available, "completion did not require the settled Run's report");
+            check(hasTool(i, "complete"), "the Bot could not judge completion from the evidence it was shown");
             if (available) {
                 check(i.event.at("report") == "Recovered report", "recovered report did not reach the Bot");
                 return complete();
@@ -1359,7 +1371,7 @@ void lateReportCanRestoreCompletion() {
                   "late recovery changed the result event or failed to restore completion");
             return complete();
         }
-        check(!hasTool(input, "complete") && hasTool(input, "session_read") && event.at("sessionReadViews") == Json::array({"report"}),
+        check(hasTool(input, "session_read") && event.at("sessionReadViews") == Json::array({"report"}),
               "missing report was not recoverable in default mode");
         if (!input.evidence.empty()) {
             check(input.evidence.at(0).at("reportAvailable") == false, "failed report read did not return unavailable evidence");
@@ -1927,14 +1939,10 @@ void peerCompletionAfterEnvironmentMove() {
                 return {"reply_to_bot", {{"kind", "result"}, {"text", event.at("text")}}, "Return the requested result"};
             if (event.at("kind") == "intake") {
                 if (!input.task.contains("userInstructions")) return botRequest("beta", "work", "Original result");
-                check(f.task(sender).at("environmentId") == "cloud" && !hasTool(input, "complete"),
-                      "the pre-move result unlocked completion after the move");
+                check(f.task(sender).at("environmentId") == "cloud", "the move did not reach the sender's next decision");
                 return {"send_bot_message", {{"botId", "beta"}, {"kind", kind}, {"text", "Cloud result"}}, "Verify the moved task"};
             }
-            if (std::string_view(environment) != "cloud") {
-                check(!hasTool(input, "complete"), "a peer on the old route unlocked completion");
-                return ask();
-            }
+            if (std::string_view(environment) != "cloud") return ask();
             check(event.at("kind") == "bot_result" && event.at("text") == "Cloud result" && hasTool(input, "complete"),
                   "the current peer result did not unlock completion");
             check(input.task.at("userInstructions").size() == 1, "the move instruction did not reach the completion decision");
@@ -2491,8 +2499,8 @@ void unsuccessfulConsultationsDoNotComplete() {
             if (input.event["kind"] == "intake") return botRequest("beta", "consult", "Can we release?");
             if (input.event["kind"] == "bot_request") return botReply("failed", "Required evidence unavailable");
             check(input.event["kind"] == "bot_result" && input.event["status"] == (cancel ? "cancelled" : "failed") &&
-                      !hasTool(input, "complete") && input.task["doneWhen"] == "",
-                  "unsuccessful initial consultation unlocked completion");
+                      input.task["doneWhen"] == "",
+                  "the unsuccessful consultation did not reach the sender");
             return ask();
         };
         f.reach(id, "peer_waiting");
@@ -3043,6 +3051,8 @@ int main() {
                                                                                     runtimeDatabaseLockIsExclusive},
                                                                                    {"work needs no criteria or reason",
                                                                                     workNeedsNoCriteriaOrReason},
+                                                                                   {"Bot judges completion without Session work",
+                                                                                    botJudgesCompletionWithoutSessionWork},
                                                                                    {"invalid decisions", invalidDecisions},
                                                                                    {"transient model recovery",
                                                                                     transientFailuresKeepRetrying},

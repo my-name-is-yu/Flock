@@ -25,6 +25,9 @@ unsigned portSetting(const Json& value) {
     return value.get<unsigned>();
 }
 
+// A Bot may read a settled Session beyond its final report unless the person turns this off.
+constexpr auto defaultSessionRead = "on_demand";
+
 std::string sessionReadSetting(const Json& value) {
     if (value != "off" && value != "on_demand" && value != "prefill") throw Conflict("Choose how Flock reads T3 Sessions.");
     return value.get<std::string>();
@@ -83,7 +86,7 @@ SettingsSystem::SettingsSystem(const std::filesystem::path& home, std::optional<
     validate(saved_);
     startupPortSetting_ = saved_.value("port", Json(nullptr));
     const auto mode = saved_.value("sessionRead", Json(nullptr));
-    activeSessionRead_ = cliSessionRead.value_or(mode.is_null() ? "off" : mode.get<std::string>());
+    activeSessionRead_ = cliSessionRead.value_or(mode.is_null() ? defaultSessionRead : mode.get<std::string>());
     const auto remoteAddress = saved_.value("remoteAddress", Json(nullptr));
     if (!remoteAddress.is_null()) activeRemoteAddress_ = remoteAddress.get<std::string>();
 }
@@ -131,7 +134,7 @@ Json SettingsSystem::viewLocked(unsigned t3Port) const {
     const auto savedPort = saved_.value("port", Json(nullptr));
     const auto savedRead = saved_.value("sessionRead", Json(nullptr));
     const auto nextPort = cliPort_.value_or(savedPort.is_null() ? t3Port : savedPort.get<unsigned>());
-    const auto nextRead = cliSessionRead_ ? Json(activeSessionRead_) : savedRead.is_null() ? Json("off") : savedRead;
+    const auto nextRead = cliSessionRead_ ? Json(activeSessionRead_) : savedRead.is_null() ? Json(defaultSessionRead) : savedRead;
     const bool pendingPort = !cliPort_ && (nextPort ? nextPort != activePort_.value_or(0) : !startupPortSetting_.is_null());
     const bool pendingRead = nextRead != activeSessionRead_;
     const auto activeRemote = activeRemoteAddress_ ? Json(*activeRemoteAddress_) : Json(nullptr);

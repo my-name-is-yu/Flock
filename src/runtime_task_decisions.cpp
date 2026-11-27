@@ -58,15 +58,9 @@ runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& c
       taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), updates(updates), reports(reports), history(history),
       peerExchanges(peerExchanges), dispatch(dispatch), sessionRead(sessionRead), gitHost(gitHost), clock(clock) {}
 
-bool runtime::TaskDecisions::canComplete(const TaskData& task, const Json& event) const {
-    if (task.replanning) return false;
-    if (!task.newSessionRequired && RunReports::hasSettledRun(task) && task.lastRun->assignment.revisionId == task.currentRevision &&
-        !reports.sessionReportUnavailable(task))
-        return true;
-    const auto peer = peerExchanges.peerResult(task, event);
-    if (!peer) return false;
-    if (task.newSessionRequired) return peer->environment == task.environmentId && event.at("status") == "completed";
-    return task.currentRevision.has_value() || (peer->kind == "consult" && event.at("status") == "completed");
+bool runtime::TaskDecisions::canComplete(const TaskData& task) const {
+    // The Bot judges whether the request is met. Flock only holds completion while a stop is still settling.
+    return !task.replanning;
 }
 
 std::optional<runtime::TaskDecisions::LearningSource> runtime::TaskDecisions::learningSource(const TaskData& task, const Json& event) {
@@ -111,7 +105,7 @@ void runtime::TaskDecisions::acceptReplyOrCompletion(const TaskData& snapshot, c
     if (decision.tool == "reply_to_bot") {
         if (peerExchanges.replyPeer(current, event, decision, actionId())) updates.saveTask(current);
     } else {
-        if (peerStorage.peerExchange(id) || !canComplete(current, event)) return;
+        if (peerStorage.peerExchange(id) || !canComplete(current)) return;
         complete(current, event, decision);
     }
     transaction.commit();
