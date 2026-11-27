@@ -728,8 +728,9 @@ function showRemoteSetup(name, {url, bearerToken}) {
   const actions = formActions();
   actionButton(actions, 'Done', () => editor.close(), true);
   openEditor(`Set up ${name}`,
-    'On that machine, run the Claude Code command and add the Codex lines to ~/.codex/config.toml. '
-      + 'They contain a secret and appear here only once. Also connect that machine’s T3 above, so Bots can reply in its Sessions.',
+    'On that machine, run the Claude Code command below. If you set up Flock in Claude Code before, first run claude mcp remove flock --scope user. '
+      + 'In ~/.codex/config.toml, replace the existing [mcp_servers.flock] block or add it if it’s missing. '
+      + 'Both setups contain a secret and appear here only once. Connect that machine’s T3 to Flock so Bots can reply in its Sessions.',
     copyableSetup('Claude Code', claude), copyableSetup('Codex', codex), actions);
   backdropDismissible = false;
 }
@@ -747,11 +748,11 @@ function addRemoteMachine(refresh) {
   openEditor('Add another machine', 'Name the machine whose Sessions should be able to ask Flock Bots.', form);
 }
 
-export function renderRemoteMachines(remote, refresh) {
+export function renderRemoteMachines(remote, t3Connected, refresh) {
   $('remote-machines-section').hidden = !remote;
   $('remote-machines').replaceChildren();
   if (!remote) return;
-  if (!remote.url) {
+  if (t3Connected && !remote.url) {
     const item = row('remote-machines', rowLabel('Other machines can’t reach Flock yet',
       'Set the address for other machines in Flock server settings, then restart Flock.'));
     const open = element('a', 'Open server settings', 'button');
@@ -759,16 +760,16 @@ export function renderRemoteMachines(remote, refresh) {
     item.append(open);
   }
   for (const {id, name} of remote.machines) {
-    const item = row('remote-machines', rowLabel(name, 'Its Sessions can ask Flock Bots.'));
+    const item = row('remote-machines', rowLabel(name));
     const remove = actionButton(item, 'Remove', () => confirmSetting(`Remove ${name}?`,
-      'Sessions on this machine will no longer reach Flock.', 'Remove', async () => {
+      'You’ll need to set up this machine again for its Sessions to ask Flock Bots.', 'Remove', async () => {
         const response = await postSettings('remote-machine', {remove: id});
         if (!response.ok && response.status !== 404) throw new Error('Could not remove this machine.');
         await refresh();
       }));
     remove.classList.add('quiet-danger');
   }
-  if (remote.url) {
+  if (t3Connected && remote.url) {
     const item = row('remote-machines', rowLabel('Add another machine', `Flock listens at ${remote.url}`));
     actionButton(item, 'Add machine', () => addRemoteMachine(refresh), true);
   }

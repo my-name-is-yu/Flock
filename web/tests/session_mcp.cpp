@@ -15,6 +15,7 @@
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
+#include "flock/participation.hpp"
 #include "flock/person.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/policy_action.hpp"
@@ -206,8 +207,9 @@ void remoteMachines() {
     browser.post("/api/settings/remote-machine", {{"name", ""}}, 409);
     const auto added = browser.post("/api/settings/remote-machine", {{"name", "Mac mini"}}, 201);
     const auto token = added.at("bearerToken").get<std::string>();
+    const auto machines = Json::array({{{"id", added.at("id")}, {"name", "Mac mini"}}});
     check(added.at("url") == remoteUrl && token.starts_with("flock-t3-") && token != localToken, "Wrong remote machine credential");
-    check(browser.get("/api/settings").at("remoteMachines").at("machines") == Json::array({{{"id", added.at("id")}, {"name", "Mac mini"}}}),
+    check(browser.get("/api/settings").at("remoteMachines").at("machines") == machines,
           "Settings did not list the remote machine without its bearer");
 
     Mcp mcp(*remote, token);
@@ -217,24 +219,75 @@ void remoteMachines() {
 
     httplib::Client raw("127.0.0.1", static_cast<int>(port));
     const httplib::Headers bearer{{"Authorization", "Bearer " + token}};
-    for (const auto* path : {"/", "/api/settings", "/mcp/flock/external", "/settings.html"})
-        check(raw.Get(path, bearer)->status == 404, std::string("The remote listener served ") + path);
-    const auto rejected = [&](httplib::Headers headers) {
+    for (const auto* path : {"/", "/api/settings", "/mcp/flock/external", "/settings.html"}) {
+        const auto response = raw.Get(path, bearer);
+        check(response && response->status == 404, std::string("Expected the remote listener to reject ") + path);
+    }
+    const auto listTools = [&](httplib::Headers headers) {
         headers.emplace("Authorization", "Bearer " + token);
         const Json body{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}};
-        return raw.Post("/mcp/flock", headers, body.dump(), "application/json")->status == 403;
+        return raw.Post(endpoint, headers, body.dump(), "application/json");
     };
-    check(rejected({{"Host", "attacker.example:" + std::to_string(port)}}), "The remote listener accepted another Host");
-    check(rejected({{"Origin", "http://127.0.0.1:" + std::to_string(port)}}), "The remote listener accepted a browser request");
+    const auto listed = Browser::checked(listTools({{"Host", "MINI.EXAMPLE:" + std::to_string(port)}}), 200);
+    check(listed.contains("result"), "A valid bearer with an uppercase Host could not list tools");
+    const auto origin = listTools({{"Origin", "http://127.0.0.1:" + std::to_string(port)}});
+    check(origin && origin->status == 403, "The remote listener accepted a request with Origin");
+    const auto fetchSite = listTools({{"Sec-Fetch-Site", "same-origin"}});
+    check(fetchSite && fetchSite->status == 403, "The remote listener accepted a request with Sec-Fetch-Site");
 
+    connections.disconnect("env-1");
+    check(!connections.authenticate(token), "A remote machine kept access after T3 was disconnected");
+    const auto disconnected = browser.get("/api/settings");
+    check(disconnected.at("t3").is_null() && disconnected.at("remoteMachines").at("machines") == machines,
+          "Settings lost the saved machine after T3 was disconnected");
+    browser.post("/api/settings/remote-machine", {{"name", "MacBook"}}, 409);
     browser.post("/api/settings/remote-machine", {{"remove", added.at("id")}});
     browser.post("/api/settings/remote-machine", {{"remove", added.at("id")}}, 404);
+    check(browser.get("/api/settings").at("remoteMachines").is_null(), "Settings kept an empty machine list after T3 was disconnected");
+    connections.connect("env-1", localOwner.id, 4173);
     check(Mcp(*remote, token).request("tools/list", Json::object(), 401).contains("error"), "A removed machine kept access");
+}
 
-    const auto again = connections.addRemoteMachine("Mac mini");
-    check(connections.authenticate(again.bearerToken).has_value(), "A new remote machine could not authenticate");
-    connections.disconnect("env-1");
-    check(!connections.authenticate(again.bearerToken), "A remote machine kept access after T3 was disconnected");
+void remoteMachineRevocation() {
+    struct RevokingT3 : FixedT3 {
+        std::function<void()> duringRead;
+
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline) override {
+            if (duringRead) duringRead();
+            SessionMetadata metadata;
+            metadata.projectId = "origin-project";
+            return metadata;
+        }
+    } t3;
+    TestDirectory dir;
+    Store store(dir.path / "flock.sqlite3");
+    T3Connections connections(store);
+    const auto local = connections.authenticate(connections.connect("env-1", localOwner.id, 4173));
+    const auto machine = connections.addRemoteMachine("Mac mini");
+    const auto remote = connections.authenticate(machine.bearerToken);
+    check(local && remote, "Could not authenticate the local and remote bearers");
+    const auto intake = callbacks().intake;
+    SessionParticipation participation(store, t3);
+    const auto ask = [&](const T3Connection& connection, const char* requestId) {
+        return participation.ask(connection, {"release", "Review the smoke checks", "thread", requestId}, intake);
+    };
+    const auto expectRevoked = [&](const char* requestId) {
+        try {
+            ask(*remote, requestId);
+            check(false, "An ask authenticated by a removed machine was accepted");
+        } catch (const Conflict& error) {
+            check(std::string_view(error.what()) == "The T3 connection is unavailable", error.what());
+        }
+    };
+
+    check(ask(*remote, "remote-live") > 0, "A registered machine could not ask");
+    bool removed = false;
+    t3.duringRead = [&] { removed = connections.removeRemoteMachine(machine.id); };
+    expectRevoked("revoked-during-ask");
+    check(removed, "The machine was not removed during the ask");
+    t3.duringRead = {};
+    expectRevoked("revoked-before-ask");
+    check(ask(*local, "local-live") > 0, "Revoking a remote machine blocked the local bearer");
 }
 
 void stopDuringSendPreflight() {
@@ -1521,6 +1574,8 @@ int main(int argc, char** argv) {
         sessionStops(argv[1], argv[2]);
         scenario = "remote machines";
         remoteMachines();
+        scenario = "remote machine revocation";
+        remoteMachineRevocation();
         scenario = "stop during send preflight";
         stopDuringSendPreflight();
         scenario = "stop during send dispatch";

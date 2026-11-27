@@ -196,12 +196,13 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     auto row = storage.database.query(R"SQL(
-SELECT c.id,c.person_id FROM t3_connector c WHERE EXISTS(SELECT 1 FROM t3_connected_environments) AND (c.token_digest=?1
- OR EXISTS(SELECT 1 FROM t3_remote_machines r WHERE r.token_digest=?1 AND r.person_id=c.person_id))
+SELECT c.id,c.person_id,r.id FROM t3_connector c
+LEFT JOIN t3_remote_machines r ON r.token_digest=?1 AND r.person_id=c.person_id AND c.token_digest<>?1
+WHERE (c.token_digest=?1 OR r.id IS NOT NULL) AND EXISTS(SELECT 1 FROM t3_connected_environments)
 )SQL",
                                       {digest(token)});
     if (!row.next()) return {};
-    return T3Connection{row.string(0), row.string(1)};
+    return T3Connection{row.string(0), row.string(1), row.null(2) ? std::nullopt : std::optional{row.string(2)}};
 }
 
 T3RemoteCredential T3Connections::addRemoteMachine(std::string_view name) {
@@ -277,10 +278,14 @@ Person SessionParticipationStorage::sessionActor(std::string_view person) {
 Person SessionParticipation::person(const T3Connection& connection) const {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
+    const auto machine = connection.remoteMachineId ? Json(*connection.remoteMachineId) : Json(nullptr);
     if (!storage.database
-             .query("SELECT 1 FROM t3_connector WHERE id=? AND person_id=? "
-                    "AND EXISTS(SELECT 1 FROM t3_connected_environments)",
-                    {connection.id, connection.personId})
+             .query(R"SQL(
+SELECT 1 FROM t3_connector WHERE id=?1 AND person_id=?2
+AND EXISTS(SELECT 1 FROM t3_connected_environments)
+AND (?3 IS NULL OR EXISTS(SELECT 1 FROM t3_remote_machines WHERE id=?3 AND person_id=?2))
+)SQL",
+                    {connection.id, connection.personId, machine})
              .next())
         throw Conflict("The T3 connection is unavailable");
     const auto actor = storage.sessionParticipationStorage.sessionActor(connection.personId);

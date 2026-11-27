@@ -68,8 +68,9 @@ async function exercise() {
 }
 
 function fixturesUx() {
-  window.__settingsUx = { disconnectCalls: [], remoteCalls: [], failRule: false };
+  window.__settingsUx = { disconnectCalls: [], remoteCalls: [], remoteMachine: null, failRule: false };
   const state = window.__settingsUx;
+  const remoteUrl = 'http://100.64.0.2:4173/mcp/flock';
   const installation = {
     access: { mode: 'local', users: [] },
     connections: {
@@ -96,6 +97,7 @@ function fixturesUx() {
   };
   window.fetch = async (path, options = {}) => {
     if (path === '/api/settings') {
+      const connected = !state.disconnectCalls.length;
       return Response.json({
         mode: 'supervised',
         rules: [],
@@ -104,11 +106,9 @@ function fixturesUx() {
         personOnlyActions: [],
         t3Setup: { running: false },
         canDisconnectT3: true,
-        t3: { environments: [{ environmentId: 'local', authorization: { label: 'Mac Studio' } }] },
-        remoteMachines: {
-          url: 'http://100.64.0.2:4173/mcp/flock',
-          machines: state.remoteCalls.some((call) => call.name) ? [{ id: 'mini', name: 'Mac mini' }] : [],
-        },
+        t3: connected ? { environments: [{ environmentId: 'local', authorization: { label: 'Mac Studio' } }] } : null,
+        remoteMachines: connected || state.remoteMachine
+          ? { url: remoteUrl, machines: state.remoteMachine ? [state.remoteMachine] : [] } : null,
       });
     }
     if (path === '/api/settings/installation') return Response.json(installation);
@@ -116,8 +116,17 @@ function fixturesUx() {
       return Response.json({ error: 'failed' }, { status: 500 });
     }
     if (path === '/api/settings/remote-machine' && options.method === 'POST') {
-      state.remoteCalls.push(JSON.parse(options.body));
-      return Response.json({ id: 'mini', url: 'http://100.64.0.2:4173/mcp/flock', bearerToken: 'flock-t3-remote' }, { status: 201 });
+      const request = JSON.parse(options.body);
+      state.remoteCalls.push(request);
+      if (state.remoteMachine && request.remove === state.remoteMachine.id) {
+        state.remoteMachine = null;
+        return Response.json({ ok: true });
+      }
+      if (request.name) {
+        state.remoteMachine = { id: 'mini', name: request.name };
+        return Response.json({ id: 'mini', url: remoteUrl, bearerToken: 'flock-t3-remote' }, { status: 201 });
+      }
+      return Response.json({ error: 'not_found' }, { status: 404 });
     }
     if (path === '/api/settings/t3-disconnect' && options.method === 'POST') {
       state.disconnectCalls.push(JSON.parse(options.body));
@@ -173,17 +182,50 @@ async function exerciseUx() {
   check($('status').textContent === '' && !$('status').classList.contains('error'),
     'Switching settings tabs did not clear #status error');
 
-  // 3. T3 Disconnect confirmation dialog.
+  const remoteSection = $('remote-machines-section');
+  const remoteMachines = $('remote-machines');
+  const editor = $('installation-editor');
+  const editorTitle = $('installation-editor-title');
+  const addMachine = btn(remoteMachines, 'Add machine');
+  check(!remoteSection.hidden && addMachine, 'Other machines did not offer Add machine');
+  addMachine.click();
+  await waitFor(() => editor.open && editor.querySelector('input[name="name"]'), 'Add machine did not ask for a name');
+  editor.querySelector('input[name="name"]').value = ' Mac mini ';
+  editor.querySelector('form').requestSubmit();
+  await waitFor(() => editorTitle.textContent === 'Set up Mac mini', 'Adding a machine did not show its setup');
+  check(window.__settingsUx.remoteCalls[0].name === 'Mac mini', 'Add machine submitted the wrong name');
+  const setup = editor.querySelector('.installation-description').textContent;
+  check(setup.includes('If you set up Flock in Claude Code before, first run claude mcp remove flock --scope user'),
+    'Setup did not explain how to replace the existing Claude Code registration');
+  check(setup.includes('In ~/.codex/config.toml, replace the existing [mcp_servers.flock] block or add it if it’s missing'),
+    'Setup did not explain how to avoid duplicate Codex tables');
+  const [claude, codex] = [...editor.querySelectorAll('textarea')].map((field) => field.value);
+  check(claude.startsWith('claude mcp add-json --scope user flock ') && claude.includes('"Authorization":"Bearer flock-t3-remote"') &&
+    claude.includes('http://100.64.0.2:4173/mcp/flock'), `Wrong Claude Code setup: ${claude}`);
+  check(codex.includes('[mcp_servers.flock]') && codex.includes('Authorization = "Bearer flock-t3-remote"'), `Wrong Codex setup: ${codex}`);
+  await waitFor(() => remoteMachines.textContent.includes('Mac mini'), 'The new machine was not listed');
+  btn(editor, 'Done').click();
+  check(!editor.open, 'Done did not dismiss the one-time setup');
+
   const disconnect = btn($('connections'), 'Disconnect');
   check(disconnect, 'Disconnect button missing');
   disconnect.click();
-  await waitFor(() => $('installation-editor').open && $('installation-editor-title').textContent === 'Disconnect Mac Studio?',
+  await waitFor(() => editor.open && editorTitle.textContent === 'Disconnect Mac Studio?',
     'T3 Disconnect did not open confirmation dialog');
   check(window.__settingsUx.disconnectCalls.length === 0, 'Disconnect ran before confirmation');
-  btn($('installation-editor'), 'Disconnect').click();
-  await waitFor(() => window.__settingsUx.disconnectCalls.length === 1 && !$('installation-editor').open,
+  btn(editor, 'Disconnect').click();
+  await waitFor(() => window.__settingsUx.disconnectCalls.length === 1 && !editor.open,
     'Confirming T3 disconnect did not submit or close');
   check(window.__settingsUx.disconnectCalls[0].environmentId === 'local', 'Disconnect submitted wrong environmentId');
+
+  const removeMachine = btn(remoteMachines, 'Remove');
+  check(!remoteSection.hidden && remoteMachines.textContent.includes('Mac mini') && removeMachine && !btn(remoteMachines, 'Add machine'),
+    'Disconnecting T3 did not leave the machine available for removal only');
+  removeMachine.click();
+  await waitFor(() => editor.open && editorTitle.textContent === 'Remove Mac mini?', 'Removing the machine did not ask for confirmation');
+  btn(editor, 'Remove').click();
+  await waitFor(() => !editor.open && remoteSection.hidden, 'Removing the last machine after disconnect did not hide the machine section');
+  check(window.__settingsUx.remoteCalls[1].remove === 'mini', 'Remove submitted the wrong machine id');
 
   // 4. Cancel edit in editMachines, editMcp, and editSkill.
   const verifyCancelEdit = async (section, manageRowText, submitEditLabel, submitAddLabel) => {
@@ -204,23 +246,6 @@ async function exerciseUx() {
     `Cancel edit for ${manageRowText} did not reset the form`);
     $('installation-editor-close').click();
   };
-  // 5. Adding another machine shows its setup once.
-  const addMachine = btn($('remote-machines'), 'Add machine');
-  check(!$('remote-machines-section').hidden && addMachine, 'Other machines did not offer Add machine');
-  addMachine.click();
-  await waitFor(() => $('installation-editor').open && $('installation-editor').querySelector('input[name="name"]'),
-    'Add machine did not ask for a name');
-  $('installation-editor').querySelector('input[name="name"]').value = ' Mac mini ';
-  $('installation-editor').querySelector('form').requestSubmit();
-  await waitFor(() => $('installation-editor-title').textContent === 'Set up Mac mini', 'Adding a machine did not show its setup');
-  check(window.__settingsUx.remoteCalls[0].name === 'Mac mini', 'Add machine submitted the wrong name');
-  const [claude, codex] = [...$('installation-editor').querySelectorAll('textarea')].map((field) => field.value);
-  check(claude.startsWith('claude mcp add-json --scope user flock ') && claude.includes('"Authorization":"Bearer flock-t3-remote"') &&
-    claude.includes('http://100.64.0.2:4173/mcp/flock'), `Wrong Claude Code setup: ${claude}`);
-  check(codex.includes('[mcp_servers.flock]') && codex.includes('Authorization = "Bearer flock-t3-remote"'), `Wrong Codex setup: ${codex}`);
-  await waitFor(() => $('remote-machines').textContent.includes('Mac mini'), 'The new machine was not listed');
-  btn($('installation-editor'), 'Done').click();
-
   await verifyCancelEdit($('integrations'), 'Local machines', 'Save machine', 'Add machine');
   await verifyCancelEdit($('tools'), 'MCP servers', 'Save server', 'Add server');
   await verifyCancelEdit($('tools'), 'Skills', 'Save skill', 'Add skill');

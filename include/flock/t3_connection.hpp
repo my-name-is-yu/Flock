@@ -11,6 +11,7 @@ class Store;
 
 struct T3Connection {
     std::string id, personId;
+    std::optional<std::string> remoteMachineId;
 };
 
 struct T3RemoteMachine {

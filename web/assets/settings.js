@@ -332,7 +332,7 @@ function applyConnections(data) {
   t3Setup = data.t3Setup;
   if (t3Setup?.authorizationUrl || !t3Setup?.running) releaseApprovalTab(t3Setup?.authorizationUrl);
   renderConnections(data);
-  renderRemoteMachines(data.remoteMachines, refreshConnections);
+  renderRemoteMachines(data.remoteMachines, Boolean(data.t3), refreshConnections);
   updateConnectionButtons();
   pollConnections();
 }

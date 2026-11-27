@@ -112,11 +112,13 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             }
         }
         Json remote = nullptr;
-        if (canManage && connection) {
+        if (canManage) {
             auto machines = Json::array();
             for (const auto& machine : connections.remoteMachines()) machines.push_back({{"id", machine.id}, {"name", machine.name}});
-            const auto url = callbacks.remoteSessionMcpUrl ? callbacks.remoteSessionMcpUrl() : std::string{};
-            remote = {{"url", url.empty() ? Json(nullptr) : Json(url)}, {"machines", std::move(machines)}};
+            if (connection || !machines.empty()) {
+                const auto url = callbacks.remoteSessionMcpUrl ? callbacks.remoteSessionMcpUrl() : std::string{};
+                remote = {{"url", url.empty() ? Json(nullptr) : Json(url)}, {"machines", std::move(machines)}};
+            }
         }
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
