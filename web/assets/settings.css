@@ -3,13 +3,13 @@ main { max-width: 40rem; margin: 0 auto; padding: var(--space-5) var(--space-4) 
   display: inline-flex; align-items: center; gap: .15rem; margin-inline-start: -.35rem;
   padding: .3rem .45rem .3rem .2rem; border-radius: var(--radius-sm);
   color: var(--text-2); font-size: var(--text-sm); font-weight: 600; text-decoration: none;
-  transition: background-color .16s ease, color .16s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
 .settings-back:hover { background: var(--hover); color: var(--text); }
 .settings-back:active { transform: scale(.97); }
 .settings-back svg {
   width: 1.1rem; height: 1.1rem;
-  transition: transform .18s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: transform var(--dur-fast) var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
   .settings-back:hover svg { transform: translateX(-2px); }
@@ -32,7 +32,7 @@ h1 { margin: var(--space-3) 0 var(--space-5); font-size: var(--text-xl); font-we
 }
 section {
   margin-block-end: var(--space-5);
-  animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  animation: settings-section-in 220ms var(--ease-out) backwards;
 }
 @keyframes settings-section-in {
   from { opacity: 0; transform: translateY(8px); }
@@ -52,7 +52,7 @@ input, select {
   min-height: 2.1rem; padding: .35rem .6rem; border: 1px solid var(--hairline);
   border-radius: var(--radius-md); background: var(--field); color: var(--text);
   font: inherit; font-size: var(--text-sm);
-  transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease, background-color var(--dur-fast) ease;
 }
 input:hover:not(:disabled), select:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--text-3) 55%, var(--hairline));
@@ -64,7 +64,7 @@ input:focus-visible, select:focus-visible {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .button {
-  transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
 :where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger) {
   border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
@@ -106,7 +106,7 @@ form .button { min-height: 2.1rem; }
 .settings-nav a[data-section] {
   display: flex; align-items: center; gap: .6rem; padding: .45rem .6rem; border-radius: var(--radius-md);
   color: var(--text-2); font-size: var(--text-sm); font-weight: 500; text-decoration: none;
-  transition: background-color .15s ease, color .15s ease;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .settings-nav a[data-section] svg { width: 1.05rem; height: 1.05rem; flex: none; }
 .settings-nav a[data-section]:hover { background: var(--hover, color-mix(in srgb, var(--text) 6%, transparent)); color: var(--text); }
@@ -126,7 +126,7 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .row-label small a, .settings-help a { color: var(--accent); font-weight: 550; text-decoration: none; border-radius: 3px; }
 .row-label small a:hover, .settings-help a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .row-label small a:focus-visible, .settings-help a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.settings-panel:not([hidden]) > section { animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards; }
+.settings-panel:not([hidden]) > section { animation: settings-section-in 220ms var(--ease-out) backwards; }
 .row-actions { display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
 .row-actions .button { text-decoration: none; }
 .settings-rows:empty { display: none; }
@@ -179,7 +179,7 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .segmented label {
   position: relative; display: block; padding: .32rem .8rem; border-radius: calc(var(--radius-md) - 3px); cursor: pointer;
   color: var(--text-2); font-size: var(--text-sm); font-weight: 500; white-space: nowrap;
-  transition: background-color .15s ease, color .15s ease, box-shadow .15s ease;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 .segmented input { position: absolute; inset: 0; opacity: 0; margin: 0; min-height: 0; cursor: inherit; }
 .segmented label:has(:checked) { background: var(--canvas); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .12), 0 0 0 1px var(--hairline); }

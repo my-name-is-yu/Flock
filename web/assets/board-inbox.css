@@ -13,7 +13,7 @@
 .decision-count {
   flex: none; min-width: 1.5rem; min-height: 1.5rem; margin-inline-end: .35rem; padding: 0 .4rem;
   border-radius: var(--radius-full); background: var(--warning); color: var(--warning-soft);
-  transition: background-color .14s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
 .decision-count:hover { background: color-mix(in srgb, var(--warning), var(--text) 14%); }
 .decision-count:active { transform: scale(.94); }
@@ -76,7 +76,7 @@
 .decision-controls { display: flex; align-items: center; gap: .12rem; margin-inline-start: auto; }
 .decision-controls .icon-button {
   width: 1.85rem; height: 1.85rem; color: var(--text-3); border-radius: var(--radius-sm);
-  transition: background-color .14s ease, color .14s ease, transform .12s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
 .decision-controls .icon-button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
 .decision-controls .icon-button:active:not(:disabled) { transform: scale(.92); }
@@ -125,7 +125,7 @@
   padding: .38rem .8rem;
   border-color: var(--hairline);
   background: var(--raised);
-  transition: background-color .14s ease, border-color .14s ease, transform .12s cubic-bezier(0.23, 1, 0.32, 1);
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
 .board-inbox-question .question-option:hover { background: var(--hover); }
 .board-inbox-question .question-option:active { transform: scale(.98); }
@@ -168,7 +168,7 @@
   width: 100%; min-width: 0; padding: .55rem .7rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-md);
   background: var(--field); color: var(--text);
-  transition: border-color .15s ease, box-shadow .15s ease;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 .board-inbox-form input:focus {
   outline: 2px solid transparent;

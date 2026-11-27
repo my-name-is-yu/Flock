@@ -30,8 +30,8 @@
 .detail::backdrop { background: var(--scrim); }
 
 .detail, .detail::backdrop {
-  transition: opacity .2s ease-out, transform .24s cubic-bezier(0.22, 1.15, 0.36, 1),
-    overlay .24s allow-discrete, display .24s allow-discrete;
+  transition: opacity var(--dur-medium) ease-out, transform var(--dur-medium) cubic-bezier(0.22, 1.15, 0.36, 1),
+    overlay var(--dur-medium) allow-discrete, display var(--dur-medium) allow-discrete;
 }
 .detail:not([open]) { opacity: 0; transform: translateY(10px) scale(.96); transition-duration: .14s; }
 .detail:not([open])::backdrop { opacity: 0; transition-duration: .14s; }
@@ -100,7 +100,7 @@
 }
 .settings-name-button:hover { background: var(--detail-card-hover); border-color: var(--hairline); }
 .settings-name-button:active { transform: scale(.98); }
-.settings-name-button svg { width: .92rem; height: .92rem; color: var(--text-3); flex: none; opacity: .65; transition: opacity .14s ease; }
+.settings-name-button svg { width: .92rem; height: .92rem; color: var(--text-3); flex: none; opacity: .65; transition: opacity var(--dur-fast) ease; }
 .settings-name-button:hover svg { opacity: 1; color: var(--text-2); }
 .settings-name { font-size: var(--text-xl); font-weight: 600; overflow-wrap: anywhere; text-align: center; }
 .settings-name-input {
@@ -109,7 +109,7 @@
   border-radius: var(--radius-md); background: var(--field); color: var(--text);
   font-size: var(--text-xl); font-weight: 600; text-align: center;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
-  animation: inline-edit-in .18s cubic-bezier(0.23, 1, 0.32, 1);
+  animation: inline-edit-in .18s var(--ease-out);
 }
 @keyframes inline-edit-in {
   from { opacity: 0; transform: scale(.96); }
@@ -206,13 +206,13 @@ button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset
   appearance: none; position: relative; flex: none; margin: 0 0 0 auto; cursor: pointer;
   inline-size: 2.55rem; block-size: var(--switch-size); border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-3) 40%, transparent);
-  transition: background-color .18s ease;
+  transition: background-color var(--dur-fast) ease;
 }
 .settings-row-switch::before {
   content: ""; position: absolute; inset-block-start: 2px; inset-inline-start: 2px;
   inline-size: calc(var(--switch-size) - 4px); block-size: calc(var(--switch-size) - 4px); border-radius: 50%;
   background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .25);
-  transition: translate .2s cubic-bezier(0.2, 0.9, 0.25, 1);
+  transition: translate var(--dur-medium) cubic-bezier(0.2, 0.9, 0.25, 1);
 }
 .settings-row-switch:checked { background: var(--accent); }
 .settings-row-switch:checked::before { translate: calc(2.55rem - var(--switch-size)) 0; }
@@ -232,7 +232,7 @@ button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset
 }
 .settings-row-label .settings-card-feedback { display: block; }
 a.settings-row svg { margin-left: auto; }
-.settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1), color .14s ease; }
+.settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform var(--dur-fast) var(--ease-out), color var(--dur-fast) ease; }
 @media (hover: hover) and (pointer: fine) {
   button.settings-row:hover svg, a.settings-row:hover svg { transform: translateX(2px); color: var(--text-2); }
 }
@@ -286,7 +286,7 @@ a.settings-row svg { margin-left: auto; }
 .wait-cancel:hover:not(:disabled) { background: var(--danger-soft); }
 .wait-stop-confirm {
   grid-column: 1 / -1; display: grid; gap: .7rem; padding: .8rem .9rem; border-radius: var(--radius-md);
-  background: var(--danger-soft); animation: stop-confirm-in .16s cubic-bezier(0.23, 1, 0.32, 1);
+  background: var(--danger-soft); animation: stop-confirm-in .16s var(--ease-out);
 }
 @keyframes stop-confirm-in { from { opacity: 0; transform: translateY(3px); } }
 .wait-stop-text { font-size: var(--text-sm); color: var(--text-2); }
@@ -348,7 +348,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   .wait-cancel { justify-self: center; margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .detail, .detail::backdrop { transition: opacity .12s, overlay .12s allow-discrete, display .12s allow-discrete; }
+  .detail, .detail::backdrop { transition: opacity var(--dur-fast), overlay var(--dur-fast) allow-discrete, display var(--dur-fast) allow-discrete; }
   .detail:not([open]) { transform: none; }
   .wait-stop-confirm { animation: none; }
   @starting-style { .detail[open] { transform: none; } }
@@ -364,7 +364,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   display: flex; align-items: center; gap: .65rem; min-height: 2.9rem; padding: .3rem .55rem;
   border-radius: var(--radius-md); color: var(--text); text-decoration: none; font-size: var(--text-md);
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
-  animation: settings-note-in .18s cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  animation: settings-note-in .18s var(--ease-out) backwards;
 }
 .peer-picker-list li:nth-child(2) .peer-choice { animation-delay: 25ms; }
 .peer-picker-list li:nth-child(3) .peer-choice { animation-delay: 50ms; }
