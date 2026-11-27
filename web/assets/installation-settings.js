@@ -601,7 +601,9 @@ async function activatePassword(person, password) {
 function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   $('access').replaceChildren();
   if (mode === 'local') {
-    const item = row('access', rowLabel('Private to this computer', 'Enable sharing to create sign-ins for other people.'));
+    const item = row('access', pendingUntil
+      ? rowLabel('Waiting for password confirmation', 'Confirm the administrator password to let other people sign in.')
+      : rowLabel('Private to this computer', 'Enable sharing to create sign-ins for other people.'));
     if (pendingUntil) {
       const actions = element('div', '', 'row-actions');
       actionButton(actions, 'Generate new password', prepareAccess);
