@@ -26,7 +26,9 @@ async function exercise() {
     active: { port: 52011, sessionRead: 'off' }, saved: { port: null, sessionRead: null },
     next: { port: null, sessionRead: 'off' }, overrides: neither, pending: neither,
   });
-  check(rows.length === 2, 'A fresh start showed a restart notice');
+  check(rows.length === 3, 'A fresh start showed a restart notice');
+  check(rows[2].title === 'Address for other machines' && rows[2].value === 'Off' && rows[2].change,
+    'A fresh start did not offer an address for other machines');
   check(rows[0].value === '52011' && !rows[0].next, `An automatic port with nothing saved read “${rows[0].value}”`);
   check(rows[1].value === 'Off' && rows[0].change && rows[1].change, 'A fresh start did not show its values with Change');
 
@@ -37,7 +39,7 @@ async function exercise() {
   check(rows[0].value === '52011', `A pending Read T3 threads change made the port read “${rows[0].value}”`);
   check(rows[1].value === 'Off → When needed after restart' && rows[1].next === 'When needed',
     `A pending Read T3 threads change read “${rows[1].value}”`);
-  check(rows[2]?.title === 'Restart required', 'A pending change did not ask for a restart');
+  check(rows[3]?.title === 'Restart required', 'A pending change did not ask for a restart');
 
   rows = await show({
     active: { port: 5000, sessionRead: 'off' }, saved: { port: null, sessionRead: null },
@@ -45,19 +47,28 @@ async function exercise() {
   });
   check(rows[0].value === '5000 → Automatic after restart' && rows[0].next === 'Automatic',
     `Returning to an automatic port read “${rows[0].value}”`);
-  check(rows[1].value === 'Off' && rows[2]?.title === 'Restart required', 'A pending port change changed the other row');
+  check(rows[1].value === 'Off' && rows[3]?.title === 'Restart required', 'A pending port change changed the other row');
 
   rows = await show({
     active: { port: 52011, sessionRead: 'on_demand' }, saved: { port: 5000, sessionRead: 'prefill' },
     next: { port: null, sessionRead: 'on_demand' }, overrides: { port: true, sessionRead: true }, pending: neither,
   });
-  check(rows.length === 2 && rows[0].value === '52011' && rows[1].value === 'When needed',
+  check(rows.length === 3 && rows[0].value === '52011' && rows[1].value === 'When needed',
     `Launch settings read “${rows[0].value}” and “${rows[1].value}”`);
-  check(rows.every(item => item.badge === 'Set at launch' && !item.change), 'Launch settings could be changed here');
+  check(rows.slice(0, 2).every(item => item.badge === 'Set at launch' && !item.change), 'Launch settings could be changed here');
+
+  rows = await show({
+    active: { port: 52011, sessionRead: 'off', remoteAddress: null },
+    saved: { port: null, sessionRead: null, remoteAddress: '100.64.0.2' },
+    next: { port: null, sessionRead: 'off', remoteAddress: '100.64.0.2' }, overrides: neither,
+    pending: { ...neither, remoteAddress: true },
+  });
+  check(rows[2].value === 'Off → 100.64.0.2 after restart' && rows[3]?.title === 'Restart required',
+    `A pending address for other machines read “${rows[2].value}”`);
 }
 
 function fixturesUx() {
-  window.__settingsUx = { disconnectCalls: [], failRule: false };
+  window.__settingsUx = { disconnectCalls: [], remoteCalls: [], failRule: false };
   const state = window.__settingsUx;
   const installation = {
     access: { mode: 'local', users: [] },
@@ -94,11 +105,19 @@ function fixturesUx() {
         t3Setup: { running: false },
         canDisconnectT3: true,
         t3: { environments: [{ environmentId: 'local', authorization: { label: 'Mac Studio' } }] },
+        remoteMachines: {
+          url: 'http://100.64.0.2:4173/mcp/flock',
+          machines: state.remoteCalls.some((call) => call.name) ? [{ id: 'mini', name: 'Mac mini' }] : [],
+        },
       });
     }
     if (path === '/api/settings/installation') return Response.json(installation);
     if (path === '/api/settings/rule' && options.method === 'POST' && state.failRule) {
       return Response.json({ error: 'failed' }, { status: 500 });
+    }
+    if (path === '/api/settings/remote-machine' && options.method === 'POST') {
+      state.remoteCalls.push(JSON.parse(options.body));
+      return Response.json({ id: 'mini', url: 'http://100.64.0.2:4173/mcp/flock', bearerToken: 'flock-t3-remote' }, { status: 201 });
     }
     if (path === '/api/settings/t3-disconnect' && options.method === 'POST') {
       state.disconnectCalls.push(JSON.parse(options.body));
@@ -185,6 +204,23 @@ async function exerciseUx() {
     `Cancel edit for ${manageRowText} did not reset the form`);
     $('installation-editor-close').click();
   };
+  // 5. Adding another machine shows its setup once.
+  const addMachine = btn($('remote-machines'), 'Add machine');
+  check(!$('remote-machines-section').hidden && addMachine, 'Other machines did not offer Add machine');
+  addMachine.click();
+  await waitFor(() => $('installation-editor').open && $('installation-editor').querySelector('input[name="name"]'),
+    'Add machine did not ask for a name');
+  $('installation-editor').querySelector('input[name="name"]').value = ' Mac mini ';
+  $('installation-editor').querySelector('form').requestSubmit();
+  await waitFor(() => $('installation-editor-title').textContent === 'Set up Mac mini', 'Adding a machine did not show its setup');
+  check(window.__settingsUx.remoteCalls[0].name === 'Mac mini', 'Add machine submitted the wrong name');
+  const [claude, codex] = [...$('installation-editor').querySelectorAll('textarea')].map((field) => field.value);
+  check(claude.startsWith('claude mcp add-json --scope user flock ') && claude.includes('"Authorization":"Bearer flock-t3-remote"') &&
+    claude.includes('http://100.64.0.2:4173/mcp/flock'), `Wrong Claude Code setup: ${claude}`);
+  check(codex.includes('[mcp_servers.flock]') && codex.includes('Authorization = "Bearer flock-t3-remote"'), `Wrong Codex setup: ${codex}`);
+  await waitFor(() => $('remote-machines').textContent.includes('Mac mini'), 'The new machine was not listed');
+  btn($('installation-editor'), 'Done').click();
+
   await verifyCancelEdit($('integrations'), 'Local machines', 'Save machine', 'Add machine');
   await verifyCancelEdit($('tools'), 'MCP servers', 'Save server', 'Add server');
   await verifyCancelEdit($('tools'), 'Skills', 'Save skill', 'Add skill');

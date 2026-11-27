@@ -874,4 +874,71 @@ std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks ca
     WebIdentity(store).setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
     return server;
 }
+
+namespace {
+
+std::string authority(const std::string& address, unsigned port) {
+    const auto host = address.find(':') == address.npos ? address : "[" + address + "]";
+    return host + ":" + std::to_string(port);
+}
+
+class RemoteSessionMcp final : public WebServer {
+public:
+    RemoteSessionMcp(Store& store, const std::string& address, unsigned port, WebCallbacks callbacks)
+        : callbacks_(std::move(callbacks)), authority_(authority(address, port)), port_(port) {
+        server_.new_task_queue = [] { return new httplib::ThreadPool(2, 4, 16); };
+        server_.set_address_family(AF_UNSPEC)
+            .set_payload_max_length(64 * 1024)
+            .set_read_timeout(10)
+            .set_write_timeout(10)
+            .set_keep_alive_timeout(1)
+            .set_default_headers({{"Cache-Control", "no-store"}, {"X-Content-Type-Options", "nosniff"}});
+        server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+            const auto reject = [&](int status) {
+                res.status = status;
+                return httplib::Server::HandlerResponse::Handled;
+            };
+            if (req.get_header_value_count("Host") != 1 || req.get_header_value("Host") != authority_) return reject(403);
+            if (req.has_header("Origin") || req.has_header("Sec-Fetch-Site")) return reject(403);
+            if (req.path != web::sessionMcpPath) return reject(404);
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+        web::sessionMcpRoute(server_, store, callbacks_);
+        if (!server_.bind_to_port(address, static_cast<int>(port))) {
+            server_.stop();
+            throw std::runtime_error("Could not listen for other machines at " + authority_);
+        }
+        worker_ = std::thread([this] { server_.listen_after_bind(); });
+        server_.wait_until_ready();
+        if (!server_.is_running()) {
+            worker_.join();
+            throw std::runtime_error("Could not listen for other machines at " + authority_);
+        }
+    }
+
+    ~RemoteSessionMcp() override {
+        server_.stop();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    unsigned port() const override { return port_; }
+private:
+    WebCallbacks callbacks_;
+    const std::string authority_;
+    const unsigned port_;
+    httplib::Server server_;
+    std::thread worker_;
+};
+
+}
+
+std::unique_ptr<WebServer> startRemoteSessionMcp(Store& store, const std::string& address, unsigned port, WebCallbacks callbacks) {
+    if (address.empty() || port == 0 || port > 65535 || !callbacks.bots || !callbacks.intake)
+        throw std::invalid_argument("Invalid remote Session MCP settings");
+    return std::make_unique<RemoteSessionMcp>(store, address, port, std::move(callbacks));
+}
+
+std::string remoteSessionMcpUrl(const std::string& address, unsigned port) {
+    return "http://" + authority(address, port) + web::sessionMcpPath;
+}
 } // namespace flockv0

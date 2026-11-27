@@ -195,11 +195,45 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
     if (!connector_credentials::validBearer(token, tokenPrefix)) return {};
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
-    auto row = storage.database.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
-                                      " AND EXISTS(SELECT 1 FROM t3_connected_environments)",
+    auto row = storage.database.query(R"SQL(
+SELECT c.id,c.person_id FROM t3_connector c WHERE EXISTS(SELECT 1 FROM t3_connected_environments) AND (c.token_digest=?1
+ OR EXISTS(SELECT 1 FROM t3_remote_machines r WHERE r.token_digest=?1 AND r.person_id=c.person_id))
+)SQL",
                                       {digest(token)});
     if (!row.next()) return {};
     return T3Connection{row.string(0), row.string(1)};
+}
+
+T3RemoteCredential T3Connections::addRemoteMachine(std::string_view name) {
+    if (name.empty() || name.size() > 128 || std::ranges::any_of(name, [](unsigned char c) { return c < 32 || c == 127; }))
+        throw Conflict("Enter a machine name up to 128 characters");
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    auto connector = storage.database.query("SELECT person_id FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
+    if (!connector.next()) throw Conflict("Connect T3 before adding another machine");
+    const auto person = connector.string(0);
+    auto count = storage.database.query("SELECT COUNT(*) FROM t3_remote_machines");
+    if (count.next() && count.number(0) >= 64) throw Conflict("Flock supports up to 64 other machines");
+    T3RemoteCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
+    storage.database.exec("INSERT INTO t3_remote_machines VALUES(?,?,?,?)", {credential.id, name, person, digest(credential.bearerToken)});
+    return credential;
+}
+
+std::vector<T3RemoteMachine> T3Connections::remoteMachines() const {
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    auto rows = storage.database.query("SELECT id,name FROM t3_remote_machines ORDER BY name,id");
+    std::vector<T3RemoteMachine> machines;
+    while (rows.next()) machines.push_back({rows.string(0), rows.string(1)});
+    return machines;
+}
+
+bool T3Connections::removeRemoteMachine(std::string_view id) {
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    if (!storage.database.query("SELECT 1 FROM t3_remote_machines WHERE id=?", {id}).next()) return false;
+    storage.database.exec("DELETE FROM t3_remote_machines WHERE id=?", {id});
+    return true;
 }
 
 std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person, bool installationRoot) const {

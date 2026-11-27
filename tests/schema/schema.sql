@@ -120,6 +120,8 @@ VALUES
     ('index', 'sqlite_autoindex_session_read_refs_2', 'session_read_refs', NULL),
     ('index', 'sqlite_autoindex_t3_connected_environments_1', 't3_connected_environments', NULL),
     ('index', 'sqlite_autoindex_t3_events_1', 't3_events', NULL),
+    ('index', 'sqlite_autoindex_t3_remote_machines_1', 't3_remote_machines', NULL),
+    ('index', 'sqlite_autoindex_t3_remote_machines_2', 't3_remote_machines', NULL),
     ('index', 'sqlite_autoindex_task_revisions_1', 'task_revisions', NULL),
     ('index', 'sqlite_autoindex_task_run_destinations_1', 'task_run_destinations', NULL),
     ('index', 'tasks_bot', 'tasks', 'CREATE INDEX tasks_bot ON tasks(bot_id,id DESC)'),
@@ -388,6 +390,8 @@ VALUES
     ('table', 't3_events', 't3_events', 'CREATE TABLE t3_events(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, item_type TEXT NOT NULL, item_id TEXT NOT NULL,
   PRIMARY KEY(environment_id,thread_id,item_type,item_id))'),
+    ('table', 't3_remote_machines', 't3_remote_machines', 'CREATE TABLE t3_remote_machines(
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, person_id TEXT NOT NULL, token_digest TEXT NOT NULL UNIQUE)'),
     ('table', 'task_revisions', 'task_revisions', 'CREATE TABLE task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,

@@ -51,6 +51,8 @@ struct WebCallbacks {
     std::function<Json(const Person&)> t3Setup = {};
     // A missing environment retries cleanup of a revoked provider registration.
     std::function<void(const std::optional<std::string>& environment)> t3Disconnect = {};
+    // Empty unless Flock is listening for Sessions on other machines.
+    std::function<std::string()> remoteSessionMcpUrl = {};
     std::function<bool(const Person&)> modelSwitch = {};
     // nullopt means a sign-in is in progress. The value indicates remote revocation.
     std::function<std::optional<bool>()> modelLogout = {};
@@ -70,4 +72,7 @@ public:
     virtual unsigned port() const = 0;
 };
 std::unique_ptr<WebServer> startWeb(Store&, unsigned port, WebCallbacks, std::function<void(unsigned)> afterBind = {});
+// Serves only the Session MCP endpoint, for Sessions on other machines that hold a Flock bearer.
+std::unique_ptr<WebServer> startRemoteSessionMcp(Store&, const std::string& address, unsigned port, WebCallbacks);
+std::string remoteSessionMcpUrl(const std::string& address, unsigned port);
 }

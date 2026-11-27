@@ -173,6 +173,70 @@ public:
     }
 };
 
+void remoteMachines() {
+    FixedT3 t3;
+    TestDirectory dir;
+    Store store(dir.path / "flock.sqlite3");
+    T3Connections connections(store);
+    try {
+        connections.addRemoteMachine("Mac mini");
+        check(false, "A remote machine was added before T3 was connected");
+    } catch (const Conflict&) {
+    }
+    const auto localToken = connections.connect("env-1", localOwner.id, 4173);
+    const auto port = [] {
+        httplib::Server probe;
+        const auto bound = probe.bind_to_any_port("127.0.0.1");
+        probe.stop();
+        return static_cast<unsigned>(bound);
+    }();
+    const auto remoteUrl = remoteSessionMcpUrl("127.0.0.1", port);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.remoteSessionMcpUrl = [&] { return remoteUrl; };
+    const auto web = startWeb(store, 0, cb);
+    const auto remote = startRemoteSessionMcp(store, "127.0.0.1", port, cb);
+    check(remoteUrl == "http://127.0.0.1:" + std::to_string(port) + "/mcp/flock" &&
+              remoteSessionMcpUrl("fd7a::1", port) == "http://[fd7a::1]:" + std::to_string(port) + "/mcp/flock",
+          "Wrong remote Session MCP URL");
+
+    Browser browser(*web);
+    const auto initial = browser.get("/api/settings").at("remoteMachines");
+    check(initial.at("url") == remoteUrl && initial.at("machines").empty(), "Settings did not offer remote machines");
+    browser.post("/api/settings/remote-machine", {{"name", ""}}, 409);
+    const auto added = browser.post("/api/settings/remote-machine", {{"name", "Mac mini"}}, 201);
+    const auto token = added.at("bearerToken").get<std::string>();
+    check(added.at("url") == remoteUrl && token.starts_with("flock-t3-") && token != localToken, "Wrong remote machine credential");
+    check(browser.get("/api/settings").at("remoteMachines").at("machines") == Json::array({{{"id", added.at("id")}, {"name", "Mac mini"}}}),
+          "Settings did not list the remote machine without its bearer");
+
+    Mcp mcp(*remote, token);
+    check(mcp.call("flock_bots").contains("structuredContent"), "A remote machine bearer could not list Bots");
+    check(Mcp(*remote, localToken).call("flock_bots").contains("structuredContent"), "The local bearer stopped working remotely");
+    check(Mcp(*remote, "").request("tools/list", Json::object(), 401).contains("error"), "Remote MCP accepted an absent bearer");
+
+    httplib::Client raw("127.0.0.1", static_cast<int>(port));
+    const httplib::Headers bearer{{"Authorization", "Bearer " + token}};
+    for (const auto* path : {"/", "/api/settings", "/mcp/flock/external", "/settings.html"})
+        check(raw.Get(path, bearer)->status == 404, std::string("The remote listener served ") + path);
+    const auto rejected = [&](httplib::Headers headers) {
+        headers.emplace("Authorization", "Bearer " + token);
+        const Json body{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}};
+        return raw.Post("/mcp/flock", headers, body.dump(), "application/json")->status == 403;
+    };
+    check(rejected({{"Host", "attacker.example:" + std::to_string(port)}}), "The remote listener accepted another Host");
+    check(rejected({{"Origin", "http://127.0.0.1:" + std::to_string(port)}}), "The remote listener accepted a browser request");
+
+    browser.post("/api/settings/remote-machine", {{"remove", added.at("id")}});
+    browser.post("/api/settings/remote-machine", {{"remove", added.at("id")}}, 404);
+    check(Mcp(*remote, token).request("tools/list", Json::object(), 401).contains("error"), "A removed machine kept access");
+
+    const auto again = connections.addRemoteMachine("Mac mini");
+    check(connections.authenticate(again.bearerToken).has_value(), "A new remote machine could not authenticate");
+    connections.disconnect("env-1");
+    check(!connections.authenticate(again.bearerToken), "A remote machine kept access after T3 was disconnected");
+}
+
 void stopDuringSendPreflight() {
     struct CheckedT3 : FixedT3 {
         std::function<void()> duringRead;
@@ -1455,6 +1519,8 @@ int main(int argc, char** argv) {
         sessionAsks(argv[1], argv[2]);
         scenario = "Session stops";
         sessionStops(argv[1], argv[2]);
+        scenario = "remote machines";
+        remoteMachines();
         scenario = "stop during send preflight";
         stopDuringSendPreflight();
         scenario = "stop during send dispatch";
