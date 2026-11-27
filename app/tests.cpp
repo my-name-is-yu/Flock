@@ -751,13 +751,9 @@ void responseContract() {
           "model Session calls were not decoded using the live schemas");
     auto batchInput = input;
     batchInput.tools = {"flock_session_search", "reply"};
-    check(responseRequest(batchInput).at("parallel_tool_calls") == false, "One batchable tool enabled parallel calls");
-    batchInput.tools.push_back("read_memory");
-    check(responseRequest(batchInput).at("parallel_tool_calls") == true, "A batchable Store read was missed");
-    batchInput.tools.pop_back();
     batchInput.tools.push_back("check_environment_readiness");
     const auto batchRequest = responseRequest(batchInput);
-    check(batchRequest.at("parallel_tool_calls") == true, "Two batchable reads did not enable parallel calls");
+    check(batchRequest.at("parallel_tool_calls") == true, "A conversation turn did not allow several calls in one response");
     auto mixedCalls = modelCall("flock_session_search", searchArgs);
     mixedCalls.push_back(modelCall("check_environment_readiness", Json::object()).front());
     const auto mixed = responseDecision(mixedCalls, batchRequest);

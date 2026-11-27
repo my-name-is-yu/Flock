@@ -314,16 +314,50 @@ void storeRemainsResponsiveDuringMcpCapabilityChecks() {
     }
 }
 
-void followUpNeeded(const Decision& action, std::string_view guidance) {
+void prematureReplyIsNotRun() {
     Fixture f;
-    f.receive({search, action});
+    f.receive({search, call("reply", {{"text", "Premature reply"}})});
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
-    check(f.query("SELECT count(*) FROM tasks") == "0" && f.t3.searches == 1 && results[0].at("result").at("ok") == true &&
-              results[1] == Json({{"ok", false}, {"notRun", true}, {"error", guidance}}) &&
+    check(f.t3.searches == 1 && results[0].at("result").at("ok") == true &&
+              results[1] == Json({{"ok", false}, {"notRun", true}, {"error", "Reply after reviewing these results."}}) &&
               f.model.turns.at(1)[1].at("result") == results[1],
-          "The standalone action ran in the batch or its result was lost");
+          "A reply sent with reads ran before the model saw their results");
+}
+
+void changingActionsShareOneResponse() {
+    Fixture f;
+    f.receive(
+        {call("start_task", {{"request", "Start the first task"}}), search, call("start_task", {{"request", "Start the second task"}})});
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    const auto& reviewed = f.model.turns.at(1);
+    check(f.query("SELECT count(*) FROM tasks") == "2" && f.t3.searches == 1 && reviewed.size() == 3 &&
+              reviewed[0].at("tool") == "flock_session_search" &&
+              std::ranges::all_of(reviewed, [](const Json& step) { return step.at("result").value("ok", false); }),
+          ("Actions that change something did not all run from one response: " + reviewed.dump()).c_str());
+}
+
+void replyEndsTheTurnAfterItsActions() {
+    Fixture f;
+    f.receive({call("reply", {{"text", "Reviewed the results."}}), call("start_task", {{"request", "Start a task"}})});
+    f.runtime->runConversations();
+    f.checkFinished(1);
+    check(f.query("SELECT count(*) FROM tasks") == "1", "The action before the reply did not run");
+}
+
+void failedActionSkipsLaterOnes() {
+    Fixture f;
+    f.receive({call("cancel_task", {{"taskId", 4096}, {"generation", 0}}), call("start_task", {{"request", "Start a task"}}),
+               call("reply", {{"text", "Premature reply"}})});
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    const Json notRun{{"ok", false}, {"notRun", true}, {"error", "Not run because an earlier action in the same response failed."}};
+    check(f.query("SELECT count(*) FROM tasks") == "0" && f.results().at(0).at("ok") == false && !f.results().at(0).contains("notRun") &&
+              f.results("result", 2) == Json::array({notRun}) && f.results("result", 3) == Json::array({notRun}) &&
+              f.model.turns.at(1).size() == 3,
+          "Later actions ran after an earlier one in the same response failed");
 }
 
 void gatewayOnlyCancelDoesNotCancelBatchSibling() {
@@ -333,12 +367,11 @@ void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     f.receive({call("cancel_task", {{"taskId", task}, {"generation", generation}, {"gatewayEnvironmentId", "env"}}), search});
     f.runtime->runConversations();
     f.checkFinished(2);
-    const auto results = f.results();
-    const auto first = results[0].value("result", results[0]);
-    const auto second = results[1].value("result", results[1]);
+    const auto first = f.results("result", 2).at(0);
+    const auto second = f.results().at(0).at("result");
     check((first.value("ok", true) == false || first.contains("error")) && second.value("ok", false) == true &&
               Tasks(*f.store).task(task).task.state == TaskState::queued && f.t3.searches == 1,
-          ("a gateway-only batch cancel changed the task or suppressed its sibling: " + results.dump()).c_str());
+          ("a gateway-only batch cancel changed the task or suppressed its sibling: " + first.dump()).c_str());
 }
 
 void conflictingWorkspaceCalls() {
@@ -662,8 +695,10 @@ int main(int argc, char** argv) {
         approval(true);
         approval(false);
         storeRemainsResponsiveDuringMcpCapabilityChecks();
-        followUpNeeded(call("start_task", {{"request", "Start a task"}}), "Run this action on its own after reviewing these results.");
-        followUpNeeded(call("reply", {{"text", "Premature reply"}}), "Reply after reviewing these results.");
+        prematureReplyIsNotRun();
+        changingActionsShareOneResponse();
+        replyEndsTheTurnAfterItsActions();
+        failedActionSkipsLaterOnes();
         gatewayOnlyCancelDoesNotCancelBatchSibling();
         conflictingWorkspaceCalls();
         rejectedCall();

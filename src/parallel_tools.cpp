@@ -128,9 +128,7 @@ private:
         if (!call.rejection.empty()) return toolFailure(call.rejection);
         const bool standaloneBotCall = calls_.size() == 1 && isBotTool(call.tool);
         if (!standaloneBotCall && !tool_batch::batchable(call.tool)) {
-            auto result = toolFailure(tool_batch::classify(call) == tool_batch::CallClass::terminal
-                                          ? "Reply after reviewing these results."
-                                          : "Run this action on its own after reviewing these results.");
+            auto result = toolFailure("Reply after reviewing these results.");
             result["notRun"] = true;
             return result;
         }

@@ -115,6 +115,7 @@ public:
     bool conversationPending(std::string_view bot) const;
 private:
     void deferConversation(Id, Seconds now);
+    void skipQueuedStepsAfterFailure(Id message, int step);
     CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&, std::string_view effectType,
                                         const BotTools&, const ConversationCallContext&);
     CallOutcome executeBotSetup(const conversation::Message&, int step, const Decision&, std::string_view key,

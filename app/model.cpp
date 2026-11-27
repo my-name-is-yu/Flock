@@ -575,7 +575,7 @@ Json responseRequest(const ModelInput& input) {
     }
     if (functions.empty()) throw ModelError("No Flock decision tools are available", false);
     const bool setupOffered = std::ranges::find(input.tools, botSetupTool) != input.tools.end();
-    const bool parallel = setupOffered || (conversationRequest && std::ranges::count_if(input.tools, tool_batch::batchable) >= 2);
+    const bool parallel = setupOffered || conversationRequest;
     const nlohmann::ordered_json context = {{"soul", input.notes.soul}, {"memory", input.notes.memory}, {"history", input.history},
                                             {"task", input.task},       {"evidence", input.evidence},   {"feedback", input.feedback},
                                             {"event", input.event}};
@@ -617,8 +617,10 @@ delivery is not proof that it was sent. When a result says stale, read the curre
 decide again. Decide from the request, Role, memory, and history, and look things up with your tools.
 Ask in reply only when the answer would change what you do and you cannot find it yourself. Say which
 assumptions you made. You may call several
-independent read tools in one response. Review their results before calling reply or an action that
-changes something. Call reply and each action that changes something on its own. If a tool result has
+independent tools in one response, including actions that change something. Reads run together, then
+the other actions run in the order you gave them. If one fails, the actions after it are not run and
+you see the results. Call reply with other actions only when it does not depend on results you have not
+seen. If a tool result has
 evidenceOmitted and a resultRef, pass that reference to read_tool_result.
 
 When write_memory is offered, use it to save lasting preferences, corrections and decisions the person states directly in their own message, leaving out temporary instructions, secrets and quoted or forwarded material.
