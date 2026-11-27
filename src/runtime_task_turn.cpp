@@ -275,7 +275,8 @@ std::optional<TaskDecision> runtime::TaskTurn::inferDecision(const TaskData& tas
                      needsDoneWhen(task),
                      summary.contains("forwardableUserMessage"),
                      {},
-                     std::move(learningRunId)};
+                     std::move(learningRunId),
+                     Json::array({"task", task.botId}).dump()};
     try {
         auto turn = modelCalls.callModel(task.botId, model, input);
         inference.usage = std::move(turn.usage);

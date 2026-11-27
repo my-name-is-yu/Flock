@@ -602,6 +602,16 @@ void responseContract() {
     check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4, "only allowed tools grouped in namespace");
     check(!toolParameters(request, "delegate").at("properties").contains("doneWhen"), "later delegate must omit doneWhen");
     check(request.dump().find("must-stay-local") == std::string::npos, "adapter config leaked into the prompt");
+    check(!request.contains("prompt_cache_key"), "A request without a cache scope sent a prompt cache key");
+    auto scoped = input;
+    scoped.cacheScope = R"(["task","scope-must-stay-local"])";
+    const auto key = responseRequest(scoped).at("prompt_cache_key").get<std::string>();
+    check(key.size() == 64 && key.find_first_not_of("0123456789abcdef") == std::string::npos &&
+              responseRequest(scoped).at("prompt_cache_key") == key,
+          "The prompt cache key was not a stable SHA-256 digest");
+    check(responseRequest(scoped).dump().find("scope-must-stay-local") == std::string::npos, "The cache scope leaked into the request");
+    scoped.cacheScope = R"(["task","another-bot"])";
+    check(responseRequest(scoped).at("prompt_cache_key") != key, "Different cache scopes shared a prompt cache key");
     check(nlohmann::ordered_json::parse(requestText(request)) == nlohmann::ordered_json{{"soul", input.notes.soul},
                                                                                         {"memory", input.notes.memory},
                                                                                         {"history", input.history},

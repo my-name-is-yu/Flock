@@ -951,6 +951,30 @@ void queuedTurnsSeeEarlierReplies() {
           "the queued follow-up lost the reply to the earlier request");
 }
 
+void requestsOfOneKindShareAPromptCacheScope() {
+    Fixture f;
+    f.script("Recommend a plan", {say("Use plan Maple")});
+    f.script("Explain your recommendation", {say("Maple needs fewer resources")});
+    f.enqueue("recommend", "Recommend a plan");
+    f.enqueue("explain-recommendation", "Explain your recommendation");
+    f.runtime->runConversations();
+    f.runtime->runConversations();
+    std::vector<std::string> taskScopes;
+    f.model.beforeIntake = [&](const ModelInput& input) { taskScopes.push_back(input.cacheScope); };
+    f.model.beforeComplete = [&](const ModelInput& input) { taskScopes.push_back(input.cacheScope); };
+    const auto id = TaskIntake(*f.store).submit(f.routing());
+    f.reach(id, "running");
+    f.t3.finish("run-1", "Baseline measured");
+    f.reach(id, "completed");
+    const auto& turns = f.model.turnInputs;
+    check(turns.size() >= 2 && !turns.front().cacheScope.empty() &&
+              std::ranges::all_of(turns, [&](const ModelInput& input) { return input.cacheScope == turns.front().cacheScope; }),
+          "conversation turns of one Bot did not share a prompt cache scope");
+    check(taskScopes.size() >= 2 && !taskScopes.front().empty() && taskScopes.front() != turns.front().cacheScope &&
+              std::ranges::all_of(taskScopes, [&](const std::string& scope) { return scope == taskScopes.front(); }),
+          "task decisions did not share their own prompt cache scope");
+}
+
 void destinationClarificationContinuesFromConversationHistory() {
     Fixture f;
     T3Connections(*f.store).connect("cloud", localOwner.id, 48123);
@@ -4708,6 +4732,7 @@ int main(int argc, char** argv) {
         conversationCanNameProjectsInStartAndChange();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
+        requestsOfOneKindShareAPromptCacheScope();
         finishedTurnDoesNotHoldCompletion();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
