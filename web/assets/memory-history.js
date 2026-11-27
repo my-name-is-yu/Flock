@@ -1,6 +1,6 @@
 import { element } from './settings-ui.js';
 
-const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' });
+const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 
 export function createMemoryHistory(readPage, openConversationEvent, sessionLink, botName) {
   const card = element('section', '', 'settings-card memory-history');
