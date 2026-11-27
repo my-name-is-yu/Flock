@@ -334,7 +334,7 @@ function editMachines(entry = {}) {
     edit: editMachines,
     remove: (machine) => confirmSetting(`Remove ${machine.id}?`,
       'New requests will no longer be able to use this computer after restart.',
-      'Remove machine', () => saveInstallation('channels', {action: 'removeMachine', id: machine.id})),
+      'Remove computer', () => saveInstallation('channels', {action: 'removeMachine', id: machine.id})),
     status: registeredEntry,
   });
   const name = settingField('id', 'Computer name', {required: true, value: entry.id});
@@ -740,7 +740,7 @@ function addRemoteMachine(refresh) {
     'Add computer', async ({name}) => {
       const response = await postSettings('remote-machine', {name: name.trim()});
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.message || 'Couldn’t add this machine.');
+      if (!response.ok) throw new Error(data.message || 'Couldn’t add this computer.');
       await refresh();
       showRemoteSetup(name.trim(), data);
       return false;
@@ -753,7 +753,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   $('remote-machines').replaceChildren();
   if (!remote) return;
   if (t3Connected && !remote.url) {
-    const item = row('remote-machines', rowLabel('Other machines can’t reach Flock yet',
+    const item = row('remote-machines', rowLabel('Other computers can’t reach Flock yet',
       'Set the address for other computers in Flock server settings, then restart Flock.'));
     const open = element('a', 'Open server settings', 'button');
     open.href = '#system';
@@ -764,13 +764,13 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
     const remove = actionButton(item, 'Remove', () => confirmSetting(`Remove ${name}?`,
       'You’ll need to set up this computer again for its Sessions to ask Flock Bots.', 'Remove', async () => {
         const response = await postSettings('remote-machine', {remove: id});
-        if (!response.ok && response.status !== 404) throw new Error('Couldn’t remove this machine.');
+        if (!response.ok && response.status !== 404) throw new Error('Couldn’t remove this computer.');
         await refresh();
       }));
     remove.classList.add('quiet-danger');
   }
   if (t3Connected && remote.url) {
-    const item = row('remote-machines', rowLabel('Add another machine', `Flock listens at ${remote.url}`));
+    const item = row('remote-machines', rowLabel('Add another computer', `Flock listens at ${remote.url}`));
     actionButton(item, 'Add computer', () => addRemoteMachine(refresh), true);
   }
 }
