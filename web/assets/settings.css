@@ -230,7 +230,7 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   overflow: auto; padding: var(--space-5); border: 1px solid var(--hairline); border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg); background: var(--overlay); color: var(--text); font-family: var(--font-sans);
 }
-.installation-dialog::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
+.installation-dialog::backdrop { background: var(--scrim); }
 .installation-dialog-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
 .installation-dialog-head h2 { margin: 0; padding: 0; color: var(--text); font-size: var(--text-lg); }
 .installation-dialog-head .icon-button { flex: none; }

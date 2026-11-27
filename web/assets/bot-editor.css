@@ -7,13 +7,13 @@
   padding: 0;
   overflow: hidden;
   color: var(--text);
-  border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
+  border: 1px solid var(--border-floating);
   border-radius: var(--radius-xl);
   background: var(--overlay);
   box-shadow: var(--shadow-lg);
 }
 .bot-editor-dialog[open] { display: flex; }
-.bot-editor-dialog::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
+.bot-editor-dialog::backdrop { background: var(--scrim); }
 
 .bot-editor-dialog, .bot-editor-dialog::backdrop {
   transition: opacity .2s ease-out, transform .24s cubic-bezier(0.22, 1.15, 0.36, 1),

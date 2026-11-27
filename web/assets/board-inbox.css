@@ -42,7 +42,7 @@
   position: relative; z-index: 1; width: min(100%, 37rem); max-height: 100%;
   overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
   padding: .95rem 1.25rem 1.15rem;
-  border: 1px solid light-dark(rgb(0 0 0 / .09), rgb(255 255 255 / .09));
+  border: 1px solid var(--border-floating);
   border-radius: var(--radius-xl);
   background: var(--overlay);
   box-shadow: 0 24px 64px light-dark(rgb(24 22 36 / .16), rgb(0 0 0 / .62));
@@ -62,7 +62,7 @@
 }
 .decision-morph-card {
   position: fixed; margin: 0; overflow: hidden;
-  border: 1px solid light-dark(rgb(0 0 0 / .09), rgb(255 255 255 / .09));
+  border: 1px solid var(--border-floating);
   border-radius: var(--radius-xl);
   background: var(--overlay);
   box-shadow: 0 24px 64px light-dark(rgb(24 22 36 / .16), rgb(0 0 0 / .62));
