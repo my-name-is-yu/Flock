@@ -294,3 +294,4 @@
   @starting-style { .reply-context, .decision-reply-context { opacity: 1; transform: none; } }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }
+.composer:has(> .decision-reply-context:not([hidden])) > * { min-width: 0; }
