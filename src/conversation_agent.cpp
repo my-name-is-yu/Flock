@@ -1181,7 +1181,8 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                          .tools = std::move(offered),
                          .feedback = std::move(feedback),
                          .config = message.routing.at("config"),
-                         .images = std::move(images)};
+                         .images = std::move(images),
+                         .cacheScope = Json::array({"conversation", message.bot, message.channelScope}).dump()};
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{{}, ModelErrorCode::inference_failed}};
