@@ -754,8 +754,8 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   if (!remote) return;
   if (t3Connected && !remote.url) {
     const item = row('remote-machines', rowLabel('Other computers can’t reach Flock yet',
-      'Set the address for other computers in Flock server settings, then restart Flock.'));
-    const open = element('a', 'Open server settings', 'button');
+      'Set the address for other computers in System settings, then restart Flock.'));
+    const open = element('a', 'Open System settings', 'button');
     open.href = '#system';
     item.append(open);
   }
