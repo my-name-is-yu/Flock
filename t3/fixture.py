@@ -1062,6 +1062,9 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true")
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    skill_paths = (directory / ".claude" / "skills", directory / ".agents" / "skills")
+    env.pop("FLOCK_CLAUDE_SKILLS_DIR", None)
+    env.pop("FLOCK_CODEX_SKILLS_DIR", None)
     t3_home = directory / "t3-fixture-home"
     env["T3CODE_HOME"] = str(t3_home)
     runtime_path = t3_home / "userdata" / "server-runtime.json"
@@ -1124,7 +1127,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
             }
         assert token.encode() not in (state / "flock.sqlite3").read_bytes()
-        assert not (directory / ".claude" / "skills").exists() and not (directory / ".agents" / "skills").exists()
+        assert not any(path.exists() for path in skill_paths), "CLI setup created skill directories"
         return token
 
     working_command = command
@@ -1257,6 +1260,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 assert selector.select(8), "Flock did not listen on the saved port"
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+            assert not any(path.exists() for path in skill_paths), "Web startup created skill directories"
 
             server.state["claimedEnvironment"] = "env-local-web"
             server.state["descriptorEnvironment"] = "env-wrong"
@@ -1285,6 +1289,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
 
             authorized = connect_web({"source": "local"})["env-local-web"]
             assert authorized["label"] == "T3 fixture" and not authorized["expired"]
+            assert not any(path.exists() for path in skill_paths), "Web setup created skill directories"
             credential_file = next(file for file in credential_dir.glob("*.json")
                                    if json.loads(file.read_text())["environmentId"] == "env-local-web")
             expired = json.loads(credential_file.read_text())
