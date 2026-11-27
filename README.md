@@ -30,7 +30,7 @@ commit in blame.
    is refused, so use a new state directory.
 2. In **Flock settings → Connections**, choose **Sign in with ChatGPT** and
    allow plan usage. Start T3 Code and choose **Connect local T3**, or use
-   **Use a connection URL** for a T3 server on another machine.
+   **Use a connection URL** for a T3 server on another computer.
 3. Select **New Bot** in the sidebar, choose a preset or **Start from scratch**,
    enter a name, and optionally choose a T3 project under **Where does it
    work?**. Flock preselects the last project you assigned if it is available.
@@ -43,9 +43,9 @@ commit in blame.
 
 Sessions on the computer running Flock can ask Bots right away. For Sessions
 on another computer, connect that computer's T3, set **Address for other
-machines** in **Flock settings → System** to an address it can reach (such as a
+computers** in **Flock settings → System** to an address it can reach (such as a
 Tailscale IP), restart Flock, and add the computer under **Connections → Other
-machines**.
+computers**.
 
 To try the conversation flow without connecting accounts, run
 `build/release/app/flock --home "$(mktemp -d)" run --fixed`, create a Bot, and

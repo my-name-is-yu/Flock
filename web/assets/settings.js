@@ -284,7 +284,7 @@ function renderModel(model) {
     return;
   }
   if (pending) {
-    row('model', rowLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the machine running Flock.'));
+    row('model', rowLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the computer running Flock.'));
     pollModel();
     return;
   }
