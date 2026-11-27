@@ -35,6 +35,13 @@ struct TaskDestinations {
     std::vector<RunTarget> linked;
     std::vector<std::string> unavailable;
     std::map<std::pair<std::string, std::string>, std::vector<T3Project>> catalogs;
+    // What each link lets Sessions do without asking, as T3 reports it, by linked environment and gateway.
+    std::map<std::pair<std::string, std::string>, std::string> linkAccess;
+
+    std::string access(const TaskRoute& route) const {
+        const auto found = linkAccess.find({route.environmentId, route.gatewayEnvironmentId});
+        return found == linkAccess.end() ? std::string{} : found->second;
+    }
 
     const std::vector<T3Project>* projects(const TaskRoute&) const;
     void chooseProject(TaskRoute&, std::string_view project) const;

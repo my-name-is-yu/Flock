@@ -14,6 +14,7 @@
 #include "flock/workspace_tools.hpp"
 #include "database.hpp"
 
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,14 +32,27 @@ std::string argument(const Json& args, const char* key) {
 
 }
 
-Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
+Json BotSettingsStorage::readiness(const conversation::Message& message, std::string_view bot, const Json& routing, const Json& args,
+                                   T3& t3) {
     Policy policy = permissions;
     const auto& config = routing.at("config");
     const auto name = args.contains("environmentId") ? argument(args, "environmentId") : std::string{};
-    TaskRoute route;
-    {
+    const auto resolve = [&](const TaskDestinations* linked) {
         std::lock_guard lock(database.mutex);
-        route = taskRouting.taskRoute(bot, routing, name);
+        return taskRouting.taskRoute(bot, routing, name, nullptr, linked);
+    };
+    auto route = resolve(nullptr);
+    std::string access;
+    if (route.environmentId.empty() && !name.empty()) {
+        // A linked environment is reachable only through its gateway, so it is not among the registered connections.
+        const auto linked = taskRouting.discoverTaskDestinations(t3, message, false);
+        try {
+            route = resolve(&linked);
+        } catch (const std::runtime_error& error) {
+            // The route says why a listed link cannot be used, such as a gateway that is no longer connected.
+            return {{"ready", false}, {"reason", error.what()}, {"settingsLink", "/settings"}};
+        }
+        access = linked.access(route);
     }
     auto failure = [&](std::string reason) -> Json { return {{"ready", false}, {"reason", reason}, {"settingsLink", "/settings"}}; };
     const auto& id = route.environmentId;
@@ -47,6 +61,7 @@ Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, co
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
+    command.gatewayEnvironmentId = route.gatewayEnvironmentId;
     command.projectId = std::move(route.projectId);
     command.config = config;
     command.actionId = actionId();
@@ -59,12 +74,15 @@ Json BotSettingsStorage::readiness(std::string_view bot, const Json& routing, co
             if (t3.projects(id).empty()) return failure("Add or unarchive a project in the T3 environment");
             return {{"ready", true}};
         }
-        if (t3.authGeneration(id, config).empty() || t3.preflight(command))
+        if (t3.authGeneration(command.gatewayEnvironmentId.empty() ? id : command.gatewayEnvironmentId, config).empty() ||
+            t3.preflight(command))
             return failure("Check T3 sign-in, project and connection permissions");
     } catch (...) {
         return failure("Check T3 sign-in and environment settings");
     }
-    return {{"ready", true}};
+    Json ready{{"ready", true}};
+    if (!access.empty()) ready["access"] = access;
+    return ready;
 }
 
 Json BotSettingsStorage::botSettingsTool(std::string_view bot, Id sourceMessage, const BotTools& settings, const Decision& decision) {

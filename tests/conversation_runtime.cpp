@@ -2316,6 +2316,28 @@ void nonDefaultProjectMoveKeepsCanonicalGateway() {
           "the next T3 instruction silently fell back to the target ID as gateway");
 }
 
+void readinessReachesLinkedEnvironmentThroughItsGateway() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
+    f.t3.linksByGateway["desktop"].links.push_back(
+        {{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable, "approval-required"});
+
+    const auto text = "Can you start work on cloud?";
+    f.script(text, {[](const ModelInput& input) {
+                 const auto& choices = input.task.at("environments");
+                 const auto linked = std::ranges::find_if(choices, [](const Json& choice) { return choice.value("linked", false); });
+                 check(linked != choices.end() && linked->value("access", "") == "approval-required",
+                       "the linked destination did not say what its link lets Sessions do");
+                 return Decision{"check_environment_readiness", {{"environmentId", "cloud"}}, "Scripted check"};
+             }});
+    ConversationIntake(*f.store).receive(localOwner, f.routing(text, "alpha", "desktop", "project"), "linked-readiness", text);
+    f.runtime->runConversations();
+    const auto result = f.lastTurn().at(0).at("result");
+    check(result.at("ok") == true && result.at("ready") == true && result.at("access") == "approval-required",
+          "a linked environment was reported as not connected");
+}
+
 void sameEnvironmentMoveKeepsGateway() {
     Fixture f;
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
@@ -4712,6 +4734,7 @@ int main(int argc, char** argv) {
         cloudDestinationWaitsForItsProject();
         canonicalMoveKeepsProjectAndGateway();
         nonDefaultProjectMoveKeepsCanonicalGateway();
+        readinessReachesLinkedEnvironmentThroughItsGateway();
         sameEnvironmentMoveKeepsGateway();
         gatewayOnlyCancelDoesNotCancelTask();
         productionGatewayOnlyLaunch();

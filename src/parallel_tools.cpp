@@ -265,7 +265,7 @@ private:
             case session: return store_.sessionReadStorage.sessionReadTool(message_, call, ctx_.t3, callKey(slot));
             case environment_readiness: {
                 if (!message_.channelScope.empty()) return CompletedToolCall{toolFailure("Use Flock Web for this action")};
-                auto result = store_.botSettingsStorage.readiness(message_.bot, message_.routing, call.args, ctx_.t3);
+                auto result = store_.botSettingsStorage.readiness(message_, message_.bot, message_.routing, call.args, ctx_.t3);
                 result["ok"] = true;
                 return CompletedToolCall{std::move(result)};
             }
