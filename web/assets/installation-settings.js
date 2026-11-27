@@ -175,9 +175,9 @@ function entriesList(entries, description, {edit, remove, test, status} = {}) {
       renderStates();
       actions.append(states);
     }
-    if (test) actionButton(actions, 'Check', async (event) => {
+    if (test) actionButton(actions, 'Check connection', async (event) => {
       if (await test(entry, event.currentTarget)) renderStates();
-    }).setAttribute('aria-label', `Check ${entry.id}`);
+    }).setAttribute('aria-label', `Check the connection to ${entry.id}`);
     if (edit) actionButton(actions, 'Edit', () => edit(entry)).setAttribute('aria-label', `Edit ${entry.id}`);
     if (remove) {
       const control = actionButton(actions, 'Remove', () => remove(entry));
