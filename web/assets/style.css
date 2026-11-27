@@ -9,6 +9,9 @@
   --hover: light-dark(#ededea, #202020);
   --selected: light-dark(#e7e7e3, #272727);
   --hairline: light-dark(#e3e3df, #2a2a2a);
+  --control: light-dark(#ffffff, rgb(255 255 255 / .05));
+  --control-hover: light-dark(#ededea, rgb(255 255 255 / .09));
+  --control-border: light-dark(#e3e3df, rgb(255 255 255 / .12));
   --border-floating: light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
   --surface-glass: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   --scrim: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58));
@@ -159,12 +162,13 @@ svg { display: block; }
 .button {
   display: inline-flex; align-items: center; justify-content: center; gap: .3rem; min-height: 2.2rem;
   border: 1px solid transparent; border-radius: var(--radius-md); padding: .4rem .85rem;
-  background: var(--accent-soft); color: var(--accent); font-size: var(--text-sm); font-weight: 600;
+  border-color: var(--control-border); background: var(--control); color: var(--text); font-size: var(--text-sm); font-weight: 600;
   text-decoration: none; overflow-wrap: anywhere;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
-.button:hover:not(:disabled) { background: var(--accent-soft-hover); }
+.button:hover:not(:disabled) { background: var(--control-hover); }
 .button:active:not(:disabled) { transform: scale(.97); }
+.button:is(.primary, .quiet, .danger, .quiet-danger) { border-color: transparent; }
 .button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .button.quiet { background: none; color: var(--text-2); }

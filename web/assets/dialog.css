@@ -137,7 +137,6 @@
 }
 .settings-soul-toggle { justify-self: start; margin-inline-start: -.55rem; }
 .settings-card-header { display: flex; align-items: center; justify-content: space-between; min-height: 1.6rem; }
-.settings-card-edit { margin-inline-end: -.55rem; }
 .settings-soul-empty { margin: 0; color: var(--text-3); }
 .settings-role-form { display: grid; gap: .35rem; }
 .settings-role-input {
