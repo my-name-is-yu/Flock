@@ -1,5 +1,6 @@
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
+#include "flock/avatar_style.hpp"
 #include "conversation_call.hpp"
 #include "bot_setup_storage.hpp"
 #include "wait_storage.hpp"
@@ -55,6 +56,17 @@ Json toolErrorResult(const ToolError& error) {
     result["ok"] = false;
     result["error"] = error.what();
     return result;
+}
+
+std::optional<BotAvatarChoice> requestedAvatar(const Json& args) {
+    const auto avatar = args.find("avatar");
+    if (avatar == args.end()) return std::nullopt;
+    const auto style = validatedAvatarStyle(args);
+    const auto& kind = style.at("kind").get_ref<const std::string&>();
+    if (kind == "upload") throw ToolError("Avatar kind must be shape or icon; upload images from Flock Web");
+    BotAvatarChoice choice{kind, style.at(kind == "shape" ? "example" : "icon").get<std::string>(), std::nullopt};
+    if (avatar->contains("color")) choice.color = style.at("color").get<std::string>();
+    return choice;
 }
 }
 
@@ -210,6 +222,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             const auto actor = turnActor(message);
             if (operation != "create_bot" || !validBotId(target) || !permissions.allows(actor, Action::bot_create, target))
                 throw ToolError("Bot change denied by policy");
+            auto avatar = requestedAvatar(args);
             const auto payload = Json::array({decision.tool, args});
             {
                 Transaction authorization(database.db);
@@ -226,8 +239,8 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             constexpr int maxCreationAttempts = 4;
             auto retries = database.query("SELECT failures FROM conversation_retries WHERE message_id=?", {id});
             const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
-            const auto changeId = botAccess.applyBotChange(message.bot, actor, target, name, id, step, ctx.applyBotChange,
-                                                           exhausted ? &ctx.reconcileBotCreation : nullptr);
+            const auto changeId = botAccess.applyBotChange(message.bot, actor, target, name, std::move(avatar), id, step,
+                                                           ctx.applyBotChange, exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(database.db);
             policyApprovals.consumePolicyApproval(key);
             conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));

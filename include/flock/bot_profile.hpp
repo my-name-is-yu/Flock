@@ -26,7 +26,6 @@ const Json& fallbackReasoningEfforts();
 const Json& modelReasoningEfforts(const Json& catalog, std::string_view slug);
 Json validatedBotRunSetting(std::string_view key, const Json& value);
 bool validBotRole(std::string_view role);
-Json validatedAvatarStyle(const Json& profile);
 
 struct AvatarFormat {
     std::string_view filename, contentType;

@@ -5,6 +5,7 @@
 #include "flock/web_conversation_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/bot_id.hpp"
+#include "flock/avatar_style.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/notifications.hpp"
 #include "flock/peer_conversations.hpp"
