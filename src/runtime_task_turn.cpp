@@ -347,7 +347,7 @@ SELECT id,data FROM journal WHERE task_id=? AND kind='tool_error' AND feedback_e
             auto rows = database.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
        json_extract(data,'$.itemId'),coalesce(json_extract(data,'$.environmentId'),json_extract(data,'$.run.environmentId')) FROM journal WHERE task_id=?
-AND kind IN ('decision','report','user_answer','session_answered','bot_message','git_webhook') ORDER BY id DESC LIMIT 6
+AND kind IN ('decision','report','user_answer','session_answered','bot_message','git_webhook') ORDER BY id DESC LIMIT 64
 )SQL",
                                        {task.id});
             std::size_t remaining = 16000;

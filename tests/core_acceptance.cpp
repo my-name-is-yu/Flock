@@ -40,6 +40,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <chrono>
@@ -2512,6 +2513,27 @@ void unsuccessfulConsultationsDoNotComplete() {
     }
 }
 
+void taskHistoryKeepsEveryPeerResult() {
+    Fixture f;
+    f.allowBeta();
+    constexpr std::array questions{"Question one", "Question two", "Question three"};
+    std::size_t asked = 0;
+    std::string finalHistory;
+    const auto id = f.submit("Ask the Verifier three separate questions");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event["kind"] == "bot_request") return botReply("result", "Answer to " + input.event["text"].get<std::string>());
+        if (asked == questions.size()) {
+            finalHistory = input.history.dump();
+            return complete();
+        }
+        return botRequest("beta", "consult", questions.at(asked++));
+    };
+    f.reach(id, "completed");
+    for (const auto* question : questions)
+        check(finalHistory.find(std::string("Answer to ") + question) != std::string::npos,
+              "the task decided without an earlier Bot reply in its history");
+}
+
 void concurrentPeerHandoff() {
     Fixture f;
     f.allowBeta();
@@ -3161,6 +3183,8 @@ int main() {
                                                                                     recoveredRunAcceptsQuestion},
                                                                                    {"Unsuccessful consultations",
                                                                                     unsuccessfulConsultationsDoNotComplete},
+                                                                                   {"Task history keeps every Bot reply",
+                                                                                    taskHistoryKeepsEveryPeerResult},
                                                                                    {"Concurrent Bot handoff", concurrentPeerHandoff},
                                                                                    {"Consultation own-Session evidence",
                                                                                     consultationRestoresOwnEvidence},
