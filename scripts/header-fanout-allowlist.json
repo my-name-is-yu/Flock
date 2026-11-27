@@ -3,7 +3,7 @@
   "include/flock/command.hpp": 90,
   "include/flock/decision.hpp": 111,
   "include/flock/intake.hpp": 88,
-  "include/flock/json.hpp": 159,
+  "include/flock/json.hpp": 158,
   "include/flock/limits.hpp": 31,
   "include/flock/model.hpp": 50,
   "include/flock/outbox.hpp": 85,
@@ -23,7 +23,7 @@
   "include/flock/task_context.hpp": 85,
   "include/flock/task_interaction.hpp": 93,
   "include/flock/tasks.hpp": 35,
-  "include/flock/types.hpp": 153,
+  "include/flock/types.hpp": 152,
   "include/flock/wait.hpp": 97,
   "src/database.hpp": 65
 }

@@ -35,7 +35,7 @@ void disconnectT3(Store&, const std::optional<std::string>& environment);
 
 class T3WebSetup {
 public:
-    T3WebSetup(std::filesystem::path home, std::function<void()> onConnected);
+    explicit T3WebSetup(std::filesystem::path home);
     void configure(WebCallbacks&, Store&, bool live);
     void listeningOn(unsigned port) { port_.store(port); }
 private:
@@ -43,7 +43,6 @@ private:
     bool start(const Person&, const T3ConnectRequest&);
 
     const std::filesystem::path home_;
-    const std::function<void()> onConnected_;
     std::atomic<unsigned> port_ = 0;
     std::mutex mutex_;
     bool running_ = false;
