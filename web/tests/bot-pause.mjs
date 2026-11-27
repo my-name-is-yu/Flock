@@ -80,6 +80,7 @@ async function exercise() {
     'The conversation header or sidebar did not show Paused');
   check(composer.hidden && message.readOnly && !pauseBanner.hidden && !resume.hidden,
     'The paused Bot still accepted text or hid the owner’s Resume action');
+  check($('#composer-banner-title').textContent === 'Release is paused', 'The paused banner did not name the Bot');
   composer.dispatchEvent(new Event('submit', { cancelable: true }));
   check(!sentMessages.length, 'Submitting the hidden form sent a message');
   resume.click();
