@@ -208,11 +208,11 @@ WHERE (c.token_digest=?1 OR r.id IS NOT NULL) AND EXISTS(SELECT 1 FROM t3_connec
 
 T3RemoteCredential T3Connections::addRemoteMachine(std::string_view name) {
     if (name.empty() || name.size() > 128 || std::ranges::any_of(name, [](unsigned char c) { return c < 32 || c == 127; }))
-        throw Conflict("Enter a machine name up to 128 characters");
+        throw Conflict("Enter a computer name up to 128 characters");
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     auto connector = storage.database.query("SELECT person_id FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
-    if (!connector.next()) throw Conflict("Connect T3 before adding another machine");
+    if (!connector.next()) throw Conflict("Connect T3 before adding another computer");
     const auto person = connector.string(0);
     auto count = storage.database.query("SELECT COUNT(*) FROM t3_remote_machines");
     if (count.next() && count.number(0) >= 64) throw Conflict("Flock supports up to 64 other machines");

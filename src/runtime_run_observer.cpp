@@ -222,7 +222,7 @@ void runtime::RunObserver::interruptRun(const TaskData& task) {
     const auto observed = observe(task);
     if (ingest(task, observed)) return;
     if (observed.kind == Observation::Kind::Settling) return stopNote(task, "Waiting for the remaining work on this request to finish");
-    if (observed.kind == Observation::Kind::Unavailable) return stopNote(task, "Flock couldn't check the status of this work in T3");
+    if (observed.kind == Observation::Kind::Unavailable) return stopNote(task, "Flock couldn’t check the status of this work in T3");
     const auto now = clock();
     if (now < stop.retryAt.value_or(0)) return;
     TaskData requested;
@@ -267,7 +267,7 @@ void runtime::RunObserver::cancelDone(TaskData& task) {
     journalStorage.journalCancelled(task.id);
     if (const auto peer = peerStorage.peerExchange(task.id); peer && peer->recipient == task.id)
         peerExchanges.finishPeer(*peer, task, taskRecords.load(peer->sender), "cancelled",
-                                 task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot's task was cancelled.",
+                                 task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot’s request was cancelled.",
                                  actionId());
 }
 

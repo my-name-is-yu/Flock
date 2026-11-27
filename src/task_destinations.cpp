@@ -113,7 +113,7 @@ void TaskRouting::applyProjectCatalog(TaskData& task, const ProjectCatalog& cata
         selected = std::ranges::find_if(projects, usable);
         if (selected == projects.end()) {
             showSettings("Each project in this environment would make project queues wait for one another. "
-                         "This task can continue after the related work finishes or after moving to another environment.");
+                         "This request can continue after the related work finishes or after moving to another environment.");
             return;
         }
         if (std::find_if(std::next(selected), projects.end(), usable) != projects.end()) selected = projects.end();
