@@ -18,7 +18,7 @@
 .composer-banner-title { font-size: var(--text-md); font-weight: 600; }
 .composer-banner-description { margin-top: .15rem; color: var(--text-2); font-size: var(--text-sm); }
 .composer-banner-description.error { color: var(--danger); }
-.composer-banner .dialog-button { flex: none; }
+.composer-banner .button { flex: none; }
 .composer {
   --composer-control-size: 2.75rem;
   display: grid;

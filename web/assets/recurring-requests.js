@@ -131,7 +131,7 @@ function scheduleForm(addSchedule) {
   Object.assign(time, { type: 'time', value: '09:00', required: true });
   time.setAttribute('aria-label', 'Time');
   const zone = node('span', 'cron-zone', zoneName(browserZone));
-  const add = node('button', 'dialog-button primary', 'Add');
+  const add = node('button', 'button primary', 'Add');
   add.type = 'submit';
   const when = node('div', 'cron-form-when');
   when.append(repeat, weekday, time, zone, add);
