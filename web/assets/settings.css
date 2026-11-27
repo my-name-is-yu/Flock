@@ -63,12 +63,6 @@ input:focus-visible, select:focus-visible {
   border-color: var(--focus-border);
   box-shadow: var(--focus-halo);
 }
-:where(.settings-shell, .installation-dialog) .button:not(.primary, .quiet, .danger, .quiet-danger) {
-  border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
-}
-:where(.settings-shell, .installation-dialog) .button:not(.primary, .quiet, .danger, .quiet-danger):hover:not(:disabled) {
-  background: var(--hover);
-}
 .row-label { display: grid; gap: .1rem; min-width: 0; }
 .row-label strong { color: var(--text); font-size: var(--text-sm); font-weight: 600; }
 .row-label small { color: var(--text-3); font-size: var(--text-xs); overflow-wrap: anywhere; }

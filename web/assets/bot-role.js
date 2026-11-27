@@ -5,7 +5,7 @@ export function createBotRoleCard(saveRole) {
   element.innerHTML = `
     <div class="settings-card-header">
       <h3 class="settings-card-label" id="settings-role-label">Role</h3>
-      <button type="button" class="text-button settings-card-edit" aria-label="Edit role">Edit</button>
+      <button type="button" class="button settings-card-edit" aria-label="Edit role">Edit</button>
     </div>
     <p class="settings-soul" id="settings-role-text" data-folded="true"></p>
     <button type="button" class="text-button settings-soul-toggle" aria-expanded="false"
