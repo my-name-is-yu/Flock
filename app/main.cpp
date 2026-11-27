@@ -53,7 +53,6 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -186,7 +185,7 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
-int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
+int t3Command(Arguments& args, const std::filesystem::path& home) {
     const auto action = args.pop("T3 command");
     if (action != "connect" && action != "reconnect" && action != "disconnect") throw Conflict("Unknown T3 command");
     if (action == "disconnect") {
@@ -217,13 +216,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
     if (result.portChanged)
-        std::cerr << "T3 skills use Flock Web port " << result.port << ". Restart 'flock run' if it is already running.\n";
-    try {
-        auto store = openStore(home);
-        syncT3Skills(activeBotCards(store, bots.skillCards()));
-    } catch (const std::exception& error) {
-        std::cerr << "Could not export T3 skills: " << error.what() << '\n';
-    }
+        std::cerr << "Flock Session tools use Web port " << result.port << ". Restart 'flock run' if it is already running.\n";
     print({{"environmentId", result.environmentId},
            {"connected", true},
            {"port", result.port},
@@ -305,7 +298,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto identities = access.identities();
     options.sessionRead = system.sessionRead();
     const auto savedPort = T3Connections(store).port();
-    if (savedPort && !web) std::cerr << "Warning: T3 skills cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
+    if (savedPort && !web)
+        std::cerr << "Warning: Flock Session tools cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
     if (const auto token = connections.githubToken(); !token.empty()) {
         options.gitHost = makeGitHubHost(token);
         GitEvents(store).protectGitCredential(token);
@@ -333,24 +327,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store, *model, *t3, soul, options);
     bots.syncSchedules(store, options.clock(), reportSchedule);
-    Json exportedBots;
-    // Web callbacks and the filesystem refresh both update the same on-disk skills.
-    std::mutex skillMutex;
-    auto syncSkills = [&](bool providersChanged = false) {
-        if (!T3Connections(store).configured()) return;
-        std::lock_guard lock(skillMutex);
-        if (providersChanged) exportedBots = nullptr;
-        try {
-            auto descriptions = activeBotCards(store, bots.skillCards());
-            if (descriptions != exportedBots) {
-                syncT3Skills(descriptions);
-                exportedBots = std::move(descriptions);
-            }
-        } catch (const std::exception& error) {
-            std::cerr << "Could not refresh T3 skills: " << error.what() << '\n';
-        }
-    };
-    if (web) syncSkills();
     WebCallbacks callbacks{
         [&] { return activeBotCards(store, bots.cards()); },
         intake,
@@ -360,7 +336,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                     BotAccess{store}.rememberProjectAssignment(creator, bot, environment, project);
                 });
             });
-            syncSkills();
             return created;
         },
         {},
@@ -386,11 +361,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         const auto catalog = field(profile, "reasoningEffort").empty() ? Json::array() : loadSetupModelCatalog();
         if (profile.contains("sessionModel") || profile.contains("workspaceStrategy"))
             return bots.saveSetup(&store, botId, {profile, {}}, options.clock(), reportSchedule, catalog);
-        auto updated = botRunSettingCount(profile)
-                           ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor)
-                           : bots.updateProfile(botId, profile, image);
-        syncSkills();
-        return updated;
+        return botRunSettingCount(profile)
+                   ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor)
+                   : bots.updateProfile(botId, profile, image);
     };
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
@@ -411,7 +384,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     callbacks.botChannels = [&](std::string_view bot) { return connections.botChannels(bot); };
     callbacks.changeBotChannel = [&](std::string_view bot, const Json& args) { return connections.changeBotChannel(bot, args, store); };
-    T3WebSetup t3Setup(home, [&] { syncSkills(true); });
+    T3WebSetup t3Setup(home);
     t3Setup.configure(callbacks, store, !fixed);
     std::unique_ptr<WebServer> server;
     if (web) {
@@ -436,12 +409,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::signal(SIGTERM, requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
-    auto nextSkillRefresh = std::chrono::steady_clock::now();
     while (!stopRequested) {
-        if (web && std::chrono::steady_clock::now() >= nextSkillRefresh) {
-            syncSkills();
-            nextSkillRefresh = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        }
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -523,7 +491,7 @@ int runCli(Arguments& args) {
     }
     if (command == "model") return modelCommand(args, home);
     Bots bots(home / "bots");
-    if (command == "t3") return t3Command(args, home, bots);
+    if (command == "t3") return t3Command(args, home);
     if (command == "external-mcp") return externalMcpCommand(args, home, bots);
     if (command == "bots") {
         args.end();

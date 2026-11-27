@@ -1018,8 +1018,6 @@ def test_connection_setup(server, flock, temp):
     directory = Path(temp)
     state = directory / "flock"
     codex_config = directory / "config.toml"
-    claude_skills = directory / "claude-skills"
-    codex_skills = directory / "codex-skills"
     claude_config = directory / ".claude.json"
     original_claude = b'{ "z-last" : [1,  2], "mcpServers":{}, "a-first" : true }\n'
     claude_config.write_bytes(original_claude)
@@ -1061,8 +1059,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     claude.chmod(0o700)
     env = dict(os.environ, HOME=str(directory), FLOCK_CODEX_CONFIG=str(codex_config),
                FLOCK_CLAUDE_CONFIG=str(claude_config),
-               FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true",
-               FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
+               FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true")
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
     t3_home = directory / "t3-fixture-home"
@@ -1127,10 +1124,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
             }
         assert token.encode() not in (state / "flock.sqlite3").read_bytes()
-        for root in ([codex_skills, claude_skills] if has_claude else [codex_skills]):
-            assert (root / "flock" / "SKILL.md").is_file()
-            skill = (root / "flock-reviewer" / "SKILL.md").read_text()
-            assert "Reviewer" in skill and "Pass `reviewer` as bot" in skill and token not in skill
+        assert not (directory / ".claude" / "skills").exists() and not (directory / ".agents" / "skills").exists()
         return token
 
     working_command = command
@@ -1206,7 +1200,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             with selectors.DefaultSelector() as selector:
                 selector.register(headless.stderr, selectors.EVENT_READ)
                 assert selector.select(5), "headless startup did not warn about the MCP endpoint"
-                assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+                assert "Flock Session tools cannot reach Flock" in headless.stderr.readline()
         finally:
             headless.terminate()
             headless.wait(timeout=8)

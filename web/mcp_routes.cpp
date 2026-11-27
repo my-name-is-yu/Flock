@@ -3,7 +3,7 @@
 #include "views.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/participation.hpp"
-#include "flock/skill_export.hpp"
+#include "flock/bot_id.hpp"
 #include "flock/json.hpp"
 #include "flock/policy.hpp"
 #include "flock/t3_connection.hpp"
@@ -30,6 +30,10 @@ constexpr std::string_view submitTool = "flock_submit_task";
 constexpr std::string_view statusTool = "flock_get_task";
 constexpr std::string_view answerTool = "flock_answer_question";
 constexpr std::string_view mcpProtocol = "2025-11-25";
+constexpr std::string_view sessionInstructions =
+    "Flock Bots are teammates the person set up in Flock, each with its own role. When the person asks for a Bot by name "
+    "or role, or wants a Bot's help in this Session, call flock_bots to find it and pass its id to flock_ask. "
+    "Bot messages arrive in this Session prefixed with the Bot's name. Use flock_stop when the person asks to remove a Bot.";
 
 struct InvalidToolArguments {
     std::string message = "Invalid tool arguments";
@@ -197,20 +201,16 @@ Json callSessionTool(Store& store, const WebCallbacks& callbacks, const T3Connec
         if (!arguments.empty()) throw InvalidToolArguments{};
         const auto actor = participation.person(connection);
         const auto bots = callbacks.bots();
-        const auto names = flockSkillNames(bots);
         auto rows = Json::array();
         for (const auto& bot : bots) {
             const auto botId = bot.value("id", std::string{});
-            if (!names.contains(botId) || !Policy{store}.allows(actor, Action::bot_decide, botId)) continue;
+            if (!validBotId(botId) || !Policy{store}.allows(actor, Action::bot_decide, botId)) continue;
             try {
                 if (callbacks.intake(botId, "").botId != botId) continue;
             } catch (const std::exception&) {
                 continue;
             }
-            rows.push_back({{"id", botId},
-                            {"name", bot.value("name", botId)},
-                            {"role", bot.value("role", std::string("custom"))},
-                            {"skill", names.at(botId)}});
+            rows.push_back({{"id", botId}, {"name", bot.value("name", botId)}, {"role", bot.value("role", std::string("custom"))}});
         }
         return structuredResult({{"bots", std::move(rows)}});
     }
@@ -271,7 +271,8 @@ bool acceptMcpPost(const httplib::Request& req, httplib::Response& res) {
     return true;
 }
 
-void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*toolDefinitions)(), const auto& callTool) {
+void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*toolDefinitions)(), std::string_view instructions,
+                const auto& callTool) {
     const auto message = Json::parse(req.body, nullptr, false);
     if (message.is_discarded()) return rpcError(res, 400, nullptr, -32700, "Invalid JSON");
     if (!message.is_object() || message.value("jsonrpc", Json(nullptr)) != "2.0" || !message.contains("method") ||
@@ -292,10 +293,11 @@ void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*tool
         const auto protocol = params.find("protocolVersion");
         if (protocol == params.end() || !protocol->is_string()) return rpcError(res, 200, *id, -32602, "A protocol version is required");
         const auto requested = protocol->get<std::string>();
-        return rpcResult(res, *id,
-                         {{"protocolVersion", supportedProtocol(requested) ? std::string_view(requested) : mcpProtocol},
-                          {"serverInfo", {{"name", "flock"}, {"version", "1.0.0"}}},
-                          {"capabilities", {{"tools", Json::object()}}}});
+        Json result{{"protocolVersion", supportedProtocol(requested) ? std::string_view(requested) : mcpProtocol},
+                    {"serverInfo", {{"name", "flock"}, {"version", "1.0.0"}}},
+                    {"capabilities", {{"tools", Json::object()}}}};
+        if (!instructions.empty()) result["instructions"] = instructions;
+        return rpcResult(res, *id, std::move(result));
     }
     if (method == "ping") return rpcResult(res, *id, Json::object());
     if (method == "tools/list") return rpcResult(res, *id, {{"tools", toolDefinitions()}});
@@ -329,7 +331,7 @@ void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
         if (!connection) return requireBearer(res);
         if (!acceptMcpPost(req, res)) return;
         if (!callbacks.sessionT3) return rpcError(res, 503, nullptr, -32603, "Flock Session tools are unavailable");
-        mcpRequest(req, res, sessionToolDefinitions,
+        mcpRequest(req, res, sessionToolDefinitions, sessionInstructions,
                    [&](const Json& tool, const Json& args) { return callSessionTool(store, callbacks, *connection, tool, args); });
     });
     registerMcp(server, externalMcpPath, [&store, &callbacks](const httplib::Request& req, httplib::Response& res) {
@@ -337,7 +339,7 @@ void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
         const auto connection = external.authenticate(bearerToken(req));
         if (!connection) return requireBearer(res);
         if (!acceptMcpPost(req, res)) return;
-        mcpRequest(req, res, externalToolDefinitions,
+        mcpRequest(req, res, externalToolDefinitions, {},
                    [&](const Json& tool, const Json& args) { return callExternalTool(callbacks, external, *connection, tool, args); });
     });
 }

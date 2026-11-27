@@ -1079,7 +1079,9 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     auto server = startWeb(*db, 0, cb);
     Mcp mcp(*server, token);
     check(Mcp(*server, "").request("tools/list", Json::object(), 401).contains("error"), "MCP accepted an absent bearer");
-    mcp.request("initialize", {{"protocolVersion", "2025-06-18"}});
+    const auto instructions = mcp.request("initialize", {{"protocolVersion", "2025-06-18"}}).at("result").value("instructions", "");
+    check(instructions.find("flock_bots") != std::string::npos && instructions.find("flock_ask") != std::string::npos,
+          "Session MCP does not tell the agent how to reach Flock Bots");
     const auto tools = mcp.request("tools/list", Json::object()).at("result").at("tools");
     check(tools.size() == 3 && tools[0].at("name") == "flock_bots" && tools[1].at("name") == "flock_ask" &&
               tools[2].at("name") == "flock_stop",
@@ -1090,6 +1092,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
           "flock_ask still accepts a mode");
     const auto bots = mcp.call("flock_bots").at("structuredContent").at("bots");
     check(bots.size() == 1 && bots.front().at("id") == "release", "Bot catalog bypassed membership");
+    check(!bots.front().contains("skill"), "Bot catalog still names an exported skill");
 
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization", aliceCredential}});

@@ -55,7 +55,7 @@ unsigned SettingsSystem::startupPort(unsigned t3Port) const {
     std::lock_guard lock(mutex_);
     if (cliPort_) {
         if (t3Port && *cliPort_ != t3Port)
-            throw Conflict("T3 skills use the saved Web port " + std::to_string(t3Port) +
+            throw Conflict("Flock Session tools use the saved Web port " + std::to_string(t3Port) +
                            ". Omit --port or change the port in Flock settings.");
         return *cliPort_;
     }

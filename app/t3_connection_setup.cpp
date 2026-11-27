@@ -117,8 +117,7 @@ void disconnectT3(Store& store, const std::optional<std::string>& environment) {
     }
 }
 
-T3WebSetup::T3WebSetup(std::filesystem::path home, std::function<void()> onConnected)
-    : home_(std::move(home)), onConnected_(std::move(onConnected)) {}
+T3WebSetup::T3WebSetup(std::filesystem::path home) : home_(std::move(home)) {}
 
 void T3WebSetup::configure(WebCallbacks& callbacks, Store& store, bool live) {
     callbacks.t3Disconnect = [&store](const std::optional<std::string>& environment) { disconnectT3(store, environment); };
@@ -161,7 +160,6 @@ bool T3WebSetup::start(const Person& actor, const T3ConnectRequest& request) {
                     authorizationUrl_ = url;
                 },
                 stop, actor);
-            onConnected_();
         } catch (const Conflict& failure) {
             error = failure.what();
         } catch (const std::exception&) {
