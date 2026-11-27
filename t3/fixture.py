@@ -334,8 +334,8 @@ class Fixture(BaseHTTPRequestHandler):
                 run = "manual-run" if state.get("selectedBadReceipt") else "selected-run"
                 return {"threadId": thread, "runId": run, "messageId": "selected-message",
                         "delivery": "queued" if state.get("selectedBusy") else "started", "link": "t3://" + thread}
-            assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
-            assert args["clientRequestId"] == "flock-action-01234"
+            assert scenario in ("settled", "participant-later") and args["mode"] == "queue" and args["threadId"] == "thread"
+            assert args["clientRequestId"].startswith("flock-action-")
             state["followup"] = args["message"]
             return {"threadId": "thread", "runId": "follow", "delivery": "started", "link": "t3://thread"}
         if name == "t3_queue":
@@ -533,7 +533,7 @@ class Fixture(BaseHTTPRequestHandler):
         if state.get("sessionAskFixture") and thread_id not in ("thread", "other-thread"):
             return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found"}
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
-        latest = "later" if scenario.endswith("-result") else (active or "root")
+        latest = "later" if scenario.endswith("-result") or scenario == "participant-later" else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
         if state.get("sessionWakeFixture"):
             if state["botRunStatus"] == "running":
@@ -587,6 +587,10 @@ class Fixture(BaseHTTPRequestHandler):
                 rows[1]["updatedAt"] = "2026-11-22T00:00:01.000Z"
         if scenario.endswith("-result"):
             self.result_history(thread_id, scenario, recent, rows)
+        if scenario == "participant-later":
+            # An invited Bot posted after the owned Run settled, which started a newer Run.
+            recent.insert(0, {"runId": "later", "ordinal": len(recent) + 1, "status": "completed"})
+            rows.append(self.item(thread_id, 2, "later", "user_message", "Invited Bot reply", source="mcp"))
         if scenario in ("question", "ambiguous", "race"):
             rows.append(self.item(thread_id, 5, "root", "user_input_request", json.dumps(questions), status="waiting"))
         if scenario == "ambiguous":
