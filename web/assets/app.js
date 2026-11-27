@@ -1204,7 +1204,7 @@ async function copyMessage(control, text) {
       control.setAttribute('aria-label', 'Copy text');
       control.dataset.tooltip = 'Copy text';
     }, 1600);
-  } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
+  } catch { if (view) setNotice(view, 'Couldn’t copy the text.', true); }
 }
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
@@ -1420,7 +1420,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     context.pendingSource = null;
     if (signal?.aborted) return;
     if (!page) {
-      error.textContent = 'Could not load that message.';
+      error.textContent = 'Couldn’t load that message.';
       return;
     }
     const event = page.events.find((item) => item.id === id);
@@ -1513,7 +1513,7 @@ function memoryUndo(event, context, status) {
         status.textContent = 'Memory has changed.';
         if (context === view) void context.refresh();
       } else {
-        status.textContent = 'Could not undo. Try again.';
+        status.textContent = 'Couldn’t undo. Try again.';
         undo.removeAttribute('aria-disabled');
       }
       return;
@@ -2011,7 +2011,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const peerStatus = elements['peer-status'];
   const olderFailed = view?.dm?.olderFailed;
   peerStatus.hidden = !olderFailed;
-  const peerLabel = olderFailed ? 'Could not load earlier messages.' : '';
+  const peerLabel = olderFailed ? 'Couldn’t load earlier messages.' : '';
   if (peerStatus.textContent !== peerLabel) peerStatus.textContent = peerLabel;
   const scroller = elements.conversation;
   const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id, context.peerId);
@@ -2789,7 +2789,7 @@ elements['composer-banner-action'].addEventListener('click', async (event) => {
     await setBotPaused(bot, false);
     if (view === context && !elements.composer.hidden) elements.message.focus({ preventScroll: true });
   } catch {
-    context.resumeError = 'Could not resume this Bot. Try again.';
+    context.resumeError = 'Couldn’t resume this Bot. Try again.';
     if (view === context) renderComposer();
   } finally {
     control.disabled = false;
@@ -2862,7 +2862,7 @@ function generalContent(bot) {
         statusNote.classList.add('error');
         statusNote.textContent = error.message === 'invalid_name'
           ? 'Enter a name between 1 and 32 characters.'
-          : 'Could not rename this Bot.';
+          : 'Couldn’t rename this Bot.';
         statusNote.hidden = false;
         renderNameDisplay();
       }
@@ -3212,7 +3212,7 @@ async function refreshPeerConversation(context, scroll) {
   } catch (error) {
     if (!isCurrent()) return;
     const unavailable = error.status === 403 || error.status === 404;
-    if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Couldn’t load this conversation.';
     else if (unavailable) {
       leavePeerConversation(false);
       return;
@@ -3316,7 +3316,7 @@ async function loadOlder() {
   } catch {
     if (context !== timelineContext()) return;
     if (context.peerId) context.olderFailed = true;
-    else setNotice(context, 'Could not load earlier messages.', true);
+    else setNotice(context, 'Couldn’t load earlier messages.', true);
   }
   finally {
     context.loadingOlder = false;
@@ -3334,7 +3334,7 @@ async function loadSessions() {
     if (context !== view) return;
     mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
-  } catch { if (context === view) setNotice(context, 'Could not load earlier requests.', true); }
+  } catch { if (context === view) setNotice(context, 'Couldn’t load earlier requests.', true); }
   finally {
     context.loadingSessions = false;
     if (context === view) renderActivity();

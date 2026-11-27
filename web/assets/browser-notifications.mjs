@@ -144,7 +144,7 @@ export function createBrowserNotifications({
           if (current === state) state = null;
           return;
         }
-        if (!response.ok) throw new Error('Could not load notifications');
+        if (!response.ok) throw new Error('Couldn’t load notifications');
         const viewer = response.headers.get('X-Flock-Viewer');
         const page = await response.json();
         if (current !== state || !browserNotificationsEnabled()) return;

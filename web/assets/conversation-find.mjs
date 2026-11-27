@@ -60,7 +60,7 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     let announcement = '';
     if (busy) announcement = 'Searching…';
     else if (denied) announcement = 'Conversation unavailable';
-    else if (error) announcement = 'Could not search messages';
+    else if (error) announcement = 'Couldn’t search messages';
     else if (count) announcement = `${index + 1} of ${count} ${count === 1 ? 'match' : 'matches'}${before ? ' so far' : ''}`;
     else if (search) announcement = before ? 'No matches so far' : 'No matches';
     if (status.textContent !== announcement) status.textContent = announcement;

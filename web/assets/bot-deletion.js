@@ -51,7 +51,7 @@ export function mountBotDeletion(dialog, { remove, onDeleted, focusFallback }) {
     catch (error) { errorCode = error?.message || 'unknown'; }
     cancel.disabled = confirm.disabled = false;
     if (errorCode && errorCode !== 'bot_not_found') {
-      showFeedback(errors.get(errorCode) ?? 'Could not delete this Bot. Try again.', true);
+      showFeedback(errors.get(errorCode) ?? 'Couldn’t delete this Bot. Try again.', true);
       confirm.focus();
       return;
     }

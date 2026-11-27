@@ -85,7 +85,7 @@ export function setupNotice(event, canUndo, undoChange) {
       try {
         await undoChange();
       } catch (error) {
-        status.textContent = error.status === 409 ? 'Bot settings have changed since this update.' : 'Could not undo. Try again.';
+        status.textContent = error.status === 409 ? 'Bot settings have changed since this update.' : 'Couldn’t undo. Try again.';
         undo.disabled = error.status === 409;
       }
     });
