@@ -8,6 +8,11 @@ function fixtures() {
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'See https://example.com/pull/12', textHtml: link } },
     { id: 2, kind: 'conversation_reply', time: time + 10, data: { text: 'See https://example.com/pull/12', textHtml: link } },
+    { id: 3, kind: 'report', taskId: 1, time: time + 20,
+      data: { report: 'PR is **OPEN**', textHtml: '<p>PR is <strong>OPEN</strong></p><ul><li>one</li></ul><p>Last line</p>', status: 'completed' } },
+    { id: 4, kind: 'completed', taskId: 1, time: time + 30,
+      data: { text: 'Done with `code`', textHtml: '<p>Done with <code>code</code></p>', runStatus: 'completed' } },
+    { id: 5, kind: 'report', taskId: 1, time: time + 40, data: { evidenceStatus: 'report_unavailable', report: '**kept**', textHtml: '<p><strong>kept</strong></p>' } },
   ];
   window.fetch = async (path) => {
     if (path === '/api/bots') return Response.json([bot]);
@@ -30,6 +35,15 @@ async function exercise() {
   check(links.length === 2, 'The message links did not render');
   check(links.every((link) => link.target === '_blank' && link.rel === 'noopener noreferrer'),
     'A message link would replace the conversation');
+  const report = document.querySelector('#event-3 .event-text');
+  check(report.querySelector('strong')?.textContent === 'OPEN' && report.querySelector('li') && !report.textContent.includes('**'),
+    'A task report showed its Markdown as typed');
+  check(report.classList.contains('foldable-text'), 'A rendered task report can no longer be folded');
+  const completed = document.querySelector('#event-4 .event-text');
+  check(completed.querySelector('p code') && completed.querySelector('p > .kind-icon'),
+    'A completed result lost its Markdown or put its status icon on a separate line');
+  check(!document.querySelector('#event-5 strong') && !document.querySelector('#event-5 .event-text').textContent.includes('kept'),
+    'A report that could not be loaded showed report text');
   const rootStyle = getComputedStyle(document.documentElement);
   check(rootStyle.getPropertyValue('--dur-medium').trim() === '240ms', 'Missing --dur-medium token');
   const botQuote = getComputedStyle(document.querySelector('#event-2 blockquote'));

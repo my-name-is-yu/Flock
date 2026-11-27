@@ -167,6 +167,9 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     if (kind != "bot_message") copyFields(view, event, {"taskId"});
     const auto& data = event.at("data");
     Json details = Json::object();
+    const auto renderMarkdown = [&](const char* key) {
+        if (const auto text = field(data, key); !text.empty()) details["textHtml"] = markdown::toHtml(text, sensitive);
+    };
     if (kind == "waiting")
         details = data;
     else if (kind == "request") {
@@ -191,6 +194,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             *avatar = avatarView(*avatar, {});
     } else if (kind == "completed") {
         copyFields(details, data, {"text", "revisionId", "runOutcome", "requestedCommit"});
+        renderMarkdown("text");
         if (data.contains("source")) {
             const auto& source = data.at("source");
             auto run = runView(source, field(source, "environmentId"));
@@ -203,6 +207,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         }
     } else if (kind == "bot_message") {
         copyFields(details, data, {"exchangeId", "messageId", "fromBotId", "toBotId", "messageType", "requestKind", "text", "replyTo"});
+        renderMarkdown("text");
         if (const auto forwarded = data.find("forwardedMessage"); forwarded != data.end() && forwarded->is_object()) {
             const auto text = field(*forwarded, "text");
             const auto time = forwarded->find("time");
@@ -217,6 +222,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         if (data.contains("evidenceStatus")) copyFields(details, data, {"evidenceStatus"});
         if (data.contains("evidenceStatus") || data.contains("destination")) copyFields(details, data, {"detail"});
         details["run"] = runView(data.at("run"), field(data, "environmentId"));
+        renderMarkdown("report");
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details, data, {"text", "messageId", "replyToMessageId", "taskId", "route", "status", "deliveredToT3"});
         details["textHtml"] = markdown::toHtml(field(data, "text"), sensitive);
