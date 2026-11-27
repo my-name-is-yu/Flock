@@ -621,7 +621,7 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   }
   for (const {person, adminRoot, pendingUntil: pendingPassword} of users) {
     const owner = person === 'local-owner';
-    const role = owner ? 'Flock owner' : adminRoot ? 'Administrator' : 'Member';
+    const role = owner ? 'Installation owner' : adminRoot ? 'Administrator' : 'Member';
     const item = row('access', rowLabel(person, person === currentPerson ? `${role} · You` : role));
     if (mode !== 'managed') continue;
     const actions = element('div', '', 'row-actions');
