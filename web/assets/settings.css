@@ -254,6 +254,8 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 }
 .invite-credential { margin-block: var(--space-3); }
 .invite-credential input { width: 100%; }
+.remote-setup textarea { width: 100%; resize: none; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.remote-setup .button { justify-self: end; }
 .connection-test-result {
   margin: var(--space-3) 0 0; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere;
 }

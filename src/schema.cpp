@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 27;
+constexpr Id schemaVersion = 28;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -232,6 +232,8 @@ CREATE TABLE t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
  token_digest TEXT NOT NULL, port INTEGER NOT NULL);
 CREATE TABLE t3_connected_environments(environment_id TEXT PRIMARY KEY);
+CREATE TABLE t3_remote_machines(
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, person_id TEXT NOT NULL, token_digest TEXT NOT NULL UNIQUE);
 
 CREATE TABLE channel_messages(
       message_id INTEGER PRIMARY KEY REFERENCES messages(id),

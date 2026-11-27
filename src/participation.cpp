@@ -49,6 +49,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -195,11 +196,45 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
     if (!connector_credentials::validBearer(token, tokenPrefix)) return {};
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
-    auto row = storage.database.query("SELECT id,person_id FROM t3_connector WHERE token_digest=?"
-                                      " AND EXISTS(SELECT 1 FROM t3_connected_environments)",
+    auto row = storage.database.query(R"SQL(
+SELECT c.id,c.person_id,r.id FROM t3_connector c
+LEFT JOIN t3_remote_machines r ON r.token_digest=?1 AND r.person_id=c.person_id AND c.token_digest<>?1
+WHERE (c.token_digest=?1 OR r.id IS NOT NULL) AND EXISTS(SELECT 1 FROM t3_connected_environments)
+)SQL",
                                       {digest(token)});
     if (!row.next()) return {};
-    return T3Connection{row.string(0), row.string(1)};
+    return T3Connection{row.string(0), row.string(1), row.null(2) ? std::nullopt : std::optional{row.string(2)}};
+}
+
+T3RemoteCredential T3Connections::addRemoteMachine(std::string_view name) {
+    if (name.empty() || name.size() > 128 || std::ranges::any_of(name, [](unsigned char c) { return c < 32 || c == 127; }))
+        throw Conflict("Enter a machine name up to 128 characters");
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    auto connector = storage.database.query("SELECT person_id FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
+    if (!connector.next()) throw Conflict("Connect T3 before adding another machine");
+    const auto person = connector.string(0);
+    auto count = storage.database.query("SELECT COUNT(*) FROM t3_remote_machines");
+    if (count.next() && count.number(0) >= 64) throw Conflict("Flock supports up to 64 other machines");
+    T3RemoteCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
+    storage.database.exec("INSERT INTO t3_remote_machines VALUES(?,?,?,?)", {credential.id, name, person, digest(credential.bearerToken)});
+    return credential;
+}
+
+std::vector<T3RemoteMachine> T3Connections::remoteMachines() const {
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    auto rows = storage.database.query("SELECT id,name FROM t3_remote_machines ORDER BY name,id");
+    std::vector<T3RemoteMachine> machines;
+    while (rows.next()) machines.push_back({rows.string(0), rows.string(1)});
+    return machines;
+}
+
+bool T3Connections::removeRemoteMachine(std::string_view id) {
+    auto& storage = StoreAccess::get(store_);
+    std::lock_guard lock(storage.database.mutex);
+    storage.database.exec("DELETE FROM t3_remote_machines WHERE id=?", {id});
+    return sqlite3_changes(storage.database.db) == 1;
 }
 
 std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person, bool installationRoot) const {
@@ -243,10 +278,14 @@ Person SessionParticipationStorage::sessionActor(std::string_view person) {
 Person SessionParticipation::person(const T3Connection& connection) const {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
+    const auto machine = connection.remoteMachineId ? Json(*connection.remoteMachineId) : Json(nullptr);
     if (!storage.database
-             .query("SELECT 1 FROM t3_connector WHERE id=? AND person_id=? "
-                    "AND EXISTS(SELECT 1 FROM t3_connected_environments)",
-                    {connection.id, connection.personId})
+             .query(R"SQL(
+SELECT 1 FROM t3_connector WHERE id=?1 AND person_id=?2
+AND EXISTS(SELECT 1 FROM t3_connected_environments)
+AND (?3 IS NULL OR EXISTS(SELECT 1 FROM t3_remote_machines WHERE id=?3 AND person_id=?2))
+)SQL",
+                    {connection.id, connection.personId, machine})
              .next())
         throw Conflict("The T3 connection is unavailable");
     const auto actor = storage.sessionParticipationStorage.sessionActor(connection.personId);

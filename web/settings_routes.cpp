@@ -111,6 +111,15 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                     {{"environmentId", id}, {"authorization", callbacks.t3Connection ? callbacks.t3Connection(id) : Json(nullptr)}});
             }
         }
+        Json remote = nullptr;
+        if (canManage) {
+            auto machines = Json::array();
+            for (const auto& machine : connections.remoteMachines()) machines.push_back({{"id", machine.id}, {"name", machine.name}});
+            if (connection || !machines.empty()) {
+                const auto url = callbacks.remoteSessionMcpUrl ? callbacks.remoteSessionMcpUrl() : std::string{};
+                remote = {{"url", url.empty() ? Json(nullptr) : Json(url)}, {"machines", std::move(machines)}};
+            }
+        }
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res, 200,
@@ -122,6 +131,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                {"personOnlyActions", std::move(personActionNames)},
                {"canDisconnectT3", canDisconnectT3},
                {"t3CleanupPending", t3CleanupPending},
+               {"remoteMachines", std::move(remote)},
                {"t3", connection ? Json{{"port", connection->port}, {"environments", std::move(environments)}} : Json(nullptr)}});
     });
     server.Get("/api/settings/projects", [&](const httplib::Request& req, httplib::Response& res) {
@@ -318,6 +328,30 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 403, {{"error", "access_denied"}});
         } catch (const std::exception&) {
             reply(res, 500, {{"error", "disconnect_failed"}});
+        }
+    });
+    server.Post("/api/settings/remote-machine", [&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 4096) return reply(res, 413, {{"error", "payload_too_large"}});
+        try {
+            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw DecisionDenied{};
+            const auto args = Json::parse(req.body);
+            if (!args.is_object() || args.size() != 1) return reply(res, 400, {{"error", "invalid_input"}});
+            T3Connections connections(store);
+            if (args.contains("remove")) {
+                if (!connections.removeRemoteMachine(args.at("remove").get<std::string>()))
+                    return reply(res, 404, {{"error", "not_found"}});
+                return reply(res, 200, {{"ok", true}});
+            }
+            const auto url = callbacks.remoteSessionMcpUrl ? callbacks.remoteSessionMcpUrl() : std::string{};
+            if (url.empty()) return reply(res, 409, {{"error", "remote_unavailable"}});
+            const auto credential = connections.addRemoteMachine(args.at("name").get<std::string>());
+            reply(res, 201, {{"id", credential.id}, {"url", url}, {"bearerToken", credential.bearerToken}});
+        } catch (const Json::exception&) {
+            reply(res, 400, {{"error", "invalid_input"}});
+        } catch (const DecisionDenied&) {
+            reply(res, 403, {{"error", "access_denied"}});
+        } catch (const Conflict& error) {
+            reply(res, 409, {{"error", "invalid_input"}, {"message", error.what()}});
         }
     });
     server.Post(R"(/api/settings/(mode|rule))", [&](const httplib::Request& req, httplib::Response& res) {

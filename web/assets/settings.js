@@ -5,7 +5,7 @@ import {
   setBrowserNotifications,
 } from '/browser-notifications.mjs';
 import {
-  confirmSetting, loadInstallation, postSettings, showInstallationUnavailable, statusBadge,
+  confirmSetting, loadInstallation, postSettings, renderRemoteMachines, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
 import { showAvatar } from '/avatars.js';
 import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
@@ -332,6 +332,7 @@ function applyConnections(data) {
   t3Setup = data.t3Setup;
   if (t3Setup?.authorizationUrl || !t3Setup?.running) releaseApprovalTab(t3Setup?.authorizationUrl);
   renderConnections(data);
+  renderRemoteMachines(data.remoteMachines, Boolean(data.t3), refreshConnections);
   updateConnectionButtons();
   pollConnections();
 }

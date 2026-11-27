@@ -7,6 +7,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <netdb.h>
+#include <netinet/in.h>
+
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -27,6 +30,36 @@ std::string sessionReadSetting(const Json& value) {
     return value.get<std::string>();
 }
 
+bool reachableFromOtherMachines(const std::string& address) {
+    addrinfo hints{};
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(address.c_str(), nullptr, &hints, &found) != 0) return true;
+    bool reachable = true;
+    for (auto* entry = found; entry; entry = entry->ai_next) {
+        if (entry->ai_family == AF_INET) {
+            const auto ip = ntohl(reinterpret_cast<const sockaddr_in*>(entry->ai_addr)->sin_addr.s_addr);
+            reachable = reachable && ip != INADDR_ANY && (ip >> 24) != IN_LOOPBACKNET;
+        } else if (entry->ai_family == AF_INET6) {
+            const auto& ip = reinterpret_cast<const sockaddr_in6*>(entry->ai_addr)->sin6_addr;
+            reachable = reachable && !IN6_IS_ADDR_UNSPECIFIED(&ip) && !IN6_IS_ADDR_LOOPBACK(&ip) && !IN6_IS_ADDR_V4MAPPED(&ip);
+        }
+    }
+    freeaddrinfo(found);
+    return reachable;
+}
+
+void validateRemoteAddress(const Json& value) {
+    if (value.is_null()) return;
+    constexpr auto invalid = "Enter this computer's address on a private network, such as its Tailscale IP or name.";
+    if (!value.is_string()) throw Conflict(invalid);
+    const auto& address = value.get_ref<const std::string&>();
+    if (address.empty() || address.size() > 253 ||
+        address.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:") != address.npos)
+        throw Conflict(invalid);
+    if (address == "localhost" || !reachableFromOtherMachines(address)) throw Conflict(invalid);
+}
+
 void validate(const Json& settings) {
     if (!settings.is_object()) throw Conflict("Invalid saved system settings.");
     for (const auto& [key, value] : settings.items()) {
@@ -34,6 +67,8 @@ void validate(const Json& settings) {
             if (!value.is_null()) (void)portSetting(value);
         } else if (key == "sessionRead") {
             if (!value.is_null()) (void)sessionReadSetting(value);
+        } else if (key == "remoteAddress") {
+            validateRemoteAddress(value);
         } else
             throw Conflict("Unknown system setting.");
     }
@@ -49,6 +84,8 @@ SettingsSystem::SettingsSystem(const std::filesystem::path& home, std::optional<
     startupPortSetting_ = saved_.value("port", Json(nullptr));
     const auto mode = saved_.value("sessionRead", Json(nullptr));
     activeSessionRead_ = cliSessionRead.value_or(mode.is_null() ? "off" : mode.get<std::string>());
+    const auto remoteAddress = saved_.value("remoteAddress", Json(nullptr));
+    if (!remoteAddress.is_null()) activeRemoteAddress_ = remoteAddress.get<std::string>();
 }
 
 unsigned SettingsSystem::startupPort(unsigned t3Port) const {
@@ -97,11 +134,13 @@ Json SettingsSystem::viewLocked(unsigned t3Port) const {
     const auto nextRead = cliSessionRead_ ? Json(activeSessionRead_) : savedRead.is_null() ? Json("off") : savedRead;
     const bool pendingPort = !cliPort_ && (nextPort ? nextPort != activePort_.value_or(0) : !startupPortSetting_.is_null());
     const bool pendingRead = nextRead != activeSessionRead_;
-    return {{"active", {{"port", activePort}, {"sessionRead", activeSessionRead_}}},
-            {"saved", {{"port", savedPort}, {"sessionRead", savedRead}}},
-            {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}}},
-            {"overrides", {{"port", cliPort_.has_value()}, {"sessionRead", cliSessionRead_}}},
-            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}}}};
+    const auto activeRemote = activeRemoteAddress_ ? Json(*activeRemoteAddress_) : Json(nullptr);
+    const auto nextRemote = saved_.value("remoteAddress", Json(nullptr));
+    return {{"active", {{"port", activePort}, {"sessionRead", activeSessionRead_}, {"remoteAddress", activeRemote}}},
+            {"saved", {{"port", savedPort}, {"sessionRead", savedRead}, {"remoteAddress", nextRemote}}},
+            {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}, {"remoteAddress", nextRemote}}},
+            {"overrides", {{"port", cliPort_.has_value()}, {"sessionRead", cliSessionRead_}, {"remoteAddress", false}}},
+            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}, {"remoteAddress", nextRemote != activeRemote}}}};
 }
 
 Json SettingsSystem::view(unsigned t3Port) const {
@@ -121,6 +160,8 @@ Json SettingsSystem::change(const Json& patch, unsigned t3Port) {
         } else if (key == "sessionRead") {
             if (cliSessionRead_) throw Conflict("The startup command sets how Flock reads T3 Sessions.");
             if (!value.is_null()) (void)sessionReadSetting(value);
+        } else if (key == "remoteAddress") {
+            validateRemoteAddress(value);
         } else
             throw Conflict("Unknown system setting.");
         if (value.is_null())

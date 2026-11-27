@@ -325,7 +325,7 @@ void registerMcp(httplib::Server& server, const char* path, const httplib::Serve
 }
 }
 
-void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
+void sessionMcpRoute(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     registerMcp(server, sessionMcpPath, [&store, &callbacks](const httplib::Request& req, httplib::Response& res) {
         const auto connection = T3Connections(store).authenticate(bearerToken(req));
         if (!connection) return requireBearer(res);
@@ -334,6 +334,10 @@ void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
         mcpRequest(req, res, sessionToolDefinitions, sessionInstructions,
                    [&](const Json& tool, const Json& args) { return callSessionTool(store, callbacks, *connection, tool, args); });
     });
+}
+
+void mcpRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
+    sessionMcpRoute(server, store, callbacks);
     registerMcp(server, externalMcpPath, [&store, &callbacks](const httplib::Request& req, httplib::Response& res) {
         ExternalMcp external(store);
         const auto connection = external.authenticate(bearerToken(req));

@@ -23,6 +23,7 @@ public:
     unsigned t3CliPort(unsigned requestedPort, unsigned t3Port) const;
     std::optional<unsigned> recoveryPort(unsigned t3Port) const;
     const std::string& sessionRead() const { return activeSessionRead_; }
+    const std::optional<std::string>& remoteAddress() const { return activeRemoteAddress_; }
     void listenerStarted(unsigned port);
     Json view(unsigned t3Port) const;
     Json change(const Json& patch, unsigned t3Port);
@@ -36,6 +37,7 @@ private:
     Json saved_;
     Json startupPortSetting_;
     std::string activeSessionRead_;
+    std::optional<std::string> activeRemoteAddress_;
     std::optional<unsigned> activePort_;
 };
 
