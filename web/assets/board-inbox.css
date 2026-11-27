@@ -139,7 +139,7 @@
   min-height: 2.2rem; padding: .4rem .85rem; border-radius: var(--radius-md);
   border: 1px solid var(--control-border);
   background: var(--control); color: var(--text);
-  font-size: var(--text-sm); font-weight: 600; text-decoration: none;
+  font-size: var(--text-sm); font-weight: 550; text-decoration: none;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-question:not(:has(.question-choice-form)) .question-reply { grid-column: 1 / -1; grid-row: 1; }
