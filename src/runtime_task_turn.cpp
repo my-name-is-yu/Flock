@@ -84,7 +84,6 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
     if (task.activeRun && task.question) return {"answer_session_question", "ask_user"};
     const bool receiving = peer && peer->recipient == id && peer->phase == "working";
     if (receiving && peer->kind == "consult") return {"reply_to_bot"};
-    if (task.projectId.empty()) return {"delegate", receiving ? "reply_to_bot" : "ask_user"};
     std::vector<std::string> tools{"delegate", receiving ? "reply_to_bot" : "ask_user"};
     if (RunReports::hasSettledRun(task)) {
         if (!task.newSessionRequired) {
@@ -93,10 +92,9 @@ std::vector<std::string> runtime::TaskTurn::available(const TaskData& task, cons
         }
         if (event.contains("sessionReadViews")) tools.push_back("session_read");
     }
-    if (!receiving) {
-        std::lock_guard lock(database.mutex);
-        if (decisions.canComplete(task, event)) tools.push_back("complete");
-        if (!peer && !task.replanning) tools.push_back("wait_for_event");
+    if (!receiving && !task.replanning) {
+        tools.push_back("complete");
+        if (!peer) tools.push_back("wait_for_event");
     }
     if (canRead) tools.push_back("read_bot_evidence");
     if (canSend && (!task.selectedSession || RunReports::hasSettledRun(task))) tools.push_back("send_bot_message");

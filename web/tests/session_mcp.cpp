@@ -636,7 +636,6 @@ void sessionInvitations() {
 
         ModelTurn decide(const ModelInput& input) override {
             if (!input.event.contains("sessionWake") && !input.event.contains("sessionInvitation")) return decideSession(input);
-            // Bob can talk to these Bots but cannot manage them, so his Session events never offer a memory write.
             check(std::ranges::find(input.tools, "write_memory") == input.tools.end(),
                   "A Session event let a person who cannot manage the Bot change its memory");
             return decideSession(input);

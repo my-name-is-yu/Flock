@@ -78,8 +78,8 @@ try {
   daemon = await start();
   const initial = await read();
   assert.deepEqual(initial.saved,{ port: null, sessionRead: null, remoteAddress: null });
-  assert.deepEqual(initial.next,{ port: null, sessionRead: 'off', remoteAddress: null });
-  assert.equal(initial.active.sessionRead,'off');
+  assert.deepEqual(initial.next,{ port: null, sessionRead: 'on_demand', remoteAddress: null });
+  assert.equal(initial.active.sessionRead,'on_demand');
   assert.deepEqual(initial.pending,{ port: false, sessionRead: false, remoteAddress: false },'An automatic port must not look pending');
 
   await change({ port: nextPort, sessionRead: 'invalid' },409);

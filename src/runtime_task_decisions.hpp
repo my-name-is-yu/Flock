@@ -35,7 +35,6 @@ public:
                   SessionHistory& history, PeerExchanges& peerExchanges, OutboxDispatch& dispatch, const std::string& sessionRead,
                   GitHost* gitHost, const std::function<Seconds()>& clock);
 
-    bool canComplete(const TaskData& task, const Json& event) const;
     struct LearningSource {
         Id reportId;
         std::string runId;

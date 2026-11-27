@@ -1021,12 +1021,11 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         return saved;
     };
     const auto splitCalls = [](const std::vector<ModelCall>& calls) {
+        std::vector<std::vector<ModelCall>> steps;
+        const bool setupDeliversItsReply = calls.size() == 2 && calls[0].tool == botSetupTool && calls[1].tool == "reply";
+        if (setupDeliversItsReply) return std::vector<std::vector<ModelCall>>{calls};
         std::vector<std::string> names;
         for (const auto& call : calls) names.push_back(call.tool);
-        std::vector<std::vector<ModelCall>> steps;
-        // Flock delivers this reply itself when it applies the setup change.
-        if (calls.size() == 2 && calls[0].tool == botSetupTool && calls[1].tool == "reply")
-            return std::vector<std::vector<ModelCall>>{calls};
         for (const auto& indexes : tool_batch::planSteps(names)) {
             auto& step = steps.emplace_back();
             for (const auto index : indexes) step.push_back(calls[index]);

@@ -101,22 +101,22 @@ std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> valid
     return waves;
 }
 
-std::vector<std::vector<std::size_t>> planSteps(std::span<const std::string> tools) {
-    std::vector<std::size_t> shared;
+std::vector<StepCallIndexes> planSteps(std::span<const std::string> tools) {
+    StepCallIndexes shared;
     for (std::size_t i = 0; i < tools.size(); ++i)
         if (tools.size() == 1 || batchable(tools[i])) shared.push_back(i);
-    std::vector<std::vector<std::size_t>> steps;
+    std::vector<StepCallIndexes> steps;
     const bool hasReads = !shared.empty() && shared.size() < tools.size();
     for (std::size_t i = 0; i < tools.size(); ++i) {
         if (std::ranges::find(shared, i) != shared.end()) continue;
-        // A reply cannot describe results the model has not seen, so it stays with the reads and is not run.
-        if (hasReads && tools[i] == "reply")
+        const bool replyBeforeReadResultsAreSeen = hasReads && tools[i] == "reply";
+        if (replyBeforeReadResultsAreSeen)
             shared.push_back(i);
         else
             steps.push_back({i});
     }
-    // A reply ends the turn, so it runs after every other action whatever order the model gave.
-    std::ranges::stable_partition(steps, [&](const auto& step) { return tools[step.front()] != "reply"; });
+    const auto keepsTurnOpen = [&](const StepCallIndexes& step) { return tools[step.front()] != "reply"; };
+    std::ranges::stable_partition(steps, keepsTurnOpen);
     if (!shared.empty()) steps.insert(steps.begin(), std::move(shared));
     return steps;
 }
