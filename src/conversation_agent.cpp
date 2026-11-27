@@ -535,11 +535,13 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
         environments.push_back(std::move(choice));
     }
     for (const auto& linkedChoice : linked.linked) {
-        environments.push_back({{"name", scrub.text(linkedChoice.name)},
-                                {"environmentId", linkedChoice.route.environmentId},
-                                {"projectId", linkedChoice.route.projectId},
-                                {"gatewayEnvironmentId", linkedChoice.route.gatewayEnvironmentId},
-                                {"linked", true}});
+        Json choice{{"name", scrub.text(linkedChoice.name)},
+                    {"environmentId", linkedChoice.route.environmentId},
+                    {"projectId", linkedChoice.route.projectId},
+                    {"gatewayEnvironmentId", linkedChoice.route.gatewayEnvironmentId},
+                    {"linked", true}};
+        if (const auto access = linked.access(linkedChoice.route); !access.empty()) choice["access"] = access;
+        environments.push_back(std::move(choice));
     }
 
     const auto channel = channelStorage.channelContext(message.id, message.bot, &images);

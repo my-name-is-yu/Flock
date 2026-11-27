@@ -1446,7 +1446,9 @@ public:
                     parsed = T3EnvironmentLink::Status::expired;
                 else
                     invalidResponse();
-                result.links.push_back({{std::move(environment), std::string(gateway)}, std::move(label), parsed});
+                auto access = str(entry, "access");
+                if (access.size() > 64) invalidResponse();
+                result.links.push_back({{std::move(environment), std::string(gateway)}, std::move(label), parsed, std::move(access)});
             }
             return result;
         } catch (const Failure&) {

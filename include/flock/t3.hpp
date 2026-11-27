@@ -58,6 +58,7 @@ struct T3EnvironmentLink {
     T3EnvironmentRoute route;
     std::string label;
     Status status = Status::unreachable;
+    std::string access;
 };
 struct T3EnvironmentLinks {
     std::vector<T3EnvironmentLink> links;

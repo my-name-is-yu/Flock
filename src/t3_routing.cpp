@@ -124,6 +124,7 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
                     policy.allows(bot, Action::environment_inspect, target) && !policy.forbidden(bot, Action::environment_launch, target);
             }
             if (!permitted) continue;
+            if (!link.access.empty()) result.linkAccess[{target, gateway}] = scrub.text(link.access);
             try {
                 auto projects = t3.projects(link.route);
                 if (projects.empty()) {

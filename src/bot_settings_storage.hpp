@@ -14,6 +14,9 @@ class TaskRouting;
 class T3;
 struct Decision;
 struct BotTools;
+namespace conversation {
+struct Message;
+}
 
 class BotSettingsStorage {
 public:
@@ -23,7 +26,9 @@ public:
           sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {}
 
     Json botSettingsTool(std::string_view bot, Id sourceMessage, const BotTools&, const Decision&);
-    Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
+    // The message is only handed on to discover linked destinations; its Bot and routing are passed beside it so this
+    // header does not need the conversation types.
+    Json readiness(const conversation::Message&, std::string_view bot, const Json& routing, const Json& args, T3&);
 private:
     Database& database;
     Policy& permissions;

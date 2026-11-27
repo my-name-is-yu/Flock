@@ -312,8 +312,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     } else if (name == "list_connections") {
         description = "List installation T3 connections, MCP servers, skills, and web search availability.";
     } else if (name == "check_environment_readiness") {
-        description = "Check launch policy, project configuration and T3 OAuth.";
-        text("environmentId", "Environment ID. Defaults to the configured environment.", false);
+        description = "Check launch policy, project configuration and T3 OAuth. For a linked environment, access is what its T3 link "
+                      "lets Sessions do without asking; the person changes it by linking that machine again in T3.";
+        text("environmentId", "Environment ID or name from task.environments. Defaults to the configured environment.", false);
     } else if (name == botSetupTool) {
         description = "Update your own Bot setup. Send only the fields you want to change, in one call. "
                       "Act on the person's own words or make a change you independently judge will help the work. "

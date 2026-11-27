@@ -173,6 +173,7 @@ struct Script final : Model {
                     const auto& choices = input.task.at("environments");
                     const auto linked = std::ranges::find_if(choices, [](const Json& choice) { return choice.value("linked", false); });
                     check(linked != choices.end(), "the gateway did not list Mini");
+                    check(linked->value("access", "") == "approval-required", "the gateway's link access was not read");
                     nativeChoice = linked->at("name");
                 }
                 if (parallel) {
@@ -250,7 +251,8 @@ struct Scenario {
              {"multiSingle", true},
              {"multiCommit", model.commit},
              {"multiExpectedTarget", mini.id()},
-             {"multiLinkedEnvironments", Json::array({{{"environmentId", mini.id()}, {"label", "Mini"}, {"status", "reachable"}}})},
+             {"multiLinkedEnvironments",
+              Json::array({{{"environmentId", mini.id()}, {"label", "Mini"}, {"status", "reachable"}, {"access", "approval-required"}}})},
              {"multiForwardingUnavailable", forwardingUnavailable}});
         mini.configure({{"multiReset", true}, {"multiHoldLaunchReply", false}, {"multiCommit", model.commit}});
         const Intake routing{bot, {}, local.id(), local.project()};
