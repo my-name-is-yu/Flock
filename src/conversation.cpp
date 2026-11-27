@@ -177,6 +177,34 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=
     return id;
 }
 
+Id ConversationStorage::enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry& wake,
+                                    std::string_view clientId) {
+    routing["sessionWake"] = encodeConversationWake(wake);
+    const auto id = journalStorage.journalConversationMessage(source.bot, {wake});
+    database.exec(R"SQL(
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
+)SQL",
+                  {id, source.bot, clientId, source.id, routing, source.admittedActor.id, source.admittedActor.adminRoot ? 1 : 0,
+                   static_cast<int>(source.principalSource), source.bot});
+    database.exec(R"SQL(
+INSERT INTO channel_messages(message_id,event_key,scope_key,origin,sender_id,person_id)
+SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE message_id=?
+)SQL",
+                  {id, clientId, source.id});
+    database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
+    return id;
+}
+
+Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
+    const auto source = loadTurnMessage(sourceMessage);
+    auto routing = source.routing;
+    routing.erase("sessionInvitation");
+    routing.erase("botMessage");
+    wake.sourceMessageId = source.id;
+    return enqueueWake(source, std::move(routing), wake, clientId);
+}
+
 std::vector<std::pair<std::string, Id>> ConversationStorage::pendingConversations(unsigned limit, Seconds now) const {
     std::lock_guard lock(database.mutex);
     auto next = database.query(R"SQL(

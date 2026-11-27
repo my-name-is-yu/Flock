@@ -30,6 +30,9 @@ public:
     Id insertTask(const TaskData&);
     void save(TaskData&);
     Id complete(TaskData&, const CompletionEntry&);
+    // Completes with the given report, citing the last Run's saved report as the source when it matches.
+    Id completeWithReport(TaskData&, std::string report, std::string reason);
+    std::string latestReportText(Id task) const;
     void saveDecisionCheckpoint(TaskData&, DecisionCheckpoint);
 private:
     Database& database;

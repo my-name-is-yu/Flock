@@ -306,9 +306,9 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
                        ? "Unknown environment " + environment + "; use one of task.environments"
                        : "The linked destination is unavailable through its T3 gateway. Check the link and gateway; Flock will not use a different environment."));
     linked.chooseProject(destinations.primary, project);
+    const auto& name = environment.empty() ? destinations.primary.environmentId : environment;
+    if (!selectedSession) resolveProject(destinations.primary, name);
     if (!destinations.commit.empty()) {
-        const auto& name = environment.empty() ? destinations.primary.environmentId : environment;
-        resolveProject(destinations.primary, name);
         destinations.targets.push_back({name, destinations.primary});
         permissions.secretRedactor(bot).requirePublic({runTargetsJson(destinations.targets), destinations.commit});
     }

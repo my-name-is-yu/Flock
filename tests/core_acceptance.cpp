@@ -2377,23 +2377,22 @@ void automaticPeerWorkResolvesTheProject() {
           "an unpinned peer did not use the active project in the sender's eligible environment");
 }
 
-void requestedCriteriaApplyToFirstPeerWork() {
+void conversationTaskLaunchesItsRequest() {
     Fixture f;
-    f.allowBeta();
     const auto receipt =
         ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work-with-criteria", "Check the release");
     f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("kind") == "conversation_turn") return converse(input, "start_task", 0, {{"doneWhen", "Confirm the signature"}});
-        check(!input.needsDoneWhen && input.task.at("requestedDoneWhen") == "Confirm the signature",
-              "peer work required the model to repeat the user's criterion");
-        return {"send_bot_message", {{"kind", "work"}, {"text", "Verify the release"}, {"botId", "beta"}}, "Ask the verifier"};
+        check(input.event.at("kind") == "conversation_turn", "a conversation task asked the task loop to decide its launch");
+        if (!input.event.at("turn").empty()) return {"reply", {{"text", "Started."}}, "Tell the person"};
+        return converse(input, "start_task", 0, {{"doneWhen", "Confirm the signature"}});
     };
     f.runtime->runConversations();
-    const Id sender = TaskList(*f.store).tasks("alpha").at(0).task.id;
-    f.reach(sender, "peer_waiting");
-    const auto task = f.task(sender);
-    check(task.at("doneWhen") == "Confirm the signature" && task.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId"),
-          "first peer work did not adopt the saved criterion and its source");
+    const Id task = TaskList(*f.store).tasks("alpha").at(0).task.id;
+    f.reach(task, "running");
+    const auto saved = f.task(task);
+    check(saved.at("doneWhen") == "Confirm the signature" && saved.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId") &&
+              f.t3.seen.size() == 1 && f.t3.seen.front().instruction.find("Check the release") != std::string::npos,
+          "the conversation task did not launch its request with the saved criterion and source");
 }
 
 void peerResultWaitsForRecipientTurn() {
@@ -2572,17 +2571,12 @@ void consultationRestoresOwnEvidence() {
         f.restart();
         constexpr auto request = "Verify with a Session and consult";
         f.model.script = [&](const ModelInput& input) -> Decision {
-            if (input.event["kind"] == "conversation_turn") return converse(input, "start_task", 0, Json::object());
             if (input.event["kind"] == "intake") return work();
-            if (input.event["kind"] == "result") {
-                check(input.learningRunId == "run-1-result", "the owner's Session report did not qualify as a learning source");
-                return botRequest("beta", "consult", "Confirm policy");
-            }
+            if (input.event["kind"] == "result") return botRequest("beta", "consult", "Confirm policy");
             if (input.event["kind"] == "bot_request") return botReply("result", "Policy confirmed");
             check(input.event["kind"] == "bot_result" && input.event["sessionResult"]["resultRunId"] == "run-1-result",
                   "the consultation result omitted the source Bot's settled report");
-            check(input.learningRunId.empty() && hasTool(input, "complete"),
-                  "peer completion exposed a learning source or lost completion");
+            check(hasTool(input, "complete"), "peer completion lost completion");
             check(hasTool(input, "session_read") == (f.read == "on_demand") && !hasTool(input, "read_bot_evidence"),
                   "the source Bot's history ignored its selected read mode");
             if (f.read == "on_demand" && input.evidence.empty())
@@ -2591,9 +2585,7 @@ void consultationRestoresOwnEvidence() {
                   "own Session evidence did not match its selected mode");
             return complete();
         };
-        ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "verify-and-consult", request);
-        f.runtime->runConversations();
-        const auto source = TaskList(*f.store).tasks("alpha").front().task.id;
+        const auto source = f.submit(request);
         f.reach(source, "running");
         f.t3.finish("run-1");
         f.reach(source, "completed");
@@ -3153,8 +3145,8 @@ int main() {
                                                                                     consultationDoesNotRequireAT3Destination},
                                                                                    {"Automatically routed peer work",
                                                                                     automaticPeerWorkResolvesTheProject},
-                                                                                   {"Requested criteria for first peer work",
-                                                                                    requestedCriteriaApplyToFirstPeerWork},
+                                                                                   {"Conversation task launches its request",
+                                                                                    conversationTaskLaunchesItsRequest},
                                                                                    {"Peer result waits for the recipient's conversation turn",
                                                                                     peerResultWaitsForRecipientTurn},
                                                                                    {"Recovered Run accepts its original question",

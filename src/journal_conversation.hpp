@@ -17,6 +17,8 @@ struct ConversationInvitationEntry {
 struct ConversationWakeEntry {
     std::string environmentId, threadId, title, reason;
     Id sourceMessageId;
+    // Set when the wake reports on a task the Bot started from this conversation.
+    Id taskId = 0;
 };
 
 struct ConversationBotMessageEntry {

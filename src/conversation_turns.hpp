@@ -54,6 +54,7 @@ enum class SessionExit;
 struct BotTools;
 struct ConversationCallContext;
 struct ConversationBotMessageEntry;
+struct ConversationWakeEntry;
 struct ConversationInvitationEntry;
 struct Decision;
 struct TaskDestinations;
@@ -97,6 +98,10 @@ public:
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
                            Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr,
                            const ConversationBotMessageEntry* botMessage = nullptr);
+    // Starts a turn for the Bot that sent `source`, in the same conversation and with the same authority.
+    Id enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry&, std::string_view clientId);
+    // Wakes the conversation that started a task, with the authority of the message that started it.
+    Id enqueueTaskWake(Id sourceMessage, ConversationWakeEntry, std::string_view clientId);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
@@ -110,6 +115,15 @@ public:
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
+    // The task this wake reports on, while it waits for the conversation to decide what happens next.
+    std::optional<TaskData> wokenTask(const conversation::Message&) const;
+    Json applyWokenTaskDecision(const conversation::Message&, const Decision&);
+    struct WorkLearningSource {
+        Id report;
+        std::string runId;
+    };
+    // The finished Run whose report the Bot may learn from when it completes the woken task.
+    std::optional<WorkLearningSource> wokenLearningSource(const TaskData&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
                     const conversation::QuestionAnchor* question = nullptr);
     TaskData ownTask(Id taskId, const conversation::Message&) const;

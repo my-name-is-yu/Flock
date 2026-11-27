@@ -425,8 +425,8 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
     }
     if ((decision.tool == "start_task" || decision.tool == "change_task") && !selectedSession && result.is_null())
         linked = taskRouting.discoverTaskDestinations(ctx.t3, message,
-                                                      decision.args.contains("projectId") || decision.args.contains("environments") ||
-                                                          decision.args.contains("commit"),
+                                                      decision.tool == "start_task" || decision.args.contains("projectId") ||
+                                                          decision.args.contains("environments") || decision.args.contains("commit"),
                                                       decision.tool == "change_task" ? &decision.args : nullptr);
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);

@@ -1593,6 +1593,7 @@ function eventCard(event, context, place, report) {
       failed: `Work stopped before finishing in ${name}`,
       waiting_for_person: `Work in ${name} needs your input`,
       unknown: `Flock couldn’t check the status of work in ${name}`,
+      check_due: `Time to check on work in ${name}`,
     };
     const text = data.sessionWake
       ? (Object.hasOwn(wakeText, session.reason) ? wakeText[session.reason] : wakeText.unknown)

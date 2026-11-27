@@ -795,173 +795,6 @@ void conversationEntry(const std::filesystem::path& path) {
           "The model answer did not reach the intended Session or its reply was lost");
 }
 
-enum class PeerAccess { local, shared, paused };
-
-void botMediatedConversation(const std::filesystem::path& path, std::string_view note, PeerAccess access) {
-    const bool authenticated = access == PeerAccess::shared;
-    constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
-    constexpr auto greeting = "こんにちは。";
-    constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
-    const std::string peerAmpSecret = "Synthetic&ErnestCredential-221";
-    const std::string peerMarkdownSecret = "**Synthetic&ReviewerCredential-221**";
-    const std::string review = "前のバージョンから更新し、署名が有効であることを確認してください。 " + peerMarkdownSecret;
-    constexpr auto response = "Reviewer に確認しました。前のバージョンから更新し、署名が有効であることを確認してください。";
-    Json original;
-    struct ForwardingModel final : Model {
-        std::function<Decision(const ModelInput&)> script;
-        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
-    } model;
-    model.script = [&](const ModelInput& input) -> Decision {
-        const auto kind = input.event.at("kind");
-        if (kind == "conversation_turn") {
-            if (input.event.at("text") == greeting) return {"reply", {{"text", greetingReply}}, "Greet the user"};
-            check(input.event.at("text") == request, "the responsible Bot did not receive the user's original message");
-            if (!input.event.at("turn").empty()) return {"reply", {{"text", "確認します。"}}, "Confirm"};
-            return {"start_task", {{"request", input.event.at("text")}}, "Ernest owns the request"};
-        }
-        if (kind == "intake") {
-            check(input.task.at("botId") == "ernest" && input.task.at("request") == request &&
-                      input.task.at("forwardableUserMessage") == original &&
-                      input.task.at("peers") == Json::array({{{"botId", "reviewer"}, {"name", "Reviewer"}}}) &&
-                      std::ranges::find(input.tools, "send_bot_message") != input.tools.end(),
-                  "Ernest did not receive the saved user message and choose its permitted peer");
-            Json args = {{"botId", "reviewer"}, {"kind", "consult"}, {"forwardUserMessage", true}};
-            if (!note.empty()) args["text"] = note;
-            return {"send_bot_message", std::move(args), "Reviewer knows the release procedure"};
-        }
-        if (kind == "bot_request") {
-            check(input.task.at("botId") == "reviewer" && input.event.at("fromBotId") == "ernest" &&
-                      input.event.at("toBotId") == "reviewer" && input.event.value("text", std::string{}) == note &&
-                      input.event.at("forwardedMessage") == original,
-                  "Reviewer did not receive Ernest's forwarded message and separate note");
-            return {"reply_to_bot", {{"kind", "result"}, {"text", review}}, "Answer Ernest's consultation"};
-        }
-        check(kind == "bot_result" && input.task.at("botId") == "ernest" && input.event.at("fromBotId") == "reviewer" &&
-                  input.event.at("text") == review,
-              "the peer reply did not return to the responsible Bot");
-        return {"complete", {{"report", response}}, "Relay the answer in Ernest's chat"};
-    };
-
-    Store store(path);
-    FixedT3 t3;
-    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
-        if (bot != "ernest") return {};
-        return {{"Reviewer", {"reviewer", "", "local-env", "ernest"}}};
-    };
-    auto web = callbacks();
-    web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
-    web.peers = peers;
-    const Person author{"fixture-message-author", true};
-    Id ampRequest = 0;
-    Id markdownRequest = 0;
-    if (authenticated) {
-        const auto identities = path.string() + ".identities";
-        writeWebIdentities(identities,
-                           Json::array({{{"authorization", "Bearer fixture-author"}, {"person", author.id}, {"adminRoot", true}},
-                                        {{"authorization", "Bearer fixture-reader"}, {"person", "fixture-shared-reader"}}}));
-        configureWebIdentities(store, identities, web);
-        for (const auto* bot : {"ernest", "reviewer"}) BotAccess{store}.setMember(author, bot, "fixture-shared-reader", true);
-        ampRequest = SecretRequests{store}.requestSecret("ernest", {"peer-ernest-renderer"});
-        markdownRequest = SecretRequests{store}.requestSecret("reviewer", {"peer-reviewer-renderer"});
-    }
-    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers});
-    const auto server = startWeb(store, 0, web);
-    Browser browser(*server);
-    if (authenticated) browser.client.set_default_headers({{"Authorization", "Bearer fixture-author"}});
-    if (access == PeerAccess::paused) BotLifecycle(store).setBotPaused(localOwner, "reviewer", true);
-    constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
-
-    const auto hello = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "hello"}, {"text", greeting}}, 201);
-    runtime.runConversations();
-    check(conversationReply(browser.get("/api/view?bot=ernest"), hello.at("messageId")).at("text") == greetingReply &&
-              TaskList(store).tasks().empty() && browser.get(dm).at("messages").empty(),
-          "ordinary user chat forwarded without a Bot decision");
-
-    const auto receipt = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "rollout"}, {"text", request}}, 201);
-    check(TaskList(store).tasks().empty() && browser.get(dm).at("messages").empty(), "HTTP intake started a Bot-to-Bot exchange");
-    const auto received = browser.get("/api/view?bot=ernest").at("events");
-    const auto userMessage = std::ranges::find_if(received, [&](const Json& event) {
-        return event.at("id") == receipt.at("messageId") && event.at("kind") == "conversation_message";
-    });
-    check(userMessage != received.end() && userMessage->at("data").at("text") == request,
-          "the original user message was not saved verbatim");
-    original = {{"text", userMessage->at("data").at("text")}, {"time", userMessage->at("time")}};
-    runtime.runConversations();
-    check(conversationReply(browser.get("/api/view?bot=ernest"), receipt.at("messageId")).at("actions").at(0).at("tool") == "start_task" &&
-              TaskList(store).tasks("ernest").size() == 1 && TaskList(store).tasks("reviewer").empty() &&
-              browser.get(dm).at("messages").empty(),
-          "the user's request bypassed Ernest's decision and contacted Reviewer");
-
-    tick(runtime, 8);
-    if (access == PeerAccess::paused) {
-        const auto sender = TaskList(store).tasks("ernest").at(0).task.id;
-        check(TaskList(store).tasks("reviewer").empty() && browser.get(dm).at("messages").empty() &&
-                  TaskHistory(store).history(sender).dump().find(botPausedMessage) != std::string::npos,
-              "a paused peer accepted a consultation or gave the requesting Bot no reason");
-        return;
-    }
-    std::string expectedNote(note);
-    std::string expectedReview(review);
-    if (authenticated) {
-        SecretRequests secrets{store};
-        secrets.submitSecret(author, "ernest", ampRequest, peerAmpSecret);
-        secrets.submitSecret(author, "reviewer", markdownRequest, peerMarkdownSecret);
-        if (const auto found = expectedNote.find(peerAmpSecret); found != expectedNote.npos)
-            expectedNote.replace(found, peerAmpSecret.size(), "[redacted]");
-        if (const auto found = expectedReview.find(peerMarkdownSecret); found != expectedReview.npos)
-            expectedReview.replace(found, peerMarkdownSecret.size(), "[redacted]");
-        const auto stored = PeerConversations(store).peerConversation("ernest", "reviewer", 0, 20, 0);
-        check(stored.size() == 2 && stored.front().at("data").at("text") == note && stored.back().at("data").at("text") == review,
-              "peer response redaction must preserve canonical journal text");
-    }
-    const auto ernest = browser.get("/api/view?bot=ernest");
-    const auto& events = ernest.at("events");
-    check(ernest.at("bot").at("id") == "ernest" && hasEvent(events, "conversation_message", request) &&
-              (hasEvent(events, "completed", response) || hasEvent(events, "conversation_reply", response)),
-          "Ernest's normal conversation did not receive the answer to the user's request");
-    const auto messages = browser.get(dm).at("messages");
-    check(messages.size() == 2 && messages == browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages"),
-          "the exchange was not the same two-message thread from both Bots");
-    const auto& forwarded = messages.front().at("data");
-    const auto& answered = messages.back().at("data");
-    auto expectedQuote = original;
-    if (authenticated) expectedQuote["fromViewer"] = true;
-    check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
-              forwarded.value("text", std::string{}) == expectedNote && forwarded.at("forwardedMessage") == expectedQuote &&
-              answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == expectedReview &&
-              !answered.contains("forwardedMessage") && t3.launches == 0,
-          "the exchange did not preserve the forward, its Bot authors, or the reply");
-    check(std::ranges::none_of(
-              messages,
-              [](const Json& row) { return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence"); }),
-          "the DM exposed task or evidence details");
-    if (authenticated) {
-        const auto anchored = std::string(dm) + "&anchor=" + std::to_string(messages.front().at("id").get<Id>());
-        check(browser.get(anchored).at("messages") == messages, "the author lost attribution in anchored history");
-        const auto splitAnchor = std::string(dm) + "&anchor=" + std::to_string(messages.back().at("id").get<Id>());
-        const auto splitMessages = browser.get(splitAnchor).at("messages");
-        check(splitMessages.size() == 2 && splitMessages.front().at("data").at("text") == expectedNote &&
-                  splitMessages.back().at("data").at("text") == expectedReview,
-              "older and anchor-newer peer pages must redact both participants' secrets");
-        browser.client.set_default_headers({{"Authorization", "Bearer fixture-reader"}});
-        auto shared = messages;
-        shared.front()["data"]["forwardedMessage"] = original;
-        check(browser.get(anchored).at("messages") == shared &&
-                  browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages") == shared,
-              "a shared viewer saw authorship that belonged to another person");
-        check(messages.dump().find("fixture-message-author") == std::string::npos &&
-                  shared.dump().find("fixture-shared-reader") == std::string::npos,
-              "the DM exposed a person ID");
-        sqlite3* raw = nullptr;
-        const auto opened = sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
-        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
-        const auto update = "UPDATE journal SET time=time+1 WHERE id=" + std::to_string(receipt.at("messageId").get<Id>());
-        check(opened == SQLITE_OK && sqlite3_exec(db.get(), update.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
-              "could not change the source timestamp in the provenance fixture");
-        browser.client.set_default_headers({{"Authorization", "Bearer fixture-author"}});
-        check(browser.get(anchored).at("messages") == shared, "a forwarded quote with a mismatched timestamp was attributed to the author");
-    }
-}
 void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     struct ScriptedModel final : Model {
         std::function<Decision(const ModelInput&)> script;
@@ -1216,36 +1049,6 @@ void conversationBotSetup(const std::filesystem::path& directory) {
     PolicyRules{store}.changeNeverRule(localOwner, Action::bot_settings, "review*", false);
     check(noticeCount() == count && bot().at("name") == "New display name",
           "A forbidden or invalid setup update wrote some settings or emitted a notice");
-
-    model.change = {"start_task", {{"request", "Verify the release"}}, ""};
-    browser.post("/api/messages", {{"botId", "reviewer"}, {"clientMessageId", "work"}, {"text", "Verify the release"}}, 201);
-    tick(runtime, 6);
-    const auto taskNote = updates().back();
-    check(model.taskCalls == 1, "Autonomous setup used additional task model calls: " + std::to_string(model.taskCalls));
-    check(t3.launches == 1, "The task did not launch a Session: " + browser.get("/api/view?bot=reviewer").dump());
-    check(t3.launched.config.at("session").at("workspaceStrategy").at("type") == "root", "The launch used stale Session defaults");
-    check(t3.launched.instruction.find("Verify the release.") != std::string::npos, "The launch did not receive the new Role");
-    check(taskNote.at("taskId").get<Id>() > 0 && noticeCount() == count + 1 && bot().at("soul") == "Verify the release.",
-          "Autonomous setup did not emit one notice and save the Role");
-
-    browser.post("/api/bots/profile", {{"botId", "reviewer"}, {"projectId", "supervised-project"}});
-    model.taskRole = "Verify before handing work back.";
-    PolicyRules{store}.setMode(localOwner, "supervised");
-    PolicyRules{store}.changeRule(localOwner, RuleKind::allow, Action::environment_launch, "env", true);
-    browser.post("/api/messages", {{"botId", "reviewer"}, {"clientMessageId", "supervised-work"}, {"text", "Verify in Supervised mode"}},
-                 201);
-    tick(runtime, 6);
-    const auto approvals = Inbox(store).inbox(localOwner, "reviewer");
-    check(approvals.size() == 1 && t3.launches == 1 && model.taskCalls == 2 && bot().at("soul") == "Verify the release.",
-          "Supervised setup did not wait for approval before applying or launching");
-    const auto& card = approvals.front();
-    Inbox(store).decideInbox(localOwner,
-                             {"reviewer", InboxKind::policy_approval, card.at("itemId"), card.at("waitId"), card.at("taskId"),
-                              card.at("targetRevision"), card.at("targetGeneration")},
-                             "allow_once");
-    tick(runtime, 6);
-    check(t3.launches == 2 && model.taskCalls == 2 && noticeCount() == count + 2 && bot().at("soul") == model.taskRole,
-          "Approving a task setup change did not resume the saved decision exactly once");
 }
 
 constexpr auto blockers = "Summarize the release blockers.";
@@ -1263,8 +1066,18 @@ Json chatGPTToolCall(std::string_view name, Json arguments, std::string_view rea
 }
 
 Json chatGPTConversationTool(const Json& task, const Json& event) {
+    if (event.contains("sessionWake")) return chatGPTToolCall("reply", {{"text", "The work finished."}});
     const auto text = event.at("text").get<std::string>();
     const auto& steps = event.at("turn");
+    if (event.contains("botMessage") && steps.empty()) {
+        const auto from = event.at("botMessage").at("fromBotId").get<std::string>();
+        if (from == "release") {
+            check(text == "What are the release criteria?", "Verifier did not receive the release Bot's question");
+            return chatGPTToolCall("message_bot", {{"botId", "release"}, {"text", consultationReply}});
+        }
+        check(from == "verifier" && text == consultationReply, "the release Bot did not receive Verifier's answer");
+        return chatGPTToolCall("reply", {{"text", std::string("Verifier: ") + consultationReply}});
+    }
     if (!steps.empty()) {
         const auto& last = steps.back();
         const auto& result = last.at("result");
@@ -1278,7 +1091,12 @@ Json chatGPTConversationTool(const Json& task, const Json& event) {
         }
         return chatGPTToolCall("reply", {{"text", "I queued your request."}});
     }
-    if (text == blockers || text == consultation || text == notes) return chatGPTToolCall("start_task", {{"request", text}});
+    if (text == consultation) {
+        check(std::ranges::any_of(task.at("bots"), [](const Json& bot) { return bot.at("botId") == "verifier"; }),
+              "the Verifier Bot was missing from the conversation context");
+        return chatGPTToolCall("message_bot", {{"botId", "verifier"}, {"text", "What are the release criteria?"}});
+    }
+    if (text == blockers || text == notes) return chatGPTToolCall("start_task", {{"request", text}});
     if (text == checksums) {
         check(std::ranges::any_of(task.at("environments"), [](const Json& env) { return env.at("name") == "backup-env"; }),
               "the backup destination was missing from the production request");
@@ -1302,34 +1120,8 @@ Json chatGPTConversationTool(const Json& task, const Json& event) {
 }
 
 Json chatGPTOutput(const Json& task, const Json& event) {
-    const auto& kind = event.at("kind");
-    if (kind == "conversation_turn") return chatGPTConversationTool(task, event);
-    if (kind == "intake") {
-        const auto& request = task.at("request");
-        if (request == consultation) {
-            check(task.at("peers") == Json::array({{{"botId", "verifier"}, {"name", "Verifier"}}}),
-                  "the Verifier Bot was missing from the consultation context");
-            return chatGPTToolCall("send_bot_message",
-                                   {{"botId", "verifier"}, {"kind", "consult"}, {"text", "What are the release criteria?"}},
-                                   "Verifier owns the release criteria.");
-        }
-        check(request == blockers || request == notes || request == checksums, "unexpected ChatGPT intake");
-        return chatGPTToolCall("delegate", {{"instruction", request}, {"doneWhen", "Return the findings and their evidence."}},
-                               "A Session must check the release artifacts.");
-    }
-    if (kind == "result") {
-        check(event.at("report") == signingReport, "the result event dropped the Session report");
-        return chatGPTToolCall("complete", {{"report", signingReport}}, "The Session identified the blocker and the expiration date.");
-    }
-    if (kind == "bot_request") {
-        check(task.at("botId") == "verifier" && event.at("text") == "What are the release criteria?",
-              "the consultation did not reach Verifier with its request text");
-        return chatGPTToolCall("reply_to_bot", {{"kind", "result"}, {"text", consultationReply}}, "The release criterion is available.");
-    }
-    check(kind == "bot_result", "unexpected ChatGPT model event: " + kind.dump());
-    check(event.at("fromBotId") == "verifier" && event.at("text") == consultationReply,
-          "the consultation result did not carry Verifier's reply");
-    return chatGPTToolCall("complete", {{"report", consultationReply}}, "Verifier confirmed the release criterion.");
+    check(event.at("kind") == "conversation_turn", "a conversation task asked the task model: " + event.at("kind").dump());
+    return chatGPTConversationTool(task, event);
 }
 
 app::chatgpt::HttpResponse chatGPTResponse(const app::chatgpt::HttpRequest& http) {
@@ -1414,6 +1206,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = [&](std::string_view bot) { return bots.peers(store, bot); };
+    options.intake = [&](std::string_view bot, std::string_view request) { return bots.get(bot).intake(request); };
     Runtime runtime(store, model, t3, [&](std::string_view bot) { return bots.soul(bot); }, options);
     const auto advance = [&](int steps) {
         tick(runtime, steps);
@@ -1472,22 +1265,15 @@ void chatGPTConversation(const std::filesystem::path& home) {
 
     const auto consult = send("consult-verifier", consultation);
     advance(8);
-    const auto consultTask = linkedTask(consult);
-    const auto page = view();
-    Json messages = Json::array();
-    for (const auto& event : page.at("events"))
-        if (event.at("kind") == "bot_message") messages.push_back(event.at("data"));
-    check(messages.size() == 2, "the originating conversation did not show one request and one peer reply");
-    const auto& outgoing = messages.at(0);
-    const auto& incoming = messages.at(1);
-    check(outgoing.at("fromBotId") == "release" && outgoing.at("toBotId") == "verifier" && outgoing.at("requestKind") == "consult" &&
-              incoming.at("fromBotId") == "verifier" && incoming.at("messageType") == "result" && incoming.at("toBotId") == "release" &&
-              incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
-              incoming.at("text") == consultationReply,
-          "Verifier's reply did not return to its original exchange");
-    check(Tasks(store).task(consultTask).task.state == TaskState::completed && TaskList(store).tasks("verifier").size() == 1 &&
-              t3.launches == 1,
-          "the originating Task did not resume after the consultation");
+    const auto asked = std::ranges::any_of(Conversations(store).conversation("verifier"), [](const Json& event) {
+        return event.at("kind") == "conversation_message" && event.at("data").contains("botMessage") &&
+               event.at("data").at("botMessage").at("fromBotId") == "release" &&
+               event.at("data").at("text") == "What are the release criteria?";
+    });
+    check(asked && hasEvent(view().at("events"), "conversation_reply", std::string("Verifier: ") + consultationReply) &&
+              TaskList(store).tasks().size() == 1 && t3.launches == 1,
+          "the release Bot did not ask Verifier and relay its answer without starting work");
+    (void)consult;
 
     const auto first = send("notes", notes);
     const auto second = send("checksums", checksums);
@@ -2118,10 +1904,6 @@ int main(int argc, char** argv) {
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
-        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",
-                                "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221", PeerAccess::shared);
-        botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite", {}, PeerAccess::local);
-        botMediatedConversation(directory.path / "bot-mediated-paused.sqlite", {}, PeerAccess::paused);
         conversationMessagesAnotherBot(directory.path / "message-bot.sqlite");
         botMessagesStopAtTheExchangeLimit(directory.path / "message-bot-limit.sqlite");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");

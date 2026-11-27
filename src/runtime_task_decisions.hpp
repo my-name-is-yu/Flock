@@ -45,6 +45,9 @@ public:
     void accept(const TaskData& snapshot, const Json& event, const TaskDecision& decision, std::string_view approvedInvocation = {},
                 const Json* launchDefaults = nullptr, std::span<const T3Project> projects = {});
     bool continueFreshSession(const TaskData& task, const Json* launchDefaults = nullptr);
+    // A task started from a conversation runs its request as written. The conversation decides what happens after the Run.
+    void launchConversationTask(const TaskData& task, const Json& event, const Json* launchDefaults);
+    void wakeConversation(const TaskData& task, const Json& event, const Json* launchDefaults);
     bool resumeGitApproval(const TaskData& task);
 private:
     static void applyLaunchDefaults(TaskData& task, const Json& defaults);

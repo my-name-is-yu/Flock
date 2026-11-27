@@ -51,8 +51,9 @@ ConversationBotMessageEntry readBotMessage(const Json& data, const RecordDecoder
 }
 
 ConversationWakeEntry readWake(const Json& data, const RecordDecoder& row) {
-    return {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "threadId"), row.get<std::string>(data, "title"),
-            row.get<std::string>(data, "reason"), row.get<Id>(data, "sourceMessageId")};
+    return {row.get<std::string>(data, "environmentId"), row.get<std::string>(data, "threadId"),
+            row.get<std::string>(data, "title"),         row.get<std::string>(data, "reason"),
+            row.get<Id>(data, "sourceMessageId"),        row.optional<Id>(data, "taskId").value_or(0)};
 }
 }
 
@@ -63,11 +64,13 @@ Json encodeConversationInvitation(const ConversationInvitationEntry& entry) {
 }
 
 Json encodeConversationWake(const ConversationWakeEntry& entry) {
-    return {{"environmentId", entry.environmentId},
-            {"threadId", entry.threadId},
-            {"title", entry.title},
-            {"reason", entry.reason},
-            {"sourceMessageId", entry.sourceMessageId}};
+    Json data{{"environmentId", entry.environmentId},
+              {"threadId", entry.threadId},
+              {"title", entry.title},
+              {"reason", entry.reason},
+              {"sourceMessageId", entry.sourceMessageId}};
+    if (entry.taskId) data["taskId"] = entry.taskId;
+    return data;
 }
 
 Json encodeConversationBotMessage(const ConversationBotMessageEntry& entry) {

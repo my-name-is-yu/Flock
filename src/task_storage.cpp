@@ -624,6 +624,30 @@ std::optional<std::string> TaskRecords::externalWaitingNote(const TaskData& task
     return std::nullopt;
 }
 
+Id TaskRecords::completeWithReport(TaskData& task, std::string report, std::string reason) {
+    CompletionProvenance source;
+    if (task.lastRun) {
+        auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
+        if (row.next()) {
+            const auto lastReport = decodeRunReport(row.number(0), row.json(1));
+            if (lastReport.matches(*task.lastRun)) {
+                auto run = reportSourceRun(lastReport);
+                if (!lastReport.resultRunId.empty()) run.runId = lastReport.resultRunId;
+                run.itemId = lastReport.evidence.itemId;
+                run.status = lastReport.status;
+                source = std::move(run);
+            }
+        }
+    }
+    return complete(task, {std::move(report), task.currentRevision, TaskCompletion{std::move(reason), task.doneWhen, std::move(source)}});
+}
+
+std::string TaskRecords::latestReportText(Id task) const {
+    auto row = database.query(
+        "SELECT json_extract(data,'$.report') FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task});
+    return row.next() && !row.null(0) ? row.string(0) : std::string{};
+}
+
 Id TaskRecords::insertTask(const TaskData& task) {
     static const auto sql = "INSERT INTO tasks(" + std::string(taskColumns) + ") VALUES" + std::string(taskPlaceholders);
     database.exec(sql.c_str(), taskBindings(task, task.generation));

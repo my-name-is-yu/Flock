@@ -358,6 +358,8 @@ void notesAcrossConversationAndWork() {
                 return text;
             };
             if (event.at("kind") == "conversation_turn") {
+                if (event.contains("sessionWake"))
+                    return {"reply", {{"text", styled("The Session returned the required evidence.")}}, "Report the finished work"};
                 const auto& turn = event.at("turn");
                 if (!turn.empty()) {
                     if (turn.back().at("tool") == "read_result")
@@ -372,14 +374,9 @@ void notesAcrossConversationAndWork() {
                     for (const auto& entry : context.at("history"))
                         if (entry.at("role") == "user") request = entry.at("text");
                 }
-                return {"start_task", {{"request", request}}, "Start the requested work"};
+                return {"start_task", {{"request", request}, {"doneWhen", criterion}}, "Start the requested work"};
             }
-            if (event.at("kind") == "intake")
-                return {"delegate", {{"instruction", "Collect the required evidence"}, {"doneWhen", criterion}}, "Gather evidence"};
-            check(event.at("kind") == "result", "unexpected model request");
-            return {"complete",
-                    {{"report", styled("The Session returned the required evidence.")}},
-                    "The Session evidence meets the criterion"};
+            throw std::runtime_error("unexpected task decision for a conversation task");
         }
     } model;
 
@@ -429,15 +426,15 @@ void notesAcrossConversationAndWork() {
         check(tasks.size() == 1, "the request should create one Task for this Bot");
         const Id task = tasks.at(0).task.id;
         for (int step = 0; step < 10 && Tasks(store).task(task).task.state != TaskState::completed; ++step) runtime.tick();
+        runtime.runConversations();
         const auto result = lastTaskEvent(store, task, "completed");
-        check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
+        check(result.at("kind") == "completed" && result.at("data").at("text") == "Returned evidence for the original criterion" &&
                   result.at("data").at("doneWhen") == criterion && Tasks(store).task(task).runs.size() == 1,
-              "the Bot's completion report should apply its notes and preserve the saved criterion");
-        check(model.requests.size() == start + 4, "expected two conversation steps, task intake, and completion requests");
-        checkRequest(model.requests.at(start), bot, notes, "conversation_turn");
-        checkRequest(model.requests.at(start + 1), bot, notes, "conversation_turn");
-        checkRequest(model.requests.at(start + 2), bot, notes, "intake");
-        checkRequest(model.requests.at(start + 3), bot, notes, "result");
+              "the task should complete with the Session report and preserve the saved criterion");
+        check(Conversations(store).conversation(bot.botId).back().at("data").at("text") == expectedReport,
+              "the Bot's report to the person should apply its notes");
+        check(model.requests.size() == start + 3, "expected two conversation steps and one wake turn");
+        for (std::size_t i = start; i < model.requests.size(); ++i) checkRequest(model.requests.at(i), bot, notes, "conversation_turn");
         return task;
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {

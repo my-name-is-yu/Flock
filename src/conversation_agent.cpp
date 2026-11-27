@@ -4,6 +4,7 @@
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
+#include "task_events.hpp"
 #include "task_records.hpp"
 #include "task_operations.hpp"
 #include "session_read_storage.hpp"
@@ -252,6 +253,49 @@ const char* ConversationStorage::questionAnswerError(const TaskData& task, const
     if (peerStorage.replanReady(task))
         return "The task is replanning, so this question will close. Its Bot asks again if it still needs to know";
     return nullptr;
+}
+
+std::optional<TaskData> ConversationStorage::wokenTask(const Message& message) const {
+    const auto wake = message.routing.find("sessionWake");
+    if (wake == message.routing.end() || !wake->contains("taskId")) return std::nullopt;
+    auto task = taskRecords.load(wake->at("taskId").get<Id>());
+    if (task.botId != message.bot || task.state != TaskState::deciding || !task.actionId.empty() || task.activeRun) return std::nullopt;
+    const auto event = TaskEvents(database).currentEvent(task);
+    if (!event.is_null() && event.at("consumed") != true) return std::nullopt;
+    return task;
+}
+
+std::optional<ConversationStorage::WorkLearningSource> ConversationStorage::wokenLearningSource(const TaskData& task) {
+    if (!task.lastRun || task.newSessionRequired || !memoryStorage.canLearnFrom(task)) return std::nullopt;
+    auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
+    if (!row.next()) return std::nullopt;
+    const auto report = decodeRunReport(row.number(0), row.json(1));
+    if (!report.matches(*task.lastRun) || report.revisionId != task.currentRevision || report.resultRunId.empty() ||
+        report.evidence.availability != RunEvidence::Availability::Available || report.evidence.report.empty())
+        return std::nullopt;
+    return WorkLearningSource{row.number(0), report.resultRunId};
+}
+
+Json ConversationStorage::applyWokenTaskDecision(const Message& message, const Decision& decision) {
+    auto task = wokenTask(message);
+    if (!task) throw ToolError("The task is no longer waiting for this conversation");
+    const auto& args = decision.args;
+    if (decision.tool == "wait_for_event") {
+        if (args.size() != 2 || !args.contains("note") || !args.contains("checkAgainAfterMinutes"))
+            throw ToolError("Provide a waiting note and a re-check time");
+        waitForExternalEvent(*task, args, unixTime());
+        taskRecords.save(*task);
+    } else {
+        const auto learnings = args.find("learnings");
+        if (args.size() != (learnings == args.end() ? 1u : 2u)) throw ToolError("Provide a report and optional learnings");
+        if (!task->pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
+        const auto source = learnings == args.end() ? std::nullopt : wokenLearningSource(*task);
+        if (learnings != args.end() && !source) throw ToolError("This task's Session report cannot be learned from");
+        const auto completion = taskRecords.completeWithReport(
+            *task, text(args, "report", limits::session_prompt::maxDecisionTextBytes, true), decision.reason);
+        if (source) memoryStorage.learnFromWork(*task, completion, source->report, source->runId, *learnings, unixTime());
+    }
+    return {{"ok", true}, {"taskId", task->id}, {"effect", taskStateName(task->state)}};
 }
 
 Json ConversationStorage::taskState(const TaskData& task, const Message& message, bool fullContract) const {
@@ -555,6 +599,11 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
     for (const auto* key : {"sessionWake", "sessionInvitation", "botMessage"})
         if (message.routing.contains(key)) event[key] = message.routing.at(key);
+    if (const auto woken = wokenTask(message))
+        event["task"] = {{"taskId", woken->id},
+                         {"request", bounded(scrub.text(woken->intent), 4000)},
+                         {"doneWhen", bounded(scrub.text(effectiveDoneWhen(*woken)), 1600)},
+                         {"report", bounded(scrub.text(taskRecords.latestReportText(woken->id)), 8000)}};
     event.update(channel);
     if (web) event["attachments"] = attachments.attachmentViews(message.id);
     Json task{{"tasks", std::move(tasks)},
@@ -572,7 +621,9 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
-    if (tool == "wait_for_event" || tool == "complete") return gitStorage.applyGitTaskDecision(message, decision);
+    if (tool == "wait_for_event" || tool == "complete")
+        return routing.contains("gitEvent") ? gitStorage.applyGitTaskDecision(message, decision)
+                                            : applyWokenTaskDecision(message, decision);
     if (tool == "read_memory" || tool == "memory_history" || tool == "write_memory" || tool == "revert_memory_edit") {
         auto result = memoryStorage.conversationMemory(message, tool, args, now);
         result["ok"] = true;
@@ -815,6 +866,19 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                           {"delivery", "not_accepted"},
                                           {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
+    if (auto woken = wokenTask(message)) {
+        const auto reason = field(message.routing.at("sessionWake"), "reason");
+        if (reason == "finished" || reason == "failed") {
+            auto report = taskRecords.latestReportText(woken->id);
+            taskRecords.completeWithReport(*woken, report.empty() ? "The Session finished without a readable report." : std::move(report),
+                                           "The conversation did not ask for more work");
+        } else {
+            // Nothing settled, so leave the task where the person can see it instead of closing work that never ran.
+            waitStorage.wait(*woken, ModelQuestionWait{},
+                             "This task stopped before its work finished. Reply with what to do next, or cancel it.");
+            taskRecords.save(*woken);
+        }
+    }
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -1001,6 +1065,10 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 }
             }
         } else {
+            if (wokenTask(message)) {
+                offered.push_back("complete");
+                offered.push_back("wait_for_event");
+            }
             machines = localMachineStorage.availableMachines(message.bot);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
         }
@@ -1173,6 +1241,9 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                                "Reply only after you have seen the results it describes.";
                 }
                 auto [offered, machines, followupStatus] = available();
+                std::string learningRunId;
+                if (const auto woken = wokenTask(message))
+                    if (const auto source = wokenLearningSource(*woken)) learningRunId = source->runId;
                 std::vector<ModelImage> images;
                 auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
                 if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
@@ -1194,6 +1265,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                          .feedback = std::move(feedback),
                          .config = message.routing.at("config"),
                          .images = std::move(images),
+                         .learningRunId = learningRunId,
                          .cacheScope = Json::array({"conversation", message.bot, message.channelScope}).dump()};
                 transaction.commit();
             }

@@ -374,6 +374,47 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message',
             std::reverse(history.begin(), history.end());
         }
     }
+    // A task started from a conversation never asks the task model. Its conversation decides what happens next.
+    if (task.sourceMessageId && !decision) {
+        if (task.projectId.empty() && task.runTargets().empty() && !task.selectedSession && task.actionId.empty() && !task.activeRun) {
+            // A move cleared the project. Use the reserved, remembered or only project, or let the conversation choose one.
+            const auto& pending = task.pendingDestination;
+            auto project = pending && pending->route.environmentId == task.environmentId ? pending->route.projectId : std::string{};
+            if (project.empty()) {
+                std::lock_guard lock(database.mutex);
+                project = taskRouting.rememberedT3Project(task.botId, task.environmentId);
+            }
+            if (project.empty()) {
+                auto catalog = taskRouting.readProjectCatalog(
+                    t3, task.botId, {task.environmentId, {}, task.gatewayEnvironmentId.value_or("")}, requireT3Connection);
+                if (const auto* projects = std::get_if<std::vector<T3Project>>(&catalog); projects && projects->size() == 1)
+                    project = projects->front().id;
+            }
+            if (project.empty()) return decisions.wakeConversation(task, event, nullptr);
+            updates.change(task, [&](TaskData& current) {
+                taskRouting.assignProject(current, project);
+                current.state = TaskState::queued;
+                return true;
+            });
+            return;
+        }
+        const auto defaults = launchDefaults(task);
+        if (event["kind"] == "intake" && task.actionId.empty() && !task.activeRun)
+            return decisions.launchConversationTask(task, event, defaults ? &*defaults : nullptr);
+        if (event.contains("userAnswer") && task.activeRun && task.question && task.question->fields.size() == 1) {
+            const Json answers{{task.question->fields.front().id, event.at("userAnswer")}};
+            const TaskDecision answer{{"answer_session_question",
+                                       {{"requestId", task.question->target.requestId}, {"answers", answers}},
+                                       "Send the person's answer"}};
+            try {
+                return decisions.accept(task, event, answer);
+            } catch (const Conflict&) {
+                // A rejected answer would be rejected again on every retry, so let the conversation handle it.
+                return decisions.wakeConversation(task, event, nullptr);
+            }
+        }
+        return decisions.wakeConversation(task, event, defaults ? &*defaults : nullptr);
+    }
     try {
         auto choices = Json::array();
         bool canRead = false;

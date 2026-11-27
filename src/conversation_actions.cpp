@@ -1000,21 +1000,9 @@ void SessionMessageStorage::wakeSessionMessages(T3& t3, std::stop_token shutdown
             origin != routing.end() &&
             !policy.allows(wait.bot, Resource::sessionRead(field(*origin, "environmentId"), field(*origin, "threadId"))))
             (*origin)["title"] = "";
-        const ConversationWakeEntry wake{wait.target.environmentId, wait.target.threadId, std::move(title), reason, wait.message};
-        routing["sessionWake"] = encodeConversationWake(wake);
-        const auto id = journalStorage.journalConversationMessage(wait.bot, {wake});
-        database.exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
-)SQL",
-                      {id, wait.bot, "session-wake:" + std::to_string(wait.key), wait.message, routing, source.admittedActor.id,
-                       source.admittedActor.adminRoot ? 1 : 0, static_cast<int>(source.principalSource), wait.bot});
-        database.exec(R"SQL(
-INSERT INTO channel_messages(message_id,event_key,scope_key,origin,sender_id,person_id)
-SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE message_id=?
-)SQL",
-                      {id, "session-wake:" + std::to_string(wait.key), wait.message});
-        database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
+        conversationTurns.enqueueWake(source, std::move(routing),
+                                      {wait.target.environmentId, wait.target.threadId, std::move(title), reason, wait.message},
+                                      "session-wake:" + std::to_string(wait.key));
         transaction.commit();
     }
 }

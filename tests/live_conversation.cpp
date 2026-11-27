@@ -79,6 +79,7 @@ struct Runs : T3 {
     std::map<std::string, Observation> runs;
     std::vector<std::string> interrupted;
     std::string authGeneration(const std::string&, const Json&) override { return "live-eval"; }
+    std::vector<T3Project> projects(std::string_view) override { return {{"project", "Project", {}}}; }
     Delivery send(const Command&) override {
         const auto id = std::to_string(runs.size() + 1);
         runs["run-" + id] = {};

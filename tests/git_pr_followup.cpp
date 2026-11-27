@@ -77,6 +77,19 @@ private:
             return {"complete", {{"report", "Change checked"}}, {}};
         }
         const auto& steps = event.at("turn");
+        if (event.contains("sessionWake") && event.contains("task")) {
+            // The conversation decides what follows a finished Run: open the PR and wait for its events.
+            const auto taskId = event.at("task").at("taskId");
+            if (!openPullRequest) return {"complete", {{"report", "Change checked"}}, {}};
+            if (steps.empty()) {
+                auto args = openArgs();
+                args["taskId"] = taskId;
+                return {"git_open_pr", std::move(args), {}};
+            }
+            if (steps.back().at("tool") == "git_open_pr")
+                return {"wait_for_event", {{"note", "Waiting for the pull request"}, {"checkAgainAfterMinutes", 5}}, {}};
+            return {"reply", {{"text", "I opened the pull request and I'm watching it."}}, {}};
+        }
         if (!event.contains("gitEvent")) {
             if (event.at("text") == initialAsk) {
                 if (steps.empty()) return {"start_task", {{"request", initialAsk}}, {}};

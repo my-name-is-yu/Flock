@@ -15,6 +15,7 @@
 #include "flock/task_interaction.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "conversation_turns.hpp"
+#include "journal_conversation.hpp"
 #include "database.hpp"
 #include "flock/secrets.hpp"
 #include "git_storage.hpp"
@@ -285,6 +286,72 @@ bool runtime::TaskDecisions::continueFreshSession(const TaskData& task, const Js
         updates.consumeEvent(current);
         if (launchDefaults && tool == CommandTool::delegate) applyLaunchDefaults(current, *launchDefaults);
         dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
+        return true;
+    });
+}
+
+void runtime::TaskDecisions::launchConversationTask(const TaskData& task, const Json& event, const Json* launchDefaults) {
+    updates.change(task, [&](TaskData& current) {
+        if (!current.actionId.empty() || current.activeRun) return false;
+        // The Session prompt already carries the task intent, so the instruction only points at it.
+        constexpr auto instruction = "Do the work described in the task intent.";
+        Json args{{"instruction", instruction}};
+        if (current.criteriaProposal) args["doneWhen"] = current.criteriaProposal->doneWhen;
+        const TaskDecision decision{{"delegate", args, "Start the work the person asked for"}};
+        updates.establishCriteria(current, args);
+        if (launchDefaults) applyLaunchDefaults(current, *launchDefaults);
+        updates.consumeEvent(current);
+        const auto action = actionId();
+        updates.recordDecision(current, event, decision, action);
+        if (!current.runTargets().empty())
+            dispatch.queueDestinations(current, action, instruction, args, event);
+        else
+            dispatch.queueAction(current, action, CommandTool::delegate, instruction, args, event);
+        return true;
+    });
+}
+
+void runtime::TaskDecisions::wakeConversation(const TaskData& task, const Json& event, const Json* launchDefaults) {
+    updates.change(task, [&](TaskData& current) {
+        const bool idle = current.actionId.empty() && !current.activeRun;
+        if (idle && !current.pendingInstructions.empty()) {
+            const auto tool =
+                RunReports::hasSettledRun(current) && !current.newSessionRequired ? CommandTool::follow_up : CommandTool::delegate;
+            const TaskDecision decision{{std::string(commandToolName(tool)), Json::object(), "Send the person's new instructions"}};
+            const auto action = actionId();
+            updates.recordDecision(current, event, decision, action);
+            updates.consumeEvent(current);
+            if (launchDefaults && tool == CommandTool::delegate) applyLaunchDefaults(current, *launchDefaults);
+            dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
+            return true;
+        }
+        const auto& kind = event.at("kind");
+        if (kind == "question" && current.question && !event.contains("userAnswer")) {
+            // Show the Session's own question to the person. Their answer goes back to the Session.
+            const auto& fields = current.question->fields;
+            std::vector<std::string> choices;
+            if (fields.size() == 1)
+                for (const auto& option : fields.front().options) choices.push_back(option.label);
+            const auto& first = fields.empty() ? QuestionField{} : fields.front();
+            const auto text = !first.prompt.empty() ? first.prompt : !first.header.empty() ? first.header : "The Session needs an answer.";
+            updates.consumeEvent(current);
+            updates.recordDecision(current, event, {{"ask_user", {{"question", text}}, "Ask the person the Session's question"}},
+                                   actionId());
+            const auto waitId =
+                waitStorage.wait(current, ModelQuestionWait{std::move(choices), {}, current.question->target.requestId}, text);
+            current.question->target = questionTarget(current, waitId);
+            return true;
+        }
+        updates.consumeEvent(current);
+        const auto reason = kind == "result"           ? (field(event, "status") == "completed" ? "finished" : "failed")
+                            : kind == "question"       ? "waiting_for_person"
+                            : kind == "external_check" ? "check_due"
+                                                       : "unknown";
+        const auto& run = current.activeRun ? current.activeRun : current.lastRun;
+        conversationTurns.enqueueTaskWake(
+            *current.sourceMessageId,
+            {run ? run->environmentId : current.environmentId, run ? run->ref.threadId : std::string{}, "", reason, 0, current.id},
+            "task-wake:" + std::to_string(current.id) + ":" + event.at("id").dump());
         return true;
     });
 }
