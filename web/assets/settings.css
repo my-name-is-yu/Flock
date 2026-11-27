@@ -279,3 +279,18 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .setup-details label[hidden] {
   display: none;
 }
+.installation-dialog, .installation-dialog::backdrop {
+  transition: opacity .2s ease-out, transform .24s cubic-bezier(0.22, 1.15, 0.36, 1),
+    overlay .24s allow-discrete, display .24s allow-discrete;
+}
+.installation-dialog:not([open]) { opacity: 0; transform: translateY(10px) scale(.96); transition-duration: .14s; }
+.installation-dialog:not([open])::backdrop { opacity: 0; transition-duration: .14s; }
+@starting-style {
+  .installation-dialog[open] { opacity: 0; transform: translateY(10px) scale(.96); }
+  .installation-dialog[open]::backdrop { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .installation-dialog, .installation-dialog::backdrop { transition: opacity .12s, overlay .12s allow-discrete, display .12s allow-discrete; }
+  .installation-dialog:not([open]) { transform: none; }
+  @starting-style { .installation-dialog[open] { transform: none; } }
+}
