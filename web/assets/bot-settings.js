@@ -14,6 +14,7 @@ navigation.get('bots').setAttribute('aria-current', 'page');
 
 function showName(name) {
   $('crumb-bot').textContent = name;
+  $('settings-scope').textContent = `Applies to ${name}`;
   $('sharing-heading').textContent = `Who can use ${name}`;
   document.title = `${name} access · Flock settings`;
 }
