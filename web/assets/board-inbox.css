@@ -45,7 +45,7 @@
   border: 1px solid var(--border-floating);
   border-radius: var(--radius-xl);
   background: var(--overlay);
-  box-shadow: 0 24px 64px light-dark(rgb(24 22 36 / .16), rgb(0 0 0 / .62));
+  box-shadow: var(--shadow-lg);
   transform-origin: 50% 0%;
 }
 .decision-panel:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
@@ -65,7 +65,7 @@
   border: 1px solid var(--border-floating);
   border-radius: var(--radius-xl);
   background: var(--overlay);
-  box-shadow: 0 24px 64px light-dark(rgb(24 22 36 / .16), rgb(0 0 0 / .62));
+  box-shadow: var(--shadow-lg);
   transform-origin: 50% 0%;
   will-change: transform, opacity, border-radius;
 }
