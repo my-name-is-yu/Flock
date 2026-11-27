@@ -524,7 +524,12 @@ void peerHistory(const std::filesystem::path& path) {
     const auto peerMessages = [](const Json& page) {
         Json messages = Json::array();
         for (const auto& event : page.at("events"))
-            if (event.at("kind") == "bot_message") messages.push_back(event.at("data"));
+            if (event.at("kind") == "bot_message") {
+                const auto& data = event.at("data");
+                check(data.contains("textHtml") == !data.value("text", std::string{}).empty(),
+                      "a Bot message's text was not rendered as Markdown");
+                messages.push_back(data);
+            }
         return messages;
     };
     auto senderExchange = peerMessages(newest);

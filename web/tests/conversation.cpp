@@ -591,6 +591,8 @@ void parallelVerificationInView(const std::filesystem::path& path) {
         const auto& result = event.at("data");
         const auto& run = result.at("run");
         const bool mini = result.at("destination") == "mini-env";
+        check(result.contains("textHtml") == !result.value("report", std::string{}).empty(),
+              "a written report was not rendered as Markdown, or an absent one was");
         check(result.at("status") == (mini ? "failed" : "completed") && result.at("commit") == commit &&
                   run.at("link") ==
                       std::string("https://app.t3.codes/threads/") + (mini ? "mini-env/" : "local-env/") + "verification-thread",
@@ -618,6 +620,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto result = conversationCompletion(browser.get("/api/view?bot=release"), taskId);
     const auto& resultData = result.at("data");
     check(resultData.at("text") == proposedOptions, "the conversation lost the completion report");
+    check(resultData.at("textHtml").get<std::string>().starts_with("<ol>"), "the completion report was not rendered as Markdown");
     check(!resultData.contains("reason") && !resultData.contains("doneWhen"), "the completed result exposed internal decision fields");
     model.comparisonResult = result.at("id");
     const auto& reportRun = resultData.at("run");

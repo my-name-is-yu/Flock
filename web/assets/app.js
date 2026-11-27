@@ -1453,7 +1453,19 @@ function cardSourceAction(item, close) {
     void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
-function appendTrailingIcon(text, icon) {
+// Rendered Markdown is block content, so an icon that belongs beside the words goes inside its first or last paragraph.
+function inlineEdge(text, last) {
+  const block = last ? text.lastElementChild : text.firstElementChild;
+  return text.classList.contains('markdown-body') && block?.tagName === 'P' ? block : text;
+}
+function setBody(text, html, plain) {
+  if (typeof html === 'string') {
+    text.classList.add('markdown-body');
+    setMessageHtml(text, html);
+  } else text.append(document.createTextNode(plain ?? ''));
+}
+function appendTrailingIcon(body, icon) {
+  const text = inlineEdge(body, true);
   const last = text.lastChild;
   const at = last?.nodeType === Node.TEXT_NODE ? last.data.trimEnd().search(/\S+$/) : -1;
   // Long URLs and unspaced CJK text still need to wrap inside the bubble.
@@ -1622,7 +1634,7 @@ function eventCard(event, context, place, report) {
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
   else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
   const bubble = node('div', 'bubble');
-  const text = node(['conversation_message', 'conversation_reply'].includes(event.kind) ? 'div' : 'p', 'event-text');
+  const text = node('div', 'event-text');
   const actions = node('div', 'msg-actions');
   actions.append(time);
   const extras = [];
@@ -1656,10 +1668,7 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    if (typeof data.textHtml === 'string') {
-      text.classList.add('markdown-body');
-      setMessageHtml(text, data.textHtml);
-    } else text.textContent = data.text ?? '';
+    setBody(text, data.textHtml, data.text);
     text.classList.add('foldable-text');
     bubble.append(text);
     if (data.suggestions?.length) {
@@ -1670,7 +1679,7 @@ function eventCard(event, context, place, report) {
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
-    text.textContent = copy;
+    setBody(text, copy === data.report ? data.textHtml : undefined, copy);
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) appendTrailingIcon(text, link);
@@ -1686,23 +1695,21 @@ function eventCard(event, context, place, report) {
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
+    setBody(text, data.textHtml, data.text);
+    const lead = inlineEdge(text, false);
     if (outcome === 'completed') {
-      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
+      lead.prepend(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
     } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
       const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
-      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
+      lead.prepend(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
     }
-    text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
     if (link) appendTrailingIcon(text, link);
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
   } else {
-    if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
-    if (event.kind === 'conversation_message' && typeof data.textHtml === 'string') {
-      text.classList.add('markdown-body');
-      setMessageHtml(text, data.textHtml);
-    } else text.append(document.createTextNode(data.text ?? ''));
+    setBody(text, data.textHtml, data.text);
+    if (trigger) inlineEdge(text, false).prepend(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     bubble.append(text);
     text.classList.add('foldable-text');
     if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
@@ -1912,7 +1919,11 @@ function peerMessage(event, from, dm, anchored) {
     quote.append(label, node('p', 'event-text', forwardedMessage.text));
     bubble.append(quote);
   }
-  if (text || !forwardedMessage) bubble.append(node('p', 'event-text', text));
+  if (text || !forwardedMessage) {
+    const body = node('div', 'event-text');
+    setBody(body, event.data.textHtml, text);
+    bubble.append(body);
+  }
   const time = eventTime(event);
   const actions = node('div', 'msg-actions');
   actions.append(time);
