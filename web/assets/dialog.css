@@ -339,7 +339,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   @starting-style { .detail[open] { transform: translateY(1.5rem); } }
   .dialog-body { padding-bottom: max(var(--detail-pad), env(safe-area-inset-bottom)); }
   .detail-nav { flex-direction: row; margin: 0 var(--detail-pad) .6rem; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
-  .detail-tab { justify-content: center; padding: .42rem .5rem; font-size: var(--text-sm); }
+  .detail-tab { flex: 1 1 auto; width: auto; justify-content: center; padding: .42rem .5rem; font-size: var(--text-sm); white-space: nowrap; }
   .detail-tab-count { margin-inline-start: 0; }
   .detail-tab:hover { background: none; }
   .detail-tab[aria-selected="true"] { background: var(--overlay); box-shadow: 0 1px 3px var(--shadow-color); }
