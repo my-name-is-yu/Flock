@@ -214,7 +214,7 @@ void runtime::TaskDecisions::accept(const TaskData& snapshot, const Json& event,
     const auto project = field(args, "projectId");
     const bool choosingProject = tool == "delegate" && snapshot.projectId.empty();
     if (choosingProject && (project.empty() || std::ranges::find(projects, project, &T3Project::id) == projects.end()))
-        throw Conflict("Choose a listed projectId or ask which project to use.");
+        throw Conflict("Choose a listed projectId.");
     if (!choosingProject && args.contains("projectId")) throw Conflict("This task already has a T3 project.");
     const auto instruction = field(args, "instruction");
     if (work && !present(instruction)) throw Conflict("A delegate/follow-up instruction is required");

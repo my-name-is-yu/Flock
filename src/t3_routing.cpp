@@ -256,8 +256,7 @@ StartDestinations TaskRouting::startDestinations(const conversation::Message& me
         if (route.projectId.empty()) route.projectId = rememberedT3Project(bot, route.environmentId);
         if (route.projectId.empty())
             if (const auto* projects = linked.projects(route); projects && projects->size() == 1) route.projectId = projects->front().id;
-        if (route.projectId.empty())
-            throw ToolError("Choose a listed projectId for " + std::string(name) + " or ask which project to use.");
+        if (route.projectId.empty()) throw ToolError("Choose a listed projectId for " + std::string(name) + ".");
     };
     destinations.commit = verifiedCommit(text(args, "commit", 64, false));
     if (resume && !destinations.commit.empty())
