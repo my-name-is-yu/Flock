@@ -533,7 +533,7 @@ function menuPopover(bot) {
       selectBot(bot.id);
       void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
     }],
-    ['Settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
+    ['Bot settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   if (bot.canDelete) {
     actions.push([bot.paused ? 'Resume…' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
