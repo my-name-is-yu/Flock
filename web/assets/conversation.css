@@ -33,7 +33,7 @@
 }
 .header-inner:has(> :is(#profile-identity, #peer-identity):not([hidden])) .header-menu {
   pointer-events: auto;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
   border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
@@ -43,7 +43,7 @@
   position: absolute; inset-block-start: .7rem; inset-inline-end: clamp(.75rem, 2vw, 1.25rem);
   display: flex; align-items: center; gap: .125rem; padding: .16rem; pointer-events: auto;
   border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
   box-shadow: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
@@ -79,7 +79,7 @@
   position: absolute; inset-block-start: .7rem; inset-inline-start: clamp(.75rem, 2vw, 1.25rem);
   width: 2.15rem; height: 2.15rem; pointer-events: auto;
   border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
   color: var(--text-2);
@@ -104,7 +104,7 @@
 }
 .profile-identity .avatar-profile, .peer-identity .avatar-profile { width: var(--chat-avatar-size); height: var(--chat-avatar-size); }
 .profile-face-button {
-  padding: 0; border: 0; border-radius: 14px; background: transparent;
+  padding: 0; border: 0; border-radius: var(--radius-lg); background: transparent;
   pointer-events: auto; cursor: pointer;
   transition: transform var(--dur-fast) var(--ease-out);
 }
@@ -116,7 +116,7 @@
   position: relative; display: grid; justify-items: center; gap: .12rem;
   padding: .34rem .9rem .4rem;
   border: 1px solid light-dark(rgb(0 0 0 / .07), rgb(255 255 255 / .05));
-  border-radius: 14px;
+  border-radius: var(--radius-lg);
   background: light-dark(rgb(255 255 255 / .84), rgb(28 28 30 / .78));
   backdrop-filter: blur(18px) saturate(140%);
   box-shadow: 0 2px 12px light-dark(rgb(0 0 0 / .06), rgb(0 0 0 / .28));
@@ -138,7 +138,7 @@
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .peer-parent-link:hover { color: var(--text); }
-.peer-sep { color: var(--text-3); font-size: .85rem; line-height: 1; opacity: .75; }
+.peer-sep { color: var(--text-3); font-size: var(--text-sm); line-height: 1; opacity: .75; }
 .peer-thread-label { color: var(--text); font-size: var(--text-sm); font-weight: 600; line-height: 1.25; }
 .profile-caption { cursor: pointer; }
 .profile-caption:hover {

@@ -8,7 +8,7 @@
   pointer-events: auto;
   line-height: 1.3;
 }
-.needs-you::before { content: ""; position: absolute; inset: 0; border-radius: 14px; }
+.needs-you::before { content: ""; position: absolute; inset: 0; border-radius: var(--radius-lg); }
 .needs-you:focus-visible { outline: 2px solid transparent; }
 .decision-count {
   flex: none; min-width: 1.5rem; min-height: 1.5rem; margin-inline-end: .35rem; padding: 0 .4rem;
@@ -71,8 +71,8 @@
 }
 
 .decision-header { display: flex; align-items: center; gap: .5rem; margin-bottom: .7rem; }
-.decision-header h2 { font-size: .84rem; font-weight: 600; color: var(--text); letter-spacing: -.005em; }
-.decision-position { white-space: nowrap; color: var(--text-3); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.decision-header h2 { font-size: var(--text-sm); font-weight: 600; color: var(--text); letter-spacing: -.005em; }
+.decision-position { white-space: nowrap; color: var(--text-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .decision-controls { display: flex; align-items: center; gap: .12rem; margin-inline-start: auto; }
 .decision-controls .icon-button {
   width: 1.85rem; height: 1.85rem; color: var(--text-3); border-radius: var(--radius-sm);
@@ -91,22 +91,22 @@
 .board-inbox-card, .board-inbox-form, .board-inbox-question { display: grid; gap: .75rem; overflow-wrap: anywhere; }
 .board-inbox-card + .board-inbox-card { border-block-start: 1px solid var(--hairline); margin-block-start: .75rem; padding-block-start: .75rem; }
 .board-inbox-title-group { display: grid; gap: .22rem; }
-.board-inbox-card h3 { font-size: 1.12rem; font-weight: 650; line-height: 1.35; letter-spacing: -.015em; color: var(--text); }
+.board-inbox-card h3 { font-size: var(--text-lg); font-weight: 650; line-height: 1.35; letter-spacing: -.015em; color: var(--text); }
 .board-inbox-submeta {
   display: flex; flex-wrap: wrap; align-items: center; gap: .38rem;
-  font-size: .8rem; line-height: 1.4; color: var(--text-3);
+  font-size: var(--text-sm); line-height: 1.4; color: var(--text-3);
 }
 .board-inbox-submeta-sep { opacity: .6; }
 .board-inbox-card .board-inbox-source {
   padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent;
-  color: var(--text-3); font-size: .8rem; font-weight: 500;
+  color: var(--text-3); font-size: var(--text-sm); font-weight: 500;
 }
 .board-inbox-card .board-inbox-source:hover:not(:disabled) { color: var(--text); text-decoration: underline; background: transparent; }
-.board-inbox-body { white-space: pre-wrap; font-size: .88rem; line-height: 1.62; color: var(--text); }
+.board-inbox-body { white-space: pre-wrap; font-size: var(--text-md); line-height: 1.62; color: var(--text); }
 .board-inbox-card .board-inbox-meta { color: var(--text-3); font-size: var(--text-xs); }
 /* History is a record to scan, so each entry is a compact title, what it was about, then who answered. */
 .board-inbox-card.history-card { gap: .2rem; }
-.history-card h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .5rem; font-size: .95rem; font-weight: 600; letter-spacing: -.005em; }
+.history-card h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .5rem; font-size: var(--text-md); font-weight: 600; letter-spacing: -.005em; }
 .history-card h3 .board-inbox-target { color: var(--text-3); font-weight: 400; letter-spacing: 0; }
 .history-about { color: var(--text-2); font-size: var(--text-sm); }
 .history-card .board-inbox-meta { margin-top: .15rem; }
@@ -139,7 +139,7 @@
   padding: .46rem .95rem; border-radius: var(--radius-full);
   border: 1px solid var(--hairline);
   background: var(--canvas); color: var(--text);
-  font-size: .84rem; font-weight: 550; text-decoration: none;
+  font-size: var(--text-sm); font-weight: 550; text-decoration: none;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-question:not(:has(.question-choice-form)) .question-reply { grid-column: 1 / -1; grid-row: 1; }
@@ -151,7 +151,7 @@
   grid-column: 3; grid-row: 2; justify-self: end;
   padding: .46rem 1.05rem; border: 0; border-radius: var(--radius-full);
   background: var(--accent-fill); color: var(--on-accent);
-  font-size: .84rem; font-weight: 600;
+  font-size: var(--text-sm); font-weight: 600;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-question .question-confirm:hover:not(:disabled) {
@@ -180,7 +180,7 @@
   border: 1px solid var(--hairline);
   border-radius: var(--radius-full);
   background: var(--canvas); color: var(--text);
-  font-size: .84rem; font-weight: 600;
+  font-size: var(--text-sm); font-weight: 600;
   transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-form button:hover:not(:disabled) { background: var(--hover); }
@@ -199,7 +199,7 @@
     padding-inline: max(.75rem, env(safe-area-inset-left)) max(.75rem, env(safe-area-inset-right));
     padding-block-end: 8.5rem;
   }
-  .decision-panel { padding: .85rem 1rem 1rem; border-radius: 18px; }
+  .decision-panel { padding: .85rem 1rem 1rem; border-radius: var(--radius-xl); }
   .board-inbox-form input { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -229,7 +229,7 @@
   border-radius: var(--radius-lg);
   background: var(--raised);
 }
-.board-inbox-target { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; }
+.board-inbox-target { font-family: var(--font-mono); font-size: var(--text-xs); }
 .board-inbox-stop {
   display: grid; gap: .55rem; margin-top: .25rem; padding-top: .55rem;
   border-top: 1px solid var(--hairline);
