@@ -109,7 +109,7 @@ export function createBotRoleCard(saveRole) {
     try {
       update(await saveRole(input.value, originalSoul));
       finishEditing();
-      showFeedback('Role updated');
+      showFeedback('Role saved.');
     } catch (error) {
       const message = {
         invalid_soul: 'The role is too long. Shorten it and try again.',

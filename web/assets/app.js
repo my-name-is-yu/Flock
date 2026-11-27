@@ -2704,7 +2704,7 @@ const botEditor = createBotEditor(elements['bot-editor'], {
       return;
     }
     if (returnToSettings && view?.id === savedBot.id && view.data) {
-      openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
+      openDetail({ kind: 'settings', section: 'general', status: 'Appearance saved.' });
     }
   },
   onCancel(savedMode) {
@@ -2856,7 +2856,7 @@ function generalContent(bot) {
         await api('bots/profile', { botId: bot.id, name: trimmed });
         await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
         if (detail?.kind === 'settings') {
-          detail = { ...detail, status: 'Name updated' };
+          detail = { ...detail, status: 'Name saved.' };
           signatures.delete('detail');
           renderDetail();
         }
