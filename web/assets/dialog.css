@@ -374,3 +374,4 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
 .peer-choice:active { transform: scale(.985); }
 .peer-choice-avatar { width: 2.1rem; height: 2.1rem; }
 .peer-choice-name { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
+.settings-workspace .settings-workspace-facts dd.place-name { font-family: var(--font-sans); }
