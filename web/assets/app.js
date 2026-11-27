@@ -2269,7 +2269,7 @@ function conversationRows(data, events, keep, source) {
         for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
         empty.append(flock, node('h2', null, 'Create your first Bot'),
           node('p', null, 'A Bot takes your requests, gets the work done and reports back here.'),
-          button('New Bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+          button('New Bot', 'button primary', () => openNewBot(elements['new-bot-button'])));
       } else {
         empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
       }
@@ -2896,7 +2896,7 @@ function generalContent(bot) {
   rows.append(settings);
   const activity = settingsRow('Status', bot.paused ? 'Paused' : 'Active');
   if (bot.canDelete) {
-    const pause = button(bot.paused ? 'Resume…' : 'Pause…', 'dialog-button quiet',
+    const pause = button(bot.paused ? 'Resume…' : 'Pause…', 'button quiet',
       () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
     pause.id = 'bot-pause-setting';
     pause.setAttribute('aria-haspopup', 'dialog');
@@ -2973,7 +2973,7 @@ function waitContent(context, task) {
   const approveInT3 = canDecide && wait.reason === 't3_input';
   const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
   if (runLink) {
-    runLink.className = approveInT3 ? 'dialog-button primary' : 'dialog-button quiet';
+    runLink.className = approveInT3 ? 'button primary' : 'button quiet';
     primary.append(runLink);
   }
   if (!canDecide) {
@@ -2994,11 +2994,11 @@ function waitContent(context, task) {
     prompt.append(node('strong', null, 'Stop this request?'),
       ` This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
     confirm.setAttribute('aria-labelledby', prompt.id);
-    const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', () => {
+    const keep = button('Keep working', 'button quiet wait-stop-keep', () => {
       actions.replaceChildren(stop, primary);
       stop.focus();
     });
-    const confirmStop = button('Stop request', 'dialog-button danger', () => perform('cancel'));
+    const confirmStop = button('Stop request', 'button danger', () => perform('cancel'));
     const choices = node('div', 'wait-primary');
     choices.append(keep, confirmStop);
     confirm.append(prompt, choices);
@@ -3047,9 +3047,9 @@ function stopTaskContent(context, task) {
   const botName = context.data.bot?.name ?? 'The Bot';
   const explanation = node('p', 'wait-why',
     `This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
-  const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', closeDetail);
+  const keep = button('Keep working', 'button quiet wait-stop-keep', closeDetail);
   keep.autofocus = true;
-  const confirmStop = button('Stop request', 'dialog-button danger', () => void cancelActiveTask(context, task));
+  const confirmStop = button('Stop request', 'button danger', () => void cancelActiveTask(context, task));
   const choices = node('div', 'wait-primary');
   choices.append(keep, confirmStop);
   const feedback = node('p', 'dialog-feedback');

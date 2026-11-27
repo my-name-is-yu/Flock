@@ -63,19 +63,12 @@ input:focus-visible, select:focus-visible {
   border-color: var(--focus-border);
   box-shadow: var(--focus-halo);
 }
-.button {
-  transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
-}
-:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger) {
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .quiet, .danger, .quiet-danger) {
   border: 1px solid var(--hairline); background: var(--canvas); color: var(--text);
 }
-:where(.settings-shell, .installation-dialog) .button:not(.primary, .danger, .quiet-danger):hover:not(:disabled) {
+:where(.settings-shell, .installation-dialog) .button:not(.primary, .quiet, .danger, .quiet-danger):hover:not(:disabled) {
   background: var(--hover);
 }
-.button.primary { background: var(--accent-fill); color: var(--on-accent); }
-.button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
-.button:active:not(:disabled) { transform: scale(.97); }
-form .button { min-height: 2.1rem; }
 .row-label { display: grid; gap: .1rem; min-width: 0; }
 .row-label strong { color: var(--text); font-size: var(--text-sm); font-weight: 600; }
 .row-label small { color: var(--text-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
@@ -128,7 +121,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .row-label small a:focus-visible, .settings-help a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .settings-panel:not([hidden]) > section { animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards; }
 .row-actions { display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
-.row-actions .button { text-decoration: none; }
 .settings-rows:empty { display: none; }
 .settings-rows:not(:empty) + .settings-row:not([hidden]) { border-block-start: 1px solid var(--hairline); }
 .settings-group form.rule-form { align-items: end; justify-content: flex-start; border-radius: 0; background: transparent; padding: .8rem 1rem; }
@@ -190,8 +182,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .segmented.read-only label { cursor: default; }
 .segmented.read-only label:not(:has(:checked)) { display: none; }
 
-.button.quiet-danger { background: transparent; color: var(--danger); }
-.button.quiet-danger:hover:not(:disabled) { background: var(--danger-soft); }
 
 @media (max-width: 560px) {
   .settings-row > .segmented { width: 100%; }
@@ -207,7 +197,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .t3-connect-options summary { cursor: pointer; width: fit-content; }
 .settings-group #t3-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: .5rem 0 0; }
 .settings-group #t3-form button { align-self: end; }
-.settings-row a.button { text-decoration: none; }
 
 .settings-row .connection-actions, .connection-states {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .6rem;

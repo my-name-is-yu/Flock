@@ -40,8 +40,8 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       </label>
       <p class="settings-workspace-hint">Where this Bot’s work runs. Copy both IDs from T3, or leave them empty and the Bot picks or asks.</p>
       <div class="settings-card-actions">
-        <button type="button" class="dialog-button quiet">Cancel</button>
-        <button type="submit" class="dialog-button primary">Save</button>
+        <button type="button" class="button quiet">Cancel</button>
+        <button type="submit" class="button primary">Save</button>
       </div>
     </form>
     <p class="settings-card-feedback" role="status"></p>

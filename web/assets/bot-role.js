@@ -16,8 +16,8 @@ export function createBotRoleCard(saveRole) {
         aria-describedby="settings-role-hint"
         placeholder="For example: Reviews release branches, runs the checks, and reports what blocks shipping."></textarea>
       <div class="settings-card-actions">
-        <button type="button" class="dialog-button quiet">Cancel</button>
-        <button type="submit" class="dialog-button primary">Save</button>
+        <button type="button" class="button quiet">Cancel</button>
+        <button type="submit" class="button primary">Save</button>
       </div>
     </form>
     <p class="settings-card-feedback" role="status"></p>
