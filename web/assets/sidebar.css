@@ -145,7 +145,7 @@
 }
 .menu-popover button svg { width: 1rem; height: 1rem; flex: none; color: var(--text-2); }
 .menu-popover button.danger, .menu-popover button.danger svg { color: var(--danger); }
-.menu-popover button:hover, .menu-popover button:focus-visible { background: var(--press); outline: 2px solid transparent; }
+.menu-popover button:hover, .menu-popover button:focus-visible { background: var(--hover); outline: 2px solid transparent; }
 .menu-popover button:active { transform: scale(.98); }
 
 .activity {
