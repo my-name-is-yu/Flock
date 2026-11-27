@@ -96,7 +96,7 @@ async function load() {
     const title = document.createElement('strong');
     title.textContent = actionLabel(action);
     const detail = document.createElement('small');
-    detail.textContent = [ruleLabels[kind], target].join(' · ');
+    detail.textContent = [ruleLabels[kind], target === '*' ? 'Any target' : target].join(' · ');
     label.append(title, detail);
     const item = row('rules', label);
     if (!canManagePolicy) continue;
