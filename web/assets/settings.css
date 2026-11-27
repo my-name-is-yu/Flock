@@ -202,9 +202,8 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .segmented label, .settings-nav a[data-section] { transition: none; }
 }
 .settings-row-error .row-label strong { color: var(--danger); }
-.settings-group .t3-connect-options { align-items: start; flex-direction: column; }
-.t3-connect-options details { width: 100%; }
-.t3-connect-options summary { cursor: pointer; width: fit-content; }
+.settings-row.t3-connect-options > details { flex: 1 0 100%; }
+.t3-connect-options summary { cursor: pointer; width: fit-content; color: var(--text-2); font-size: var(--text-sm); }
 .settings-group #t3-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: .5rem 0 0; }
 .settings-group #t3-form button { align-self: end; }
 .settings-row a.button { text-decoration: none; }
