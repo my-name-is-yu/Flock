@@ -257,7 +257,7 @@ async function signOut() {
     const {revocationConfirmed} = await response.json();
     await refreshModel();
     setStatus(revocationConfirmed ? 'Signed out of ChatGPT.'
-      : 'Signed out on this Flock. ChatGPT did not confirm revoking the previous session.');
+      : 'Signed out on this Flock. ChatGPT didn’t confirm revoking the previous session.');
   } finally {
     signingOut = false;
   }

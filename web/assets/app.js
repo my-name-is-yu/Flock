@@ -132,7 +132,7 @@ const errors = {
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   request_changed: 'The request changed. Review its current details before acting again.',
   already_closed: 'This request was already answered or closed.',
-  access_denied: 'You do not have permission to respond to this request.',
+  access_denied: 'You don’t have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
   bot_paused: 'This Bot is paused.',
   invalid_peer: 'Choose another Bot.',
@@ -3179,7 +3179,7 @@ function mergeLatest(context, latest) {
   if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
       !screenshotsFor(composer)?.get(screenshotAnchor(composer.reply))?.images.length) {
     composer.closeReply();
-    setNotice(context, 'That question is no longer open, so your reply was not sent.');
+    setNotice(context, 'That question is no longer open, so your reply wasn’t sent.');
   }
 }
 async function conversationPage(timeline, before, anchor) {
