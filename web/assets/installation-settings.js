@@ -2,6 +2,7 @@ import { actionButton, element, row, rowLabel, setSettingsStatus } from '/settin
 import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
 
 const $ = (id) => document.getElementById(id);
+const checkedTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const editor = $('installation-editor');
 const feedback = $('installation-editor-status');
 let installation;
@@ -138,7 +139,7 @@ function appendConnectionStates(container, {
 }) {
   if (typeof checked === 'boolean') {
     const badge = statusBadge(checked ? checkedLabel : failedLabel, checked ? 'checked' : 'error');
-    if (checkedAt) badge.setAttribute('aria-description', `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`);
+    if (checkedAt) badge.setAttribute('aria-description', `Last checked ${checkedTime.format(checkedAt * 1000)}`);
     container.append(badge);
   } else if (configured && !hostManaged) container.append(statusBadge('Registered'));
   if (hostManaged) container.append(statusBadge('Managed on host'));

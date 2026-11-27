@@ -48,6 +48,7 @@ function labeled(text, control) {
 }
 const clockFormat = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
+const olderDate = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
 // "Today, 19:10", "Yesterday, 08:02" or "Nov 20, 14:30", matching the conversation's clock.
 function time(seconds) {
   const date = new Date(seconds * 1000);
@@ -69,7 +70,7 @@ function relativeTime(seconds) {
   }
   const days = Math.floor(delta / 86400);
   if (days < 30) return `${days} ${days === 1 ? 'day' : 'days'} ago`;
-  return new Date(seconds * 1000).toLocaleDateString();
+  return olderDate.format(seconds * 1000);
 }
 function historyCard(entry) {
   const article = element('article', '', 'board-inbox-card history-card');

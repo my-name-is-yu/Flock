@@ -12,6 +12,7 @@ import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNaviga
 import { quietSavedStatus } from '/settings-ui.js';
 
 const $ = (id) => document.getElementById(id);
+const expiryDate = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
 const setStatus = (text, isError = false) => setSettingsStatus($('status'), text, isError);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
@@ -373,7 +374,7 @@ function renderConnections({t3, t3Setup: setup, canManagePolicy: editable, canDi
     const name = label || environmentId;
     const authorized = authorization && !expired;
     const expiry = authorized && expiresAt
-      ? `Authorization expires ${new Date(expiresAt * 1000).toLocaleDateString()}`
+      ? `Authorization expires ${expiryDate.format(expiresAt * 1000)}`
       : '';
     const item = row('connections', rowLabel(name, expiry));
     const actions = document.createElement('div');
