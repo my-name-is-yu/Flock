@@ -251,7 +251,6 @@ a.settings-row svg { margin-left: auto; }
 .cron-error { color: var(--danger); font-size: var(--text-sm); }
 .cron-poll-error { padding: .65rem 1.1rem; border-bottom: 1px solid var(--hairline); }
 .cron-empty { padding: .95rem 1.1rem; color: var(--text-3); }
-.cron-remove { color: var(--text-2); }
 .cron-form { gap: .6rem; }
 .cron-request-input {
   width: 100%; resize: vertical; padding: .55rem .7rem;

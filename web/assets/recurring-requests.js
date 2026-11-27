@@ -80,7 +80,7 @@ function scheduleRow(item, canManage, removeSchedule) {
   if (item.configId) {
     text.append(node('p', 'cron-note', 'Set in this Bot’s configuration'));
   } else if (canManage) {
-    const remove = node('button', 'text-button cron-remove', 'Remove');
+    const remove = node('button', 'button quiet-danger cron-remove', 'Remove');
     const error = node('p', 'cron-error');
     error.setAttribute('role', 'status');
     error.hidden = true;
