@@ -24,7 +24,7 @@
   width: min(56rem, calc(100% - 3rem));
   height: min(37rem, calc(100dvh - 3rem));
   max-height: none;
-  grid-template-columns: 13rem minmax(0, 1fr);
+  grid-template-columns: 14rem minmax(0, 1fr);
   grid-template-areas: "head head" "nav body";
 }
 .detail::backdrop { background: var(--scrim); }
@@ -43,7 +43,7 @@
 .detail-nav { grid-area: nav; display: flex; flex-direction: column; gap: 2px; padding: .85rem .55rem; background: var(--detail-nav); }
 .detail-tab {
   display: flex; align-items: center; gap: .6rem; width: 100%; border: 0; border-radius: var(--radius-md);
-  padding: .5rem .65rem; background: none; color: var(--text-2); font-size: var(--text-md); text-align: left;
+  padding: .5rem .65rem; background: none; color: var(--text-2); font-size: var(--text-md); text-align: left; white-space: nowrap;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .detail-tab:hover { background: var(--hover); color: var(--text); }
@@ -297,7 +297,7 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   @starting-style { .detail[open] { transform: translateY(1.5rem); } }
   .dialog-body { padding-bottom: max(var(--detail-pad), env(safe-area-inset-bottom)); }
   .detail-nav { flex-direction: row; margin: 0 var(--detail-pad) .6rem; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
-  .detail-tab { justify-content: center; padding: .42rem .5rem; font-size: var(--text-sm); }
+  .detail-tab { flex: 1 1 auto; width: auto; justify-content: center; padding: .42rem .5rem; font-size: var(--text-sm); white-space: nowrap; }
   .detail-tab-count { margin-inline-start: 0; }
   .detail-tab:hover { background: none; }
   .detail-tab[aria-selected="true"] { background: var(--overlay); box-shadow: 0 1px 3px var(--shadow-color); }
