@@ -166,7 +166,7 @@ std::string_view modelFailureReason(ModelErrorCode code) {
 std::string modelFailureReply(ModelErrorCode code, bool ja) {
     if (code == ModelErrorCode::authentication_required)
         return ja ? "ChatGPTへのサインインが必要です。Flockの設定からサインインしてください。"
-                  : "This Flock needs a ChatGPT sign-in. Open Flock Settings and sign in to ChatGPT.";
+                  : "This Flock needs a ChatGPT sign-in. Open Flock settings and sign in to ChatGPT.";
     if (code == ModelErrorCode::unsupported_reasoning_effort)
         return ja ? "このモデルは選択された推論レベルに対応していません。Botの設定で別のレベルか「Model default」を選んでください。"
                   : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";

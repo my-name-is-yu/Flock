@@ -310,7 +310,7 @@ void pinnedConversationDestinations() {
     moveWithProject("mini-project", true);
     moveWithProject("remembered-project", false);
     moveWithProject("mini-project", true, true);
-    modelFailureGivesGuidance(ModelErrorCode::authentication_required, "Open Flock Settings");
+    modelFailureGivesGuidance(ModelErrorCode::authentication_required, "Open Flock settings");
     modelFailureGivesGuidance(ModelErrorCode::unsupported_reasoning_effort, "Model default");
     modelFailureGivesGuidance(ModelErrorCode::image_rejected, "Replace it or remove it");
 }

@@ -309,7 +309,7 @@ bool runtime::OutboxDispatch::deferSingleDelivery(TaskData& task, const Outbox& 
     if (outcome.kind == Delivery::Kind::Auth || outcome.kind == Delivery::Kind::Settings ||
         (unsent && outcome.kind == Delivery::Kind::NotAccepted)) {
         const auto reason = outcome.kind == Delivery::Kind::Auth ? SimpleWaitReason::auth : SimpleWaitReason::settings;
-        if (reason == SimpleWaitReason::auth) detail = "Sign in again in T3 Code or reconnect this environment in Flock Settings.";
+        if (reason == SimpleWaitReason::auth) detail = "Sign in again in T3 Code or reconnect this environment in Flock settings.";
         const auto wait = waitStorage.currentWait(task.id);
         if (!wait || wait->reason() != waitReason(reason) || wait->text != detail) waitStorage.wait(task, reason, std::move(detail));
         return true;
@@ -416,7 +416,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     const bool destination = action.destinationAction;
     const auto applyT3Delivery = [&](Delivery observed) {
         if (!destination && observed.kind == Delivery::Kind::Settings)
-            observed.detail = "Check the Bot’s Session settings and the T3 connection in Flock Settings.";
+            observed.detail = "Check the Bot’s Session settings and the T3 connection in Flock settings.";
         applyDelivery(id, action, std::move(observed));
     };
     std::optional<SessionDispatchFileLock> dispatch;

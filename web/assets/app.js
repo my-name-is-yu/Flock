@@ -101,8 +101,8 @@ const waitLabels = {
   model_failure: ['$BOT’s model needs attention', 'Check the model in Bot settings.'],
   bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s Role and memory.'],
   t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
-  auth: ['T3 sign-in needed', 'Sign in again in T3 Code or reconnect this environment in Flock Settings.'],
-  settings: ['T3 settings need attention', 'Check this T3 environment under Connections in Flock Settings.'],
+  auth: ['T3 sign-in needed', 'Sign in again in T3 Code or reconnect this environment in Flock settings.'],
+  settings: ['T3 settings need attention', 'Check this T3 environment under Connections in Flock settings.'],
 };
 // Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
 const pendingActionLabels = {
