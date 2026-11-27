@@ -2921,7 +2921,7 @@ function workspaceCard(bot) {
     const saved = await api('bots/profile', { botId: bot.id, ...workspace });
     if (view?.id === bot.id) void view.refresh();
     return saved;
-  }, async () => (await api('settings')).t3?.environments ?? [],
+  }, (environmentId) => api(environmentId ? `settings/projects?${new URLSearchParams({ environmentId })}` : 'settings/projects'),
   () => api(botQuery('settings/models', bot.id)));
   return detailWorkspace.element;
 }

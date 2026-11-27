@@ -19,7 +19,9 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     if (patches.length === 1) throw new Error('invalid_workspace');
     saved = { ...saved, ...patch };
     return saved;
-  }, async () => [{ environmentId: 'suggested-environment', authorization: null }], async () => {
+  }, async (environmentId) => environmentId
+    ? { projects: [{ id: 'initial-project' }, { id: 'draft-project', name: 'Draft project' }] }
+    : { environments: [{ id: 'suggested-environment', name: 'Suggested' }] }, async () => {
     if (++catalogCalls === 1) throw new Error('models_unavailable');
     return catalog;
   });
@@ -31,6 +33,11 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   const chooseModel = (value) => {
     model.value = value;
     model.dispatchEvent(new Event('change'));
+  };
+  const choose = async (select, value) => {
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
+    await settle();
   };
   const environment = form.elements.environmentId;
   const project = form.elements.projectId;
@@ -46,8 +53,8 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   await settle();
   check(!form.elements.modelCallLimit && !card.element.textContent.includes('Steps per request'),
     'The workspace still displays a step limit');
-  check(!environment.value && form.querySelector('datalist option').value === 'suggested-environment',
-    'The connected environment should be suggested without pinning it');
+  check(!environment.value && Array.from(environment.options).some((option) => option.value === 'suggested-environment') &&
+    project.disabled, 'The connected environment should be offered without pinning it');
   check(!form.querySelector('#settings-model-feedback').hidden, 'A catalog failure did not show feedback');
   cancel.click();
 
@@ -55,8 +62,9 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   await settle();
   check(catalogCalls === 2 && Array.from(model.options).some((option) => option.value === 'next-model'),
     'Reopening did not load the catalog after a connection failure');
-  environment.value = 'suggested-environment';
-  project.value = 'initial-project';
+  await choose(environment, 'suggested-environment');
+  await choose(project, 'initial-project');
+  check(!project.disabled && project.value === 'initial-project', 'Choosing an environment did not load its projects');
   save.click();
   await settle();
   check(patches.length === 0 && !form.hidden && model.validity.valueMissing,
@@ -70,26 +78,22 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     Array.from(model.options).some((option) => option.value === 'next-model'),
     'Reopening did not retry the catalog or preserve the saved model outside the catalog');
   check(effortOptions() === ',low,medium,high', 'A model without catalog metadata did not offer fallback efforts');
-  project.value = 'draft-project';
+  check(environment.value === 'original-environment' && project.value === 'original-project',
+    'Saved locations outside the T3 list were not kept');
+  await choose(project, 'draft-project');
   project.focus();
   placeRows(body, [document.createElement('header'), card.element]);
   card.update({ ...saved, projectId: 'original-project' });
   check(!form.hidden && project.value === 'draft-project' && document.activeElement === project,
     'A settings refresh replaced the draft or moved focus');
 
-  project.value = '  ';
   save.click();
   await settle();
-  check(patches.length === 0 && !project.validity.valid, 'A whitespace-only project was submitted');
-  project.value = ' draft-project ';
-  project.dispatchEvent(new Event('input'));
-  save.click();
-  await settle();
-  check(!form.hidden && project.value === ' draft-project ' && !save.disabled, 'A failed save discarded the draft');
+  check(!form.hidden && project.value === 'draft-project' && !save.disabled, 'A failed save discarded the draft');
   save.click();
   await settle();
   check(patches.length === 2 && patches.every((patch) => JSON.stringify(patch) === '{"projectId":"draft-project"}'),
-    'Save sent an unchanged field or did not trim the draft');
+    'Save sent an unchanged field');
   const facts = card.element.querySelectorAll('dd');
   check(form.hidden && facts[0].textContent === 'new-saved-model' && facts[1].textContent === 'Model default' &&
     facts.length === 4 && facts[2].textContent === 'new-environment' && facts[3].textContent === 'draft-project',
@@ -122,13 +126,13 @@ async function exercise(createBotWorkspaceCard, placeRows) {
   edit.click();
   await settle();
   chooseModel('next-model');
-  project.value = 'project-without-environment';
+  await choose(environment, 'suggested-environment');
   save.click();
   await settle();
-  check(!form.hidden && !environment.validity.valid && patches.length === 3,
-    'A project without an environment was submitted');
-  project.value = '';
-  project.dispatchEvent(new Event('input'));
+  check(!form.hidden && !project.validity.valid && patches.length === 3,
+    'An environment without a project was submitted');
+  await choose(environment, '');
+  check(project.disabled && !project.value, 'Clearing the environment kept a project');
   save.click();
   await settle();
   check(JSON.stringify(patches[3]) === '{"model":"next-model"}' && form.hidden && !facts[0].parentElement.hidden &&
@@ -154,7 +158,7 @@ async function exercise(createBotWorkspaceCard, placeRows) {
     facts[1].textContent === 'Model default', 'Changing the model left an unsupported effort saved');
 
   let viewModelLoads = 0;
-  const viewer = createBotWorkspaceCard(async () => ({}), async () => [], async () => {
+  const viewer = createBotWorkspaceCard(async () => ({}), async () => ({ environments: [] }), async () => {
     viewModelLoads++;
     return catalog;
   });

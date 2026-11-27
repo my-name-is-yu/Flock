@@ -5,7 +5,7 @@ function effortLabel(effort) {
   return effort[0].toUpperCase() + effort.slice(1);
 }
 
-export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModels) {
+export function createBotWorkspaceCard(saveSettings, loadWorkspaces, loadModels) {
   const element = document.createElement('section');
   element.className = 'settings-card settings-workspace';
   element.setAttribute('aria-labelledby', 'settings-workspace-label');
@@ -32,13 +32,12 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       </div>
       <p class="settings-workspace-hint" id="settings-model-feedback" role="status" hidden></p>
       <label class="settings-workspace-field">T3 environment
-        <input name="environmentId" list="settings-t3-environments" maxlength="256" autocomplete="off" spellcheck="false">
+        <select name="environmentId"></select>
       </label>
-      <datalist id="settings-t3-environments"></datalist>
       <label class="settings-workspace-field">T3 project
-        <input name="projectId" maxlength="256" autocomplete="off" spellcheck="false">
+        <select name="projectId"></select>
       </label>
-      <p class="settings-workspace-hint">Where this Bot’s work runs. Copy both IDs from T3, or leave them empty and the Bot picks or asks.</p>
+      <p class="settings-workspace-hint" id="settings-workspace-feedback" role="status">Where this Bot’s work runs. Keep “Chosen per request” and the Bot picks or asks.</p>
       <div class="settings-card-actions">
         <button type="button" class="dialog-button quiet">Cancel</button>
         <button type="submit" class="dialog-button primary">Save</button>
@@ -53,7 +52,8 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   const form = element.querySelector('form');
   const { model, reasoningEffort, environmentId: environment, projectId: project } = form.elements;
   const modelFeedback = form.querySelector('#settings-model-feedback');
-  const suggestions = form.querySelector('datalist');
+  const workspaceFeedback = form.querySelector('#settings-workspace-feedback');
+  const workspaceHint = workspaceFeedback.textContent;
   const cancel = form.querySelector('button[type="button"]');
   const save = form.querySelector('button[type="submit"]');
   const feedback = element.querySelector('.settings-card-feedback');
@@ -108,10 +108,28 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     showView();
     if (active === document.body || element.contains(active)) edit.focus();
   }
-  async function suggestEnvironments(opened) {
-    const environments = await loadEnvironments().catch(() => []);
+  function fillPlaces(select, items, selected) {
+    const options = [new Option('Chosen per request', ''), ...items.map(({ id, name }) => new Option(name || id, id))];
+    if (selected && !items.some(({ id }) => id === selected)) options.push(new Option(selected, selected));
+    select.replaceChildren(...options);
+    select.value = selected;
+  }
+  async function loadProjects(opened, selected) {
+    const environmentId = environment.value;
+    fillPlaces(project, [], environmentId ? selected : '');
+    project.disabled = !environmentId;
+    if (!environmentId) return;
+    const data = await loadWorkspaces(environmentId).catch(() => null);
+    if (draft !== opened || environment.value !== environmentId) return;
+    fillPlaces(project, data?.projects ?? [], project.value);
+    if (!data) workspaceFeedback.textContent = 'Couldn’t load T3 projects. Check the T3 connection in Flock settings.';
+  }
+  async function loadPlaces(opened) {
+    const data = await loadWorkspaces().catch(() => null);
     if (draft !== opened) return;
-    suggestions.replaceChildren(...environments.map(({ environmentId }) => new Option(environmentId)));
+    fillPlaces(environment, data?.environments ?? [], environment.value);
+    if (!data) workspaceFeedback.textContent = 'Couldn’t load T3 environments. Check the T3 connection in Flock settings.';
+    else await loadProjects(opened, opened.initial.projectId);
   }
   function showModelOptions(choices, selected, prompt) {
     const placeholder = new Option(prompt, '');
@@ -154,23 +172,26 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
     showModelOptions([], workspace.model, 'Loading models…');
     showEffortOptions(workspace.reasoningEffort, true);
     modelFeedback.hidden = true;
+    fillPlaces(environment, [], workspace.environmentId);
+    fillPlaces(project, [], workspace.projectId);
+    project.disabled = !workspace.environmentId;
     for (const field of [environment, project]) {
-      field.value = workspace[field.name];
-      field.required = !!field.value;
+      field.required = !!workspace[field.name];
       field.setCustomValidity('');
     }
-    suggestions.replaceChildren();
+    workspaceFeedback.textContent = workspaceHint;
     showFeedback('');
     showView();
     model.focus();
-    void suggestEnvironments(draft);
+    void loadPlaces(draft);
     void refreshModels(draft);
   });
   model.addEventListener('change', () => showEffortOptions(reasoningEffort.value));
-  for (const field of [environment, project]) field.addEventListener('input', () => {
-    environment.setCustomValidity('');
+  environment.addEventListener('change', () => {
     project.setCustomValidity('');
+    void loadProjects(draft, '');
   });
+  project.addEventListener('change', () => project.setCustomValidity(''));
   cancel.addEventListener('click', () => {
     showFeedback('');
     finishEditing();
@@ -184,11 +205,9 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!draft || save.disabled) return;
-    const environmentId = environment.value.trim();
-    const projectId = project.value.trim();
-    environment.setCustomValidity(!environmentId && (projectId || environment.value)
-      ? 'Enter the environment ID shown in T3.' : '');
-    project.setCustomValidity(!projectId && project.value ? 'Enter the project ID shown in T3.' : '');
+    const environmentId = environment.value;
+    const projectId = environmentId ? project.value : '';
+    project.setCustomValidity(environmentId && !projectId ? 'Choose a project in this environment.' : '');
     if (!form.reportValidity()) return;
     const patch = {};
     const edits = { model: model.value, reasoningEffort: reasoningEffort.value, environmentId, projectId };
@@ -208,12 +227,13 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       showFeedback('Settings saved.');
     } catch (error) {
       const messages = {
-        invalid_workspace: 'Check the environment and project IDs shown in T3.',
+        invalid_workspace: 'Choose an available T3 environment and project.',
         invalid_reasoning_effort: 'Choose an effort this model supports or use Model default.',
       };
       showFeedback(messages[error.message] ?? 'Couldn’t save these settings. Try again.', true);
     } finally {
       for (const control of form.elements) control.disabled = false;
+      project.disabled = !environment.value;
       if (draft && document.activeElement === document.body) project.focus();
     }
   });
