@@ -57,11 +57,11 @@ function reflectNotifications() {
   notificationsStatus.textContent = note ?? '';
   notificationsStatus.hidden = !note;
   notificationsToggle.hidden = !!note;
-  notificationsToggle.textContent = browserNotificationsEnabled() ? 'Turn off' : 'Turn on';
+  notificationsToggle.checked = browserNotificationsEnabled();
 }
-notificationsToggle.onclick = async () => {
+notificationsToggle.onchange = async () => {
   notificationsToggle.disabled = true;
-  try { await setBrowserNotifications(!browserNotificationsEnabled()); }
+  try { await setBrowserNotifications(notificationsToggle.checked); }
   catch { setStatus('Couldn’t change notifications.', true); }
   finally {
     reflectNotifications();

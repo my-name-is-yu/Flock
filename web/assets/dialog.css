@@ -201,35 +201,6 @@ button.settings-row:active, a.settings-row:active { background: var(--selected);
 button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
 .settings-row-value { margin-left: auto; color: var(--text-2); }
 .settings-row > .button { flex: none; }
-.settings-row-switch {
-  --switch-size: 1.5rem;
-  appearance: none; position: relative; flex: none; margin: 0 0 0 auto; cursor: pointer;
-  inline-size: 2.55rem; block-size: var(--switch-size); border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--text-3) 40%, transparent);
-  transition: background-color .18s ease;
-}
-.settings-row-switch::before {
-  content: ""; position: absolute; inset-block-start: 2px; inset-inline-start: 2px;
-  inline-size: calc(var(--switch-size) - 4px); block-size: calc(var(--switch-size) - 4px); border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .25);
-  transition: translate .2s cubic-bezier(0.2, 0.9, 0.25, 1);
-}
-.settings-row-switch:checked { background: var(--accent); }
-.settings-row-switch:checked::before { translate: calc(2.55rem - var(--switch-size)) 0; }
-.settings-row-switch:disabled { cursor: default; opacity: .55; }
-.settings-row-switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-@media (prefers-reduced-motion: reduce) { .settings-row-switch, .settings-row-switch::before { transition: none; } }
-@media (forced-colors: active) {
-  .settings-row-switch { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
-  .settings-row-switch::before { background: CanvasText; box-shadow: none; }
-  .settings-row-switch:checked { background: Highlight; box-shadow: none; }
-  .settings-row-switch:checked::before { background: HighlightText; }
-  .settings-row-switch:disabled { opacity: 1; box-shadow: inset 0 0 0 1px GrayText; }
-  .settings-row-switch:disabled::before { background: GrayText; }
-  .settings-row-switch:checked:disabled { background: GrayText; box-shadow: none; }
-  .settings-row-switch:checked:disabled::before { background: Canvas; }
-  .settings-row-switch:focus-visible { outline-color: Highlight; }
-}
 .settings-row-label .settings-card-feedback { display: block; }
 a.settings-row svg { margin-left: auto; }
 .settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1), color .14s ease; }
