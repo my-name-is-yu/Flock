@@ -32,7 +32,7 @@ std::string sessionReadSetting(const Json& value) {
 
 bool reachableFromOtherMachines(const std::string& address) {
     addrinfo hints{};
-    hints.ai_flags = AI_NUMERICHOST;
+    hints.ai_socktype = SOCK_STREAM;
     addrinfo* found = nullptr;
     if (getaddrinfo(address.c_str(), nullptr, &hints, &found) != 0) return true;
     bool reachable = true;
