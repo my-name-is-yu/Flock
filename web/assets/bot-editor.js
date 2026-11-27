@@ -58,11 +58,11 @@ function pickRandomName(currentName, existingNames = []) {
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Could not read the selected image.'));
+    reader.onerror = () => reject(new Error('Couldn’t read the selected image.'));
     reader.onload = () => {
       const result = typeof reader.result === 'string' ? reader.result : '';
       const comma = result.indexOf(',');
-      if (comma < 0) reject(new Error('Could not encode the selected image.'));
+      if (comma < 0) reject(new Error('Couldn’t encode the selected image.'));
       else resolve(result.slice(comma + 1));
     };
     reader.readAsDataURL(file);
@@ -674,7 +674,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         bot_management_unavailable: 'Bot editing is unavailable on this server.',
         access_denied: 'You do not have permission to edit this Bot.',
       };
-      setSubmitError(messages[error.message] ?? 'Could not save this Bot. Check the runtime connection and try again.');
+      setSubmitError(messages[error.message] ?? 'Couldn’t save this Bot. Check the runtime connection and try again.');
     } finally {
       saving = false;
       if (dialog.open) renderTextPreview();

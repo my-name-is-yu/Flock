@@ -60,7 +60,7 @@ async function runEditorAction(commit) {
   try {
     if (await commit() !== false) editor.close();
   } catch (error) {
-    showFeedback(error.message || 'Could not save this change.');
+    showFeedback(error.message || 'Couldn’t save this change.');
   } finally {
     saving = false;
     for (const field of controls) field.disabled = false;
@@ -120,7 +120,7 @@ function buildForm(fields, label, commit, actions = []) {
 async function saveInstallation(section, payload, note = 'Saved.') {
   const response = await postSettings('installation/' + section, payload);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.message || 'Could not save this change. Check your input and try again.');
+  if (!response.ok) throw new Error(data.message || 'Couldn’t save this change. Check your input and try again.');
   if (note) setSettingsStatus($('status'), note);
   try { await loadInstallation(); }
   catch { setSettingsStatus($('status'), 'Saved. Reload to see the current settings.'); }
@@ -219,7 +219,7 @@ async function checkConnection(control, note, section, data) {
     return check;
   } catch (error) {
     note.dataset.result = 'error';
-    note.textContent = error.message || 'Could not check the connection. Try again.';
+    note.textContent = error.message || 'Couldn’t check the connection. Try again.';
   } finally {
     control.disabled = false;
   }
@@ -537,7 +537,7 @@ function showCredential(title, {person, password}, {activate} = {}) {
 
 async function activateAdmin(password) {
   const response = await postSettings('installation/access', {operation: 'activate', person: 'local-owner', password});
-  if (!response.ok) throw new Error('Could not enable sharing. Generate a new password and try again.');
+  if (!response.ok) throw new Error('Couldn’t enable sharing. Generate a new password and try again.');
   location.reload();
   return false;
 }
@@ -593,7 +593,7 @@ function resetPassword(person) {
 
 async function activatePassword(person, password) {
   const response = await postSettings('installation/access', {operation: 'activate', person, password});
-  if (!response.ok) throw new Error('Could not activate the new password. Check it and try again.');
+  if (!response.ok) throw new Error('Couldn’t activate the new password. Check it and try again.');
   location.reload();
   return false;
 }
@@ -740,7 +740,7 @@ function addRemoteMachine(refresh) {
     'Add machine', async ({name}) => {
       const response = await postSettings('remote-machine', {name: name.trim()});
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.message || 'Could not add this machine.');
+      if (!response.ok) throw new Error(data.message || 'Couldn’t add this machine.');
       await refresh();
       showRemoteSetup(name.trim(), data);
       return false;
@@ -764,7 +764,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
     const remove = actionButton(item, 'Remove', () => confirmSetting(`Remove ${name}?`,
       'You’ll need to set up this machine again for its Sessions to ask Flock Bots.', 'Remove', async () => {
         const response = await postSettings('remote-machine', {remove: id});
-        if (!response.ok && response.status !== 404) throw new Error('Could not remove this machine.');
+        if (!response.ok && response.status !== 404) throw new Error('Couldn’t remove this machine.');
         await refresh();
       }));
     remove.classList.add('quiet-danger');
@@ -788,7 +788,7 @@ export async function loadInstallation() {
     showInstallationUnavailable();
     return;
   }
-  if (!response.ok) throw new Error('Could not load installation settings.');
+  if (!response.ok) throw new Error('Couldn’t load installation settings.');
   installation = await response.json();
   renderIntegrations(installation.connections);
   renderAccess(installation.access);

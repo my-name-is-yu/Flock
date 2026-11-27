@@ -28,7 +28,7 @@ export function mountBotPause(dialog, save) {
         await save(bot, paused);
         dialog.close();
       } catch {
-        feedback.textContent = `Could not ${action.toLowerCase()} this Bot. Try again.`;
+        feedback.textContent = `Couldn’t ${action.toLowerCase()} this Bot. Try again.`;
       } finally {
         cancel.disabled = confirm.disabled = false;
         if (dialog.open) confirm.focus();

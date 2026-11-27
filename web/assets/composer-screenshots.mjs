@@ -63,7 +63,7 @@ async function compressScreenshot(bitmap, longestEdge, mimeType) {
     const smallest = jpeg && (!png || jpeg.size < png.size) ? jpeg : png;
     if (smallest?.size <= maxPreparedBytes) return smallest;
   }
-  throw new ScreenshotError('Could not prepare this image.');
+  throw new ScreenshotError('Couldn’t prepare this image.');
 }
 
 export async function resizeScreenshot(file) {
@@ -109,7 +109,7 @@ export async function stageScreenshots(draft, files, maxAttachments, isCurrent) 
       const preview = URL.createObjectURL(prepared);
       draft.images = [...draft.images, { attachment, preview }];
     } catch (error) {
-      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Could not open this PNG, JPEG, or WebP image.';
+      if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Couldn’t open this PNG, JPEG, or WebP image.';
     }
   }
 }

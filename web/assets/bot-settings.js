@@ -191,7 +191,7 @@ async function submitChannelLink(action, bridge, sender) {
     const response = await post('/api/bot-settings/channels', {botId,action,type:bridge.type,id:bridge.id,sender});
     const data = await response.json();
     if (!response.ok) {
-      setStatus(data.message || 'Could not update the channel link.', true);
+      setStatus(data.message || 'Couldn’t update the channel link.', true);
       return;
     }
     renderChannelLinks(data.bridges);
@@ -201,7 +201,7 @@ async function submitChannelLink(action, bridge, sender) {
     }
     setStatus('Channel links saved.');
   } catch {
-    setStatus('Could not update the channel link.', true);
+    setStatus('Couldn’t update the channel link.', true);
     return;
   } finally {
     setLinkSaving(false);

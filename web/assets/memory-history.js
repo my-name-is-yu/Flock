@@ -48,7 +48,7 @@ export function createMemoryHistory(readPage, openConversationEvent, sessionLink
       more.hidden = !before;
       status.textContent = list.childElementCount ? '' : 'No memory changes yet.';
     } catch {
-      status.textContent = 'Could not load memory history.';
+      status.textContent = 'Couldn’t load memory history.';
       more.hidden = !before;
     } finally {
       more.disabled = false;

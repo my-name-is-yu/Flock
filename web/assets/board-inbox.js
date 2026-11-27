@@ -518,7 +518,7 @@ export function mountBoardInbox({
       animateHistoryCards(cards);
     } catch {
       if (!sameView()) return;
-      message.textContent = 'Could not load history.';
+      message.textContent = 'Couldn’t load history.';
       host.append(button('Try again', 'text-button', () => { void openHistory(); }));
     }
   }
@@ -665,7 +665,7 @@ export function mountBoardInbox({
       }
       if (owner !== viewer) return;
       if (isCurrent()) message.textContent = failure
-        ? errors[failure.message] ?? 'Could not confirm your response. Check the request before trying again.' : '';
+        ? errors[failure.message] ?? 'Couldn’t confirm your response. Check the request before trying again.' : '';
       if (!failure) {
         epoch++;
         const remaining = items.filter((entry) => conversation
@@ -677,7 +677,7 @@ export function mountBoardInbox({
         await conversation.finish(failure, refresh);
       } else {
         if (!failure) onAccepted(item, { decision });
-        else if (inline) onAccepted(item, { error: errors[failure.message] ?? 'Could not confirm your response.' });
+        else if (inline) onAccepted(item, { error: errors[failure.message] ?? 'Couldn’t confirm your response.' });
         await Promise.all([refresh(), refreshConversation(item)]);
       }
     } finally {
