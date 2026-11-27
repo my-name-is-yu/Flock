@@ -141,7 +141,7 @@ function appendConnectionStates(container, {
     if (checkedAt) badge.setAttribute('aria-description', `Last checked ${new Date(checkedAt * 1000).toLocaleString()}`);
     container.append(badge);
   } else if (configured && !hostManaged) container.append(statusBadge('Registered'));
-  if (hostManaged) container.append(statusBadge('Managed on host'));
+  if (hostManaged) container.append(statusBadge('Managed on the server'));
   if (pending) container.append(statusBadge('Restart required', 'pending'));
 }
 
@@ -611,7 +611,7 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
     } else actionButton(item, 'Enable sharing', prepareAccess, true);
     return;
   }
-  if (mode === 'external') row('access', rowLabel('Managed on the host', 'The host supplies the login credentials for this Flock.'));
+  if (mode === 'external') row('access', rowLabel('Managed on the server', 'The server supplies the sign-in credentials for this Flock.'));
   else if (mode === 'managed') {
     const item = row('access', rowLabel('Shared access', 'Sign-in is required to use this Flock.'));
     actionButton(item, 'Invite someone', invitePerson, true);
