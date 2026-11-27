@@ -13,6 +13,7 @@ const labels = {
   allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
   allow_next_time: 'Allow rule saved for this Flock',
 };
+const historyKinds = { user_question: 'Question', protected_input: 'Secret request', policy_approval: 'Approval' };
 const actions = {
   protected_input: [['supply', 'Save secret']],
   policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']],
@@ -74,12 +75,12 @@ function relativeTime(seconds) {
 function historyCard(entry) {
   const article = element('article', '', 'board-inbox-card history-card');
   const approval = entry.itemKind === 'policy_approval' && entry.action;
-  const title = approval ? actionLabel(entry.action) : entry.requestTitle || labels[entry.itemKind] || 'Request';
+  const title = approval ? actionLabel(entry.action) : entry.requestTitle || historyKinds[entry.itemKind] || 'Request';
   const heading = element('h3', title);
   if (approval && entry.target) heading.append(element('span', entry.target, 'board-inbox-target'));
   article.append(heading);
   // Name the kind of item only when the title doesn't already say it, then who answered and when.
-  const about = approval ? entry.requestTitle : entry.requestTitle && labels[entry.itemKind];
+  const about = approval ? entry.requestTitle : entry.requestTitle && historyKinds[entry.itemKind];
   if (about) article.append(element('p', about, 'history-about'));
   const by = entry.decidedByYou ? 'you' : entry.decidedBy;
   article.append(element('p', `${labels[entry.decision] ?? 'Answered'} by ${by} · ${time(entry.decidedAt)}`, 'board-inbox-meta'));
