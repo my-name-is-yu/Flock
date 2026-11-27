@@ -367,16 +367,16 @@ ORDER BY r.id DESC LIMIT 21
 }
 
 bool MemoryStorage::canEditFrom(const conversation::Message& message) {
-    using enum conversation::PrincipalSource;
-    return (message.principalSource == trusted || message.principalSource == web) && !message.routing.contains("sessionWake") &&
-           !message.routing.contains("sessionInvitation") &&
-           permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
+    return permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
 }
 
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
-    if (task.trigger || !task.sourceMessageId) return false;
+    if (!permissions.allows(task.botId, Action::private_memory_write, task.botId)) return false;
+    // A schedule, reminder or trigger was set up by someone who manages the Bot.
+    if (task.trigger) return true;
+    if (!task.sourceMessageId) return false;
     const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
-    return message.bot == task.botId && canEditFrom(message) && permissions.allows(task.botId, Action::private_memory_write, task.botId);
+    return message.bot == task.botId && canEditFrom(message);
 }
 
 void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report, std::string_view runId, const Json& args, Seconds now) {
@@ -394,7 +394,8 @@ void MemoryStorage::learnFromWork(const TaskData& task, Id completion, Id report
     notice.erase("docKey");
     notice.update(source);
     notice["taskTitle"] = bounded(scrub.text(std::string_view(task.request).substr(0, task.request.find('\n'))), 300);
-    notice["requestEventId"] = task.sourceMessageId.value();
+    // Automated work has no request message, so its notice links to the completed work.
+    notice["requestEventId"] = task.sourceMessageId.value_or(completion);
     notice["completionEventId"] = completion;
     notice["reportEventId"] = report;
     notice["added"] = std::move(learned.added);

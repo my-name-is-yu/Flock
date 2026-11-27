@@ -976,7 +976,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
     const bool currentPr = shouldVerifyFollowup && gitStorage.gitPrReadyForFollowup(*gitHost, message);
     const auto available = [&] {
         auto offered = tools;
-        if (web && memoryStorage.canEditFrom(message)) {
+        if (!notification && memoryStorage.canEditFrom(message)) {
             offered.push_back("write_memory");
             offered.push_back("revert_memory_edit");
         }
