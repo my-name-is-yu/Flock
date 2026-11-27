@@ -128,7 +128,7 @@
 .settings-status.error { color: var(--danger); }
 .settings-card { display: grid; min-width: 0; padding: .95rem 1.1rem; border-radius: var(--radius-lg); background: var(--detail-card); overflow: hidden; }
 .settings-role { gap: .35rem; }
-.settings-card-label { margin: 0; color: var(--text-3); font-size: var(--text-xs); font-weight: 600; letter-spacing: .02em; }
+.settings-card-label { margin: 0; color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
 .settings-soul { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.7; }
 .settings-soul[data-folded="true"] {
   max-height: calc(1lh * 8); overflow: hidden;
