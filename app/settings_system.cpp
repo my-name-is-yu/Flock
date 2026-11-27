@@ -27,7 +27,8 @@ std::string sessionReadSetting(const Json& value) {
     return value.get<std::string>();
 }
 
-std::string remoteAddressSetting(const Json& value) {
+void validateRemoteAddress(const Json& value) {
+    if (value.is_null()) return;
     constexpr auto invalid = "Enter this computer's address on a private network, such as its Tailscale IP or name.";
     if (!value.is_string()) throw Conflict(invalid);
     const auto& address = value.get_ref<const std::string&>();
@@ -36,7 +37,6 @@ std::string remoteAddressSetting(const Json& value) {
         throw Conflict(invalid);
     if (address == "localhost" || address.starts_with("127.") || address == "::1" || address == "0.0.0.0" || address == "::")
         throw Conflict(invalid);
-    return address;
 }
 
 void validate(const Json& settings) {
@@ -47,7 +47,7 @@ void validate(const Json& settings) {
         } else if (key == "sessionRead") {
             if (!value.is_null()) (void)sessionReadSetting(value);
         } else if (key == "remoteAddress") {
-            if (!value.is_null()) (void)remoteAddressSetting(value);
+            validateRemoteAddress(value);
         } else
             throw Conflict("Unknown system setting.");
     }
@@ -63,7 +63,8 @@ SettingsSystem::SettingsSystem(const std::filesystem::path& home, std::optional<
     startupPortSetting_ = saved_.value("port", Json(nullptr));
     const auto mode = saved_.value("sessionRead", Json(nullptr));
     activeSessionRead_ = cliSessionRead.value_or(mode.is_null() ? "off" : mode.get<std::string>());
-    activeRemoteAddress_ = saved_.value("remoteAddress", std::string{});
+    const auto remoteAddress = saved_.value("remoteAddress", Json(nullptr));
+    if (!remoteAddress.is_null()) activeRemoteAddress_ = remoteAddress.get<std::string>();
 }
 
 unsigned SettingsSystem::startupPort(unsigned t3Port) const {
@@ -112,14 +113,13 @@ Json SettingsSystem::viewLocked(unsigned t3Port) const {
     const auto nextRead = cliSessionRead_ ? Json(activeSessionRead_) : savedRead.is_null() ? Json("off") : savedRead;
     const bool pendingPort = !cliPort_ && (nextPort ? nextPort != activePort_.value_or(0) : !startupPortSetting_.is_null());
     const bool pendingRead = nextRead != activeSessionRead_;
-    const auto optionalText = [](const std::string& value) { return value.empty() ? Json(nullptr) : Json(value); };
-    const auto nextRemote = saved_.value("remoteAddress", std::string{});
-    return {{"active", {{"port", activePort}, {"sessionRead", activeSessionRead_}, {"remoteAddress", optionalText(activeRemoteAddress_)}}},
-            {"saved", {{"port", savedPort}, {"sessionRead", savedRead}, {"remoteAddress", optionalText(nextRemote)}}},
-            {"next",
-             {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}, {"remoteAddress", optionalText(nextRemote)}}},
+    const auto activeRemote = activeRemoteAddress_ ? Json(*activeRemoteAddress_) : Json(nullptr);
+    const auto nextRemote = saved_.value("remoteAddress", Json(nullptr));
+    return {{"active", {{"port", activePort}, {"sessionRead", activeSessionRead_}, {"remoteAddress", activeRemote}}},
+            {"saved", {{"port", savedPort}, {"sessionRead", savedRead}, {"remoteAddress", nextRemote}}},
+            {"next", {{"port", nextPort ? Json(nextPort) : Json(nullptr)}, {"sessionRead", nextRead}, {"remoteAddress", nextRemote}}},
             {"overrides", {{"port", cliPort_.has_value()}, {"sessionRead", cliSessionRead_}, {"remoteAddress", false}}},
-            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}, {"remoteAddress", nextRemote != activeRemoteAddress_}}}};
+            {"pending", {{"port", pendingPort}, {"sessionRead", pendingRead}, {"remoteAddress", nextRemote != activeRemote}}}};
 }
 
 Json SettingsSystem::view(unsigned t3Port) const {
@@ -140,7 +140,7 @@ Json SettingsSystem::change(const Json& patch, unsigned t3Port) {
             if (cliSessionRead_) throw Conflict("The startup command sets how Flock reads T3 Sessions.");
             if (!value.is_null()) (void)sessionReadSetting(value);
         } else if (key == "remoteAddress") {
-            if (!value.is_null()) (void)remoteAddressSetting(value);
+            validateRemoteAddress(value);
         } else
             throw Conflict("Unknown system setting.");
         if (value.is_null())

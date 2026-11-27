@@ -49,6 +49,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
 namespace flockv0 {
 namespace {
@@ -232,9 +233,8 @@ std::vector<T3RemoteMachine> T3Connections::remoteMachines() const {
 bool T3Connections::removeRemoteMachine(std::string_view id) {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
-    if (!storage.database.query("SELECT 1 FROM t3_remote_machines WHERE id=?", {id}).next()) return false;
     storage.database.exec("DELETE FROM t3_remote_machines WHERE id=?", {id});
-    return true;
+    return sqlite3_changes(storage.database.db) == 1;
 }
 
 std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person, bool installationRoot) const {

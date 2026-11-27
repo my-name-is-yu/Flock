@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const executable = process.argv[2];
 const home = mkdtempSync(join(tmpdir(),'flock-system-settings-'));
+const systemSettingsFile = join(home,'system-settings.json');
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('FLOCK_')));
 const occupied = createServer();
 let daemon;
@@ -93,7 +94,7 @@ try {
     overrides: { port: false, sessionRead: false, remoteAddress: false },
     pending: { port: true, sessionRead: true, remoteAddress: false },
   });
-  assert.equal(statSync(join(home,'system-settings.json')).mode & 0o777,0o600);
+  assert.equal(statSync(systemSettingsFile).mode & 0o777,0o600);
 
   await stop();
   daemon = await start();
@@ -123,6 +124,8 @@ try {
   assert.deepEqual(await read(),applied);
 
   await stop();
+  const savedSettings = JSON.parse(readFileSync(systemSettingsFile,'utf8'));
+  writeFileSync(systemSettingsFile,JSON.stringify({ ...savedSettings, remoteAddress: null }));
   daemon = await start('--port','0','--session-read','on_demand');
   const overridden = await read();
   assert.deepEqual(overridden.overrides,{ port: true, sessionRead: true, remoteAddress: false });

@@ -412,11 +412,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             server = startWeb(store, *recovery, std::move(callbacks), onBound);
         }
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
-        if (const auto& address = system.remoteAddress(); !address.empty()) {
+        if (const auto& address = system.remoteAddress()) {
             try {
-                remoteServer = startRemoteSessionMcp(store, address, server->port(), remoteCallbacks);
+                remoteServer = startRemoteSessionMcp(store, *address, server->port(), remoteCallbacks);
                 std::lock_guard lock(remoteUrlMutex);
-                remoteUrl = remoteSessionMcpUrl(address, server->port());
+                remoteUrl = remoteSessionMcpUrl(*address, server->port());
                 std::cout << "Flock Session tools for other machines at " << remoteUrl << std::endl;
             } catch (const std::exception& error) {
                 std::cerr << error.what() << ". Check the address for other machines in Flock settings.\n";
