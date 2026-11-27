@@ -91,7 +91,7 @@
 .board-inbox-card, .board-inbox-form, .board-inbox-question { display: grid; gap: .75rem; overflow-wrap: anywhere; }
 .board-inbox-card + .board-inbox-card { border-block-start: 1px solid var(--hairline); margin-block-start: .75rem; padding-block-start: .75rem; }
 .board-inbox-title-group { display: grid; gap: .22rem; }
-.board-inbox-card h3 { font-size: var(--text-lg); font-weight: 650; line-height: 1.35; letter-spacing: -.015em; color: var(--text); }
+.board-inbox-card h3 { font-size: var(--text-lg); font-weight: 600; line-height: 1.35; letter-spacing: -.015em; color: var(--text); }
 .board-inbox-submeta {
   display: flex; flex-wrap: wrap; align-items: center; gap: .38rem;
   font-size: var(--text-sm); line-height: 1.4; color: var(--text-3);
@@ -139,7 +139,7 @@
   padding: .46rem .95rem; border-radius: var(--radius-full);
   border: 1px solid var(--hairline);
   background: var(--canvas); color: var(--text);
-  font-size: var(--text-sm); font-weight: 550; text-decoration: none;
+  font-size: var(--text-sm); font-weight: 500; text-decoration: none;
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .board-inbox-question:not(:has(.question-choice-form)) .question-reply { grid-column: 1 / -1; grid-row: 1; }
