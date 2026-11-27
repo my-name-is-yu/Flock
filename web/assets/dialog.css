@@ -338,7 +338,8 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   .wait-stop-confirm { animation: none; }
   @starting-style { .detail[open] { transform: none; } }
   .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active,
-  .settings-name-button:active,   .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
+  .settings-name-button:active, .peer-choice:active { transform: none; }
+  .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
   .settings-row svg { transition: none; transform: none; }
   .detail-tab { transition: none; }
   .dialog-body.section-switching > * { animation: none; }
