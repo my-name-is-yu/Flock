@@ -515,7 +515,7 @@ export function mountBoardInbox({
       if (!sameView()) return;
       const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);
-      message.textContent = decisions.length ? '' : 'No answered questions or approvals yet.';
+      message.textContent = decisions.length ? '' : 'No answered questions, secret requests or approvals yet.';
       animateHistoryCards(cards);
     } catch {
       if (!sameView()) return;
