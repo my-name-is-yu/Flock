@@ -50,7 +50,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, con
         std::erase_if(projects, [&](const T3Project& project) { return project.id.empty() || scrub.text(project.id) != project.id; });
         return projects;
     } catch (const std::exception&) {
-        return "Flock could not list projects. Check the T3 connection in Flock settings.";
+        return "Flock couldn’t list projects. Check the T3 connection in Flock settings.";
     }
 }
 

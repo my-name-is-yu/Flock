@@ -437,7 +437,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
         try {
             outcome = request();
         } catch (const std::exception&) {
-            outcome.detail = "Flock could not reach T3 to confirm delivery.";
+            outcome.detail = "Flock couldn’t reach T3 to confirm delivery.";
         }
         applyT3Delivery(std::move(outcome));
     };

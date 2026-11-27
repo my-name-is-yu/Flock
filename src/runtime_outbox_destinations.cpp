@@ -112,9 +112,9 @@ SELECT 1 FROM session_message_waits WHERE task_id=? AND action_id=? AND environm
                                 .next();
             return setDestinationStatus(
                 saved, DestinationRunPhase::confirmation_pending,
-                sessionMissing ? "T3 could not find this Session when Flock tried to stop it. Check its delegated Sessions in T3. "
+                sessionMissing ? "T3 couldn’t find this Session when Flock tried to stop it. Check its delegated Sessions in T3. "
                                  "Flock is keeping the project on hold until the work settles."
-                               : "Flock could not confirm the Run's status in T3.");
+                               : "Flock couldn’t confirm the Run’s status in T3.");
         }
         if (observed.kind == Kind::Question || observed.kind == Kind::ExternalInput)
             return setDestinationStatus(saved, DestinationRunPhase::confirmation_pending,
