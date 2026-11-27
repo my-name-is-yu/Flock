@@ -151,7 +151,7 @@ void memoryFlow(const std::filesystem::path& db) {
               bot.inputs.at(step + 1).event.at("memoryVersion") == 1 &&
               bot.inputs.at(step + 1).notes.memory == "Prefer CSV.\nUse staging-eu.\n",
           "A private edit did not use the version of memory in context");
-    check(history.at("revisions").size() == 1 && first.at("author") == "bot:alpha" && first.at("diffSummary") == "-0 +1 lines",
+    check(history.at("revisions").size() == 1 && first.at("author") == "bot:alpha" && first.at("diffSummary") == "+1 line",
           "The direct memory edit did not record its author and diff");
     const auto followup = turn(alpha, "Which staging environment is standard?", {});
     check(bot.inputs.at(followup).notes.memory == "Prefer CSV.\nUse staging-eu.\n", "BotNotes did not load edited memory");
