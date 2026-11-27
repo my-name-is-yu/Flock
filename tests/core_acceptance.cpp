@@ -427,6 +427,22 @@ void selectedWorkRechecksConnectionAfterApproval() {
           "A previously approved selected Session sent work after its connection was revoked");
 }
 
+void retriedSendIsJournaledOnce() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput& input) { return input.event.at("kind") == "intake" ? work() : work("follow_up", false); };
+    f.reach(id, "running");
+    int refusals = 3;
+    f.t3.rejectWork = [&](const Command& cmd) { return cmd.tool == CommandTool::follow_up && refusals-- > 0; };
+    f.t3.finish("run-1");
+    for (int i = 0; i < 20 && f.t3.follows == 0; ++i) {
+        f.now += 5;
+        f.runtime->tick();
+    }
+    check(f.t3.follows == 1 && refusals < 0 && f.logs(id, "send_started") == 2,
+          "each retry of a refused follow-up wrote another send_started entry");
+}
+
 void disconnectBlocksSendingAndRetry() {
     for (const bool followUp : {false, true}) {
         Fixture f(true);
@@ -3097,6 +3113,8 @@ int main() {
                                                                                     selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
                                                                                    {"selected work rechecks its T3 connection after approval",
                                                                                     selectedWorkRechecksConnectionAfterApproval},
+                                                                                   {"retried send is journaled once",
+                                                                                    retriedSendIsJournaledOnce},
                                                                                    {"disconnect blocks new work and retries",
                                                                                     disconnectBlocksSendingAndRetry},
                                                                                    {"pause during preflight prevents a send",
