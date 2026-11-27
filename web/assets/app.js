@@ -895,6 +895,8 @@ function renderHeader() {
     else document.documentElement.style.removeProperty('--bot-accent');
   }
   scopeKey = nextScopeKey;
+  const pageTitle = dm ? `${participant(dm.id).name} › ${participant(dm.peerId).name} · Flock` : bot ? `${bot.name} · Flock` : 'Flock';
+  if (document.title !== pageTitle) document.title = pageTitle;
   if (!bot || dm) {
     profileAvatar?.destroy();
     profileAvatar = null;
