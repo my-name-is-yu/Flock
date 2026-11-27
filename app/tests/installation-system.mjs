@@ -114,7 +114,8 @@ try {
     pending: { port: true, sessionRead: false, remoteAddress: false } },'Returning to an automatic port must stay pending until restart');
   await change({ port: applied.saved.port });
   assert.deepEqual(await read(),applied);
-  for (const address of ['127.0.0.1','localhost','::1','0.0.0.0','mini tailnet','']) await change({ remoteAddress: address },409);
+  for (const address of ['127.0.0.1','127.1','0177.0.0.1','localhost','::1','0:0:0:0:0:0:0:1','0.0.0.0','0','::','0:0:0:0:0:0:0:0','::ffff:127.0.0.1','mini tailnet','']) await change({ remoteAddress: address },409);
+  for (const address of ['100.101.102.103','fd7a:115c:a1e0::1']) await change({ remoteAddress: address });
   await change({ remoteAddress: 'mini.example.ts.net' });
   const remote = await read();
   assert.equal(remote.next.remoteAddress,'mini.example.ts.net');

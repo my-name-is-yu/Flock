@@ -7,6 +7,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <netdb.h>
+#include <netinet/in.h>
+
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -27,6 +30,25 @@ std::string sessionReadSetting(const Json& value) {
     return value.get<std::string>();
 }
 
+bool reachableFromOtherMachines(const std::string& address) {
+    addrinfo hints{};
+    hints.ai_flags = AI_NUMERICHOST;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(address.c_str(), nullptr, &hints, &found) != 0) return true;
+    bool reachable = true;
+    for (auto* entry = found; entry; entry = entry->ai_next) {
+        if (entry->ai_family == AF_INET) {
+            const auto ip = ntohl(reinterpret_cast<const sockaddr_in*>(entry->ai_addr)->sin_addr.s_addr);
+            reachable = reachable && ip != INADDR_ANY && (ip >> 24) != IN_LOOPBACKNET;
+        } else if (entry->ai_family == AF_INET6) {
+            const auto& ip = reinterpret_cast<const sockaddr_in6*>(entry->ai_addr)->sin6_addr;
+            reachable = reachable && !IN6_IS_ADDR_UNSPECIFIED(&ip) && !IN6_IS_ADDR_LOOPBACK(&ip) && !IN6_IS_ADDR_V4MAPPED(&ip);
+        }
+    }
+    freeaddrinfo(found);
+    return reachable;
+}
+
 void validateRemoteAddress(const Json& value) {
     if (value.is_null()) return;
     constexpr auto invalid = "Enter this computer's address on a private network, such as its Tailscale IP or name.";
@@ -35,8 +57,7 @@ void validateRemoteAddress(const Json& value) {
     if (address.empty() || address.size() > 253 ||
         address.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:") != address.npos)
         throw Conflict(invalid);
-    if (address == "localhost" || address.starts_with("127.") || address == "::1" || address == "0.0.0.0" || address == "::")
-        throw Conflict(invalid);
+    if (address == "localhost" || !reachableFromOtherMachines(address)) throw Conflict(invalid);
 }
 
 void validate(const Json& settings) {
