@@ -624,8 +624,9 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   }
   for (const {person, adminRoot, pendingUntil: pendingPassword} of users) {
     const owner = person === 'local-owner';
-    const role = owner ? 'Installation owner' : adminRoot ? 'Administrator' : 'Member';
-    const item = row('access', rowLabel(person, person === currentPerson ? `${role} · You` : role));
+    const role = owner ? 'Flock owner' : adminRoot ? 'Administrator' : 'Member';
+    const details = [role, person === currentPerson && 'You', pendingPassword && 'Password not confirmed'].filter(Boolean);
+    const item = row('access', rowLabel(person, details.join(' · ')));
     if (mode !== 'managed') continue;
     const actions = element('div', '', 'row-actions');
     if (!owner) actionButton(actions, 'Change role', () => changeRole({person, adminRoot}));
