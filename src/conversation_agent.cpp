@@ -172,7 +172,7 @@ std::string modelFailureReply(ModelErrorCode code, bool ja) {
                   : "This model doesn’t support the selected reasoning effort. Choose another effort or Model default in Bot settings.";
     if (code == ModelErrorCode::image_rejected)
         return ja ? "添付画像を読み込めませんでした。別の画像に差し替えるか、画像を外して、メッセージを送り直してください。"
-                  : "I couldn't read an attached image. Replace it or remove it, then send your message again.";
+                  : "I couldn’t read an attached image. Replace it or remove it, then send your message again.";
     return ja ? "このBotは応答を作成できませんでした。" : "This Bot couldn’t produce a reply.";
 }
 
@@ -1132,7 +1132,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 const auto diagnostic =
                     Json::parse(Json(error.what()).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
                 finishError(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを確認してください。"
-                               : "I couldn't read this Bot's notes (" + diagnostic + "). Check its Role and memory.");
+                               : "I couldn’t read this Bot’s notes (" + diagnostic + "). Check its Role and memory.");
                 return;
             }
             const auto linkedDestinations = taskRouting.discoverTaskDestinations(t3, message, true);

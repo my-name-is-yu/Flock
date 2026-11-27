@@ -209,7 +209,7 @@ Json refreshProfile(ProfileLock& lock, Json profile, const chatgpt::HttpTranspor
     } catch (const chatgpt::Failure& error) {
         if (!expiredConnection(error.providerCode)) throw;
         lock.save(registration(profile));
-        throw ModelError("Flock's ChatGPT connection expired. Run 'flock model login' again", false);
+        throw ModelError("Flock’s ChatGPT sign-in expired. Sign in to ChatGPT again in Flock settings → Connections.", false);
     }
 }
 }
@@ -283,14 +283,16 @@ std::string ChatGPTModel::accessToken() {
     ProfileLock lock(directory_);
     auto profile = lock.read();
     if (!planUsage(profile))
-        throw ModelError("Use 'flock model login' and grant ChatGPT plan usage", ModelErrorCode::authentication_required);
+        throw ModelError("Sign in to ChatGPT in Flock settings → Connections and allow plan usage.",
+                         ModelErrorCode::authentication_required);
     const auto now = chatgpt::nowMillis();
     if (!field(profile, "pending").is_null() ||
         (timestamp(profile, "expiresAt") <= now + 60'000 && timestamp(profile, "earliestRefreshAt") <= now))
         profile = refreshProfile(lock, std::move(profile), transport_);
     if (!planUsage(profile))
-        throw ModelError("Flock's ChatGPT plan permission is unavailable. Run 'flock model login --reconsent'",
-                         ModelErrorCode::authentication_required);
+        throw ModelError(
+            "Flock’s ChatGPT plan permission is unavailable. Sign in to ChatGPT again in Flock settings → Connections and allow plan usage.",
+            ModelErrorCode::authentication_required);
     if (timestamp(profile, "expiresAt") <= chatgpt::nowMillis())
         throw ModelError("ChatGPT credentials cannot be renewed yet. Retry shortly.", true);
     auto token = stringField(profile, "accessToken");

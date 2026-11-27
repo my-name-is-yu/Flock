@@ -40,7 +40,7 @@ LoginTarget resolveTarget(const T3ConnectRequest& request, const std::filesystem
     switch (request.source) {
     case Source::Local: {
         auto local = discoverLocalT3();
-        if (!local) throw Conflict("Open T3 Code on this machine, or connect using a T3 connection URL.");
+        if (!local) throw Conflict("Open T3 Code on this computer, or connect using a T3 connection URL.");
         return {std::move(local->environmentId), std::move(local->mcpUrl)};
     }
     case Source::Url: return {std::nullopt, request.value};
