@@ -124,6 +124,7 @@ function showSection() {
     if (link === active) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   $('crumb').textContent = active.textContent;
   $('settings-scope').textContent = section === 'appearance' ? 'Applies to this browser' : 'Applies to this Flock';
   document.title = `${active.textContent} · Flock settings`;
