@@ -59,9 +59,9 @@ input:hover:not(:disabled), select:hover:not(:disabled) {
 }
 input[readonly] { background: var(--raised); color: var(--text-2); cursor: default; }
 input:focus-visible, select:focus-visible {
-  outline: 2px solid var(--focus); outline-offset: 1px;
-  border-color: color-mix(in srgb, var(--focus) 55%, var(--hairline));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+  outline: 2px solid transparent;
+  border-color: var(--focus-border);
+  box-shadow: var(--focus-halo);
 }
 .button {
   transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
