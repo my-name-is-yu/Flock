@@ -235,7 +235,7 @@
   border-top: 1px solid var(--hairline);
 }
 .board-inbox-stop .wait-cancel {
-  justify-self: start; padding: 0; border: 0; background: none;
+  justify-self: start; margin: 0; padding: 0; border: 0; background: none;
   color: var(--danger); font-size: var(--text-sm); font-weight: 500;
 }
 .board-inbox-stop .wait-cancel:hover:not(:disabled) { text-decoration: underline; }
