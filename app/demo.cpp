@@ -45,7 +45,7 @@ class DemoModel final : public Model {
                 const auto& last = turn.back();
                 const bool ok = last.at("result").value("ok", false);
                 const auto tool = last.value("tool", "");
-                std::string text = !ok                              ? "The demo could not apply that request."
+                std::string text = !ok                              ? "The demo couldn’t apply that request."
                                    : tool == "write_memory"         ? "I’ll remember that."
                                    : tool == "answer_task_question" ? "I passed your answer to the task."
                                    : tool == "read_result"          ? "The demo result records successful completion of simulated work. "

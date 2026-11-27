@@ -14,7 +14,7 @@ export function createBotWorkspaceCard(saveSettings, loadEnvironments, loadModel
       <h3 class="settings-card-label" id="settings-workspace-label">How it runs</h3>
       <button type="button" class="text-button settings-card-edit">Edit</button>
     </div>
-    <p class="settings-workspace-missing">Choose a model before this Bot can start work.</p>
+    <p class="settings-workspace-missing">Choose a model so this Bot can reply.</p>
     <dl class="settings-workspace-facts" hidden>
       <dt>Model</dt><dd></dd>
       <dt>Reasoning effort</dt><dd></dd>

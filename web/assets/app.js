@@ -2434,7 +2434,7 @@ function renderComposer() {
   const bannerDescription = elements['composer-banner-description'];
   const description = banner === 'paused' ? context.resumeError ||
       (canAct ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.')
-    : banner === 'setup' ? (canAct ? 'Choose a model to start talking.' : 'The Bot’s owner or a Flock administrator can set it up.')
+    : banner === 'setup' ? (canAct ? 'Choose a model so this Bot can reply.' : 'The Bot’s owner or a Flock administrator can set it up.')
     : '';
   if (bannerDescription.textContent !== description) bannerDescription.textContent = description;
   bannerDescription.classList.toggle('error', paused && !!context.resumeError);
