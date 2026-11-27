@@ -13,6 +13,7 @@ async function exercise(createRecurringRequests) {
   const advanced = { id: 2, kind: 'schedule', request: 'Monthly', cron: '0 9 1 * *',
     timezone: 'Europe/Paris', nextRunAt: utc };
   let canManage = true;
+  let needsWorkspace = false;
   let failNextRead = false;
   let recent = [reminder, configured];
   let reads = 0;
@@ -39,7 +40,7 @@ async function exercise(createRecurringRequests) {
     if (failNextRead) throw new Error('temporary_poll_failure');
     if (url.searchParams.get('before') === '3') return { automations: [advanced], before: 0 };
     reads++;
-    const page = { automations: [...recent], before: 3, canManage, unscheduledRequests: ['Unavailable'] };
+    const page = { automations: [...recent], before: 3, canManage, needsWorkspace, unscheduledRequests: ['Unavailable'] };
     if (holdRead) {
       pendingSignal = signal;
       await holdRead;
@@ -135,6 +136,13 @@ async function exercise(createRecurringRequests) {
   resolveRead();
   await nextTask();
   check(count.data === '2', 'a stale response restored the removed request');
+
+  needsWorkspace = true;
+  poll();
+  await nextTask();
+  check(form.hidden && list.firstElementChild.textContent.includes('How it runs') && list.querySelector('[data-schedule-id]'),
+    'a Bot without a T3 project offered a form whose requests cannot be saved');
+  needsWorkspace = false;
 
   canManage = false;
   poll();

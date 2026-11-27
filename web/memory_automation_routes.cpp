@@ -119,6 +119,8 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
                 const Policy policy{store};
                 page["canManage"] = policy.allows(actor, Action::bot_settings, bot) && policy.allows(actor, Action::bot_decide, bot);
                 page["unscheduledRequests"] = unscheduledRequests(store, bot, profile);
+                const auto routing = callbacks.intake(bot, "");
+                page["needsWorkspace"] = routing.environmentId.empty() || routing.projectId.empty();
             }
             res.set_header("Cache-Control", "no-store");
             reply(res, 200, page);
