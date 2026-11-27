@@ -614,7 +614,7 @@ export function mountBoardInbox({
   const errors = {
     request_changed: 'The request changed. Review the current request before responding again.',
     already_closed: 'This request was already answered or closed.',
-    access_denied: 'You do not have permission to respond to this request.',
+    access_denied: 'You don’t have permission to respond to this request.',
     decision_conflict: 'Flock could not apply your response. Check it and try again.',
     invalid_input: 'Check your response and try again.',
   };

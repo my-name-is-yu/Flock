@@ -672,9 +672,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         workspaces_unavailable: 'Couldn’t load the selected project. Check the T3 connection and try again.',
         bot_not_found: 'This Bot no longer exists.',
         bot_management_unavailable: 'Bot editing is unavailable on this server.',
-        access_denied: 'You do not have permission to edit this Bot.',
+        access_denied: 'You don’t have permission to edit this Bot.',
       };
-      setSubmitError(messages[error.message] ?? 'Couldn’t save this Bot. Check the runtime connection and try again.');
+      setSubmitError(messages[error.message] ?? 'Couldn’t save this Bot. Try again.');
     } finally {
       saving = false;
       if (dialog.open) renderTextPreview();
