@@ -2,12 +2,19 @@
 
 #include <exception>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace flockv0 {
+struct BotAvatarChoice {
+    std::string kind, preset;
+    std::optional<std::string> color;
+};
+
 struct BotChange {
     std::string target, name, requestKey;
+    std::optional<BotAvatarChoice> avatar = {};
 };
 
 using ApplyBotChange = std::function<void(const BotChange&)>;

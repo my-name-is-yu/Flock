@@ -402,13 +402,14 @@ void policy_storage::audit(Database& database, const Person& actor, std::string_
                   {unixTime(), actor.id, bot, action, details.dump()});
 }
 
-Id BotAccess::applyBotChange(std::string_view bot, const Person& creator, std::string_view target, std::string_view name, Id message,
-                             int step, const ApplyBotChange& apply, const ReconcileBotCreation* onExhausted) {
+Id BotAccess::applyBotChange(std::string_view bot, const Person& creator, std::string_view target, std::string_view name,
+                             std::optional<BotAvatarChoice> avatar, Id message, int step, const ApplyBotChange& apply,
+                             const ReconcileBotCreation* onExhausted) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);
     if (!apply) throw Conflict("Bot creation is unavailable");
-    const BotChange change{std::string(target), botName(name), requestKey};
+    const BotChange change{std::string(target), botName(name), requestKey, std::move(avatar)};
     std::lock_guard lock(database.mutex);
     if (auto completed = database.query("SELECT id FROM bot_creations WHERE request_key=?", {requestKey}); completed.next())
         return completed.number(0);
