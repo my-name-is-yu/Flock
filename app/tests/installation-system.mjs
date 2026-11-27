@@ -120,7 +120,7 @@ try {
   const remote = await read();
   assert.equal(remote.next.remoteAddress,'mini.example.ts.net');
   assert.equal(remote.active.remoteAddress,null);
-  assert.equal(remote.pending.remoteAddress,true,'A new address for other machines must wait for restart');
+  assert.equal(remote.pending.remoteAddress,true,'A new address for other computers must wait for restart');
   await change({ remoteAddress: null });
   assert.deepEqual(await read(),applied);
 

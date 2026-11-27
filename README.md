@@ -43,9 +43,9 @@ commit in blame.
 
 Sessions on the computer running Flock can ask Bots right away. For Sessions
 on another computer, connect that computer's T3, set **Address for other
-machines** in **Flock settings → System** to an address it can reach (such as a
+computers** in **Flock settings → System** to an address it can reach (such as a
 Tailscale IP), restart Flock, and add the computer under **Connections → Other
-machines**.
+computers**.
 
 To try the conversation flow without connecting accounts, run
 `build/release/app/flock --home "$(mktemp -d)" run --fixed`, create a Bot, and

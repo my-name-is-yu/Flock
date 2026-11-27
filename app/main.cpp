@@ -415,9 +415,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                 remoteServer = startRemoteSessionMcp(store, *address, server->port(), remoteCallbacks);
                 std::lock_guard lock(remoteUrlMutex);
                 remoteUrl = remoteSessionMcpUrl(*address, server->port());
-                std::cout << "Flock Session tools for other machines at " << remoteUrl << std::endl;
+                std::cout << "Flock Session tools for other computers at " << remoteUrl << std::endl;
             } catch (const std::exception& error) {
-                std::cerr << error.what() << ". Check the address for other machines in Flock settings.\n";
+                std::cerr << error.what() << ". Check the address for other computers in Flock settings.\n";
             }
         }
     }

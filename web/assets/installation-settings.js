@@ -325,7 +325,7 @@ function editMachines(entry = {}) {
   const channels = installation.connections.channels;
   const ownerLabel = (machine) => `Owner · ${machine.personId}`;
   if (channels.hostManaged || !channels.canManageHost) {
-    openEditor('Local machines', 'The installation owner manages which hosts can receive requests to read local files.',
+    openEditor('Local computers', 'The installation owner manages which hosts can receive requests to read local files.',
       entriesList(channels.localMachines, ownerLabel));
     return;
   }
@@ -333,19 +333,19 @@ function editMachines(entry = {}) {
   const list = entriesList(channels.localMachines, ownerLabel, {
     edit: editMachines,
     remove: (machine) => confirmSetting(`Remove ${machine.id}?`,
-      'New requests will no longer be able to use this machine after restart.',
+      'New requests will no longer be able to use this computer after restart.',
       'Remove machine', () => saveInstallation('channels', {action: 'removeMachine', id: machine.id})),
     status: registeredEntry,
   });
-  const name = settingField('id', 'Machine name', {required: true, value: entry.id});
+  const name = settingField('id', 'Computer name', {required: true, value: entry.id});
   if (editing) name.querySelector('input').readOnly = true;
   const actions = editing ? [cancelEditButton(() => editMachines())] : [];
   const form = buildForm([
     name,
     settingField('personId', 'Owner’s person ID', {required: true, value: entry.personId, placeholder: 'local-owner'}),
-  ], editing ? 'Save machine' : 'Add machine', ({id, personId}) =>
+  ], editing ? 'Save computer' : 'Add computer', ({id, personId}) =>
     saveInstallation('channels', {action: 'saveMachine', id: id.trim(), personId: personId.trim()}), actions);
-  openEditor('Local machines', 'Let approved requests read files on the computer running Flock.', list, form);
+  openEditor('Local computers', 'Let approved requests read files on the computer running Flock.', list, form);
 }
 
 function editChannelOptions() {
@@ -475,9 +475,9 @@ function renderIntegrations(connections) {
       });
     }
     const viewMachines = !hostManaged && canManageHost || channels.localMachines.length > 0;
-    connectionRow('integrations', 'Local machines', canManageHost
+    connectionRow('integrations', 'Local computers', canManageHost
       ? 'Computers where approved requests can read local files.'
-      : 'The installation owner manages access to local machines.', {
+      : 'The installation owner manages access to local computers.', {
       configured: channels.localMachines.length > 0, pending: channels.localMachinesPending,
       hostManaged, readOnly: hostManaged || !canManageHost, manage: viewMachines ? editMachines : null,
     });
@@ -649,8 +649,8 @@ function editRemoteAddress(state) {
   });
   const form = buildForm([field], 'Save', ({value}) =>
     saveInstallation('system', {remoteAddress: value.trim() || null}));
-  openEditor('Address for other machines',
-    'Sessions on other machines reach Flock at this address. Use one on a private network, such as this computer’s '
+  openEditor('Address for other computers',
+    'Sessions on other computers reach Flock at this address. Use one on a private network, such as this computer’s '
       + 'Tailscale IP. Leave it blank to turn this off. Changes apply after restart.', form);
 }
 
@@ -691,10 +691,10 @@ function renderSystem(state) {
   if (overrides.sessionRead) sessionRead.append(statusBadge('Set at launch'));
   else actionButton(sessionRead, 'Change', () => editSystem('sessionRead', state))
     .setAttribute('aria-label', 'Change when Bots read T3 threads');
-  const remote = row('system', systemValues('Address for other machines', active.remoteAddress ?? 'Off',
+  const remote = row('system', systemValues('Address for other computers', active.remoteAddress ?? 'Off',
     next.remoteAddress ?? 'Off', pending.remoteAddress));
   actionButton(remote, 'Change', () => editSystem('remoteAddress', state))
-    .setAttribute('aria-label', 'Change the address for other machines');
+    .setAttribute('aria-label', 'Change the address for other computers');
   if (pending.port || pending.sessionRead || pending.remoteAddress) restartNotice('system');
 }
 
@@ -728,16 +728,16 @@ function showRemoteSetup(name, {url, bearerToken}) {
   const actions = formActions();
   actionButton(actions, 'Done', () => editor.close(), true);
   openEditor(`Set up ${name}`,
-    'On that machine, run the Claude Code command below. If you set up Flock in Claude Code before, first run claude mcp remove flock --scope user. '
+    'On that computer, run the Claude Code command below. If you set up Flock in Claude Code before, first run claude mcp remove flock --scope user. '
       + 'In ~/.codex/config.toml, replace the existing [mcp_servers.flock] block or add it if it’s missing. '
-      + 'Both setups contain a secret and appear here only once. Connect that machine’s T3 to Flock so Bots can reply in its Sessions.',
+      + 'Both setups contain a secret and appear here only once. Connect that computer’s T3 to Flock so Bots can reply in its Sessions.',
     copyableSetup('Claude Code', claude), copyableSetup('Codex', codex), actions);
   backdropDismissible = false;
 }
 
 function addRemoteMachine(refresh) {
-  const form = buildForm([settingField('name', 'Machine name', {required: true, placeholder: 'Mac mini', wide: true})],
-    'Add machine', async ({name}) => {
+  const form = buildForm([settingField('name', 'Computer name', {required: true, placeholder: 'Mac mini', wide: true})],
+    'Add computer', async ({name}) => {
       const response = await postSettings('remote-machine', {name: name.trim()});
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.message || 'Couldn’t add this machine.');
@@ -745,7 +745,7 @@ function addRemoteMachine(refresh) {
       showRemoteSetup(name.trim(), data);
       return false;
     });
-  openEditor('Add another machine', 'Name the machine whose Sessions should be able to ask Flock Bots.', form);
+  openEditor('Add another computer', 'Name the computer whose Sessions should be able to ask Flock Bots.', form);
 }
 
 export function renderRemoteMachines(remote, t3Connected, refresh) {
@@ -754,7 +754,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   if (!remote) return;
   if (t3Connected && !remote.url) {
     const item = row('remote-machines', rowLabel('Other machines can’t reach Flock yet',
-      'Set the address for other machines in Flock server settings, then restart Flock.'));
+      'Set the address for other computers in Flock server settings, then restart Flock.'));
     const open = element('a', 'Open server settings', 'button');
     open.href = '#system';
     item.append(open);
@@ -762,7 +762,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   for (const {id, name} of remote.machines) {
     const item = row('remote-machines', rowLabel(name));
     const remove = actionButton(item, 'Remove', () => confirmSetting(`Remove ${name}?`,
-      'You’ll need to set up this machine again for its Sessions to ask Flock Bots.', 'Remove', async () => {
+      'You’ll need to set up this computer again for its Sessions to ask Flock Bots.', 'Remove', async () => {
         const response = await postSettings('remote-machine', {remove: id});
         if (!response.ok && response.status !== 404) throw new Error('Couldn’t remove this machine.');
         await refresh();
@@ -771,7 +771,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   }
   if (t3Connected && remote.url) {
     const item = row('remote-machines', rowLabel('Add another machine', `Flock listens at ${remote.url}`));
-    actionButton(item, 'Add machine', () => addRemoteMachine(refresh), true);
+    actionButton(item, 'Add computer', () => addRemoteMachine(refresh), true);
   }
 }
 

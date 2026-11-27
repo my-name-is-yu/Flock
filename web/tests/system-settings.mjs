@@ -27,8 +27,8 @@ async function exercise() {
     next: { port: null, sessionRead: 'off' }, overrides: neither, pending: neither,
   });
   check(rows.length === 3, 'A fresh start showed a restart notice');
-  check(rows[2].title === 'Address for other machines' && rows[2].value === 'Off' && rows[2].change,
-    'A fresh start did not offer an address for other machines');
+  check(rows[2].title === 'Address for other computers' && rows[2].value === 'Off' && rows[2].change,
+    'A fresh start did not offer an address for other computers');
   check(rows[0].value === '52011' && !rows[0].next, `An automatic port with nothing saved read “${rows[0].value}”`);
   check(rows[1].value === 'Off' && rows[0].change && rows[1].change, 'A fresh start did not show its values with Change');
 
@@ -64,7 +64,7 @@ async function exercise() {
     pending: { ...neither, remoteAddress: true },
   });
   check(rows[2].value === 'Off → 100.64.0.2 after restart' && rows[3]?.title === 'Restart required',
-    `A pending address for other machines read “${rows[2].value}”`);
+    `A pending address for other computers read “${rows[2].value}”`);
 }
 
 function fixturesUx() {
@@ -186,10 +186,10 @@ async function exerciseUx() {
   const remoteMachines = $('remote-machines');
   const editor = $('installation-editor');
   const editorTitle = $('installation-editor-title');
-  const addMachine = btn(remoteMachines, 'Add machine');
-  check(!remoteSection.hidden && addMachine, 'Other machines did not offer Add machine');
+  const addMachine = btn(remoteMachines, 'Add computer');
+  check(!remoteSection.hidden && addMachine, 'Other computers did not offer Add computer');
   addMachine.click();
-  await waitFor(() => editor.open && editor.querySelector('input[name="name"]'), 'Add machine did not ask for a name');
+  await waitFor(() => editor.open && editor.querySelector('input[name="name"]'), 'Add computer did not ask for a name');
   editor.querySelector('input[name="name"]').value = ' Mac mini ';
   editor.querySelector('form').requestSubmit();
   await waitFor(() => editorTitle.textContent === 'Set up Mac mini', 'Adding a machine did not show its setup');
@@ -219,7 +219,7 @@ async function exerciseUx() {
   check(window.__settingsUx.disconnectCalls[0].environmentId === 'local', 'Disconnect submitted wrong environmentId');
 
   const removeMachine = btn(remoteMachines, 'Remove');
-  check(!remoteSection.hidden && remoteMachines.textContent.includes('Mac mini') && removeMachine && !btn(remoteMachines, 'Add machine'),
+  check(!remoteSection.hidden && remoteMachines.textContent.includes('Mac mini') && removeMachine && !btn(remoteMachines, 'Add computer'),
     'Disconnecting T3 did not leave the machine available for removal only');
   removeMachine.click();
   await waitFor(() => editor.open && editorTitle.textContent === 'Remove Mac mini?', 'Removing the machine did not ask for confirmation');
@@ -246,7 +246,7 @@ async function exerciseUx() {
     `Cancel edit for ${manageRowText} did not reset the form`);
     $('installation-editor-close').click();
   };
-  await verifyCancelEdit($('integrations'), 'Local machines', 'Save machine', 'Add machine');
+  await verifyCancelEdit($('integrations'), 'Local computers', 'Save computer', 'Add computer');
   await verifyCancelEdit($('tools'), 'MCP servers', 'Save server', 'Add server');
   await verifyCancelEdit($('tools'), 'Skills', 'Save skill', 'Add skill');
 }

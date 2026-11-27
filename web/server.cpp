@@ -904,7 +904,7 @@ public:
             return httplib::Server::HandlerResponse::Unhandled;
         });
         web::sessionMcpRoute(server_, store, callbacks_);
-        const auto bindError = "Could not listen for other machines at " + authority(address, port);
+        const auto bindError = "Could not listen for other computers at " + authority(address, port);
         if (!server_.bind_to_port(address, static_cast<int>(port))) {
             server_.stop();
             throw std::runtime_error(bindError);
