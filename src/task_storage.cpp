@@ -667,13 +667,6 @@ Id TaskRecords::complete(TaskData& task, const CompletionEntry& entry) {
     return id;
 }
 
-void requireInstructionAcknowledgments(const TaskData& task, const Json& args) {
-    auto ids = Json::array();
-    for (const auto& item : task.pendingInstructions) ids.push_back({{"messageId", item.messageId}, {"step", item.step}});
-    if ((!ids.empty()) != args.contains("acknowledgedInstructions") || args.value("acknowledgedInstructions", Json::array()) != ids)
-        throw Conflict("Acknowledge each pending instruction by messageId and step, oldest first");
-}
-
 void waitForExternalEvent(TaskData& task, const Json& args, Seconds now) {
     auto note = field(args, "note");
     if (note.size() > 240 || !conversation_storage::hasText(note) || note.find_first_of("\r\n") != std::string::npos)
@@ -681,7 +674,6 @@ void waitForExternalEvent(TaskData& task, const Json& args, Seconds now) {
     const auto delay = args.find("checkAgainAfterMinutes");
     if (delay == args.end() || !delay->is_number_integer() || *delay < minExternalCheckMinutes || *delay > maxExternalCheckMinutes)
         throw Conflict("Choose a re-check time between 5 and 1440 minutes");
-    requireInstructionAcknowledgments(task, args);
     task.pendingInstructions.clear();
     task.pendingDecision.reset();
     task.state = TaskState::external_waiting;
@@ -912,8 +904,7 @@ ORDER BY task.external_check_at,task.id LIMIT 20
 }
 
 Id TaskRecords::addRevision(TaskData& task, std::string_view intent, std::string_view doneWhen, Id source) {
-    if (!conversation_storage::hasText(intent) || !conversation_storage::hasText(doneWhen))
-        throw Conflict("Task revision needs intent and completion criteria");
+    if (!conversation_storage::hasText(intent)) throw Conflict("Task revision needs an intent");
     if (source) {
         auto row = database.query("SELECT 1 FROM messages WHERE id=? AND bot_id=?", {source, task.botId});
         if (!row.next()) throw Conflict("Task revision must come from this Bot's conversation");

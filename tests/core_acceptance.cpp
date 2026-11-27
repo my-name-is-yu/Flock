@@ -618,6 +618,22 @@ void taskResumesAfterModelSignIn() {
     check(f.model.calls == 2 && f.t3.launches == 1, "The original task did not resume once ChatGPT was connected");
 }
 
+void workNeedsNoCriteriaOrReason() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput& input) -> Decision {
+        if (input.event["kind"] == "intake") return {"delegate", {{"instruction", "Check the fixture and report"}}, {}};
+        return {"complete", {{"report", "Verified the fixture"}}, {}};
+    };
+    f.reach(id, "running");
+    check(f.t3.seen.size() == 1 && f.t3.seen.front().instruction.find("Task intent:") != std::string::npos &&
+              f.t3.seen.front().instruction.find("Completion criteria:") == std::string::npos && f.task(id).at("doneWhen") == "",
+          "first work without criteria did not start, or the Session received empty criteria");
+    f.t3.finish("run-1");
+    f.reach(id, "completed");
+    check(f.logs(id, "tool_error") == 0, "a decision without criteria or a reason was rejected");
+}
+
 void invalidDecisions() {
     Fixture f;
     const auto id = f.submit();
@@ -1921,11 +1937,8 @@ void peerCompletionAfterEnvironmentMove() {
             }
             check(event.at("kind") == "bot_result" && event.at("text") == "Cloud result" && hasTool(input, "complete"),
                   "the current peer result did not unlock completion");
-            const auto& move = input.task.at("userInstructions").at(0);
-            return {"complete",
-                    {{"report", "Cloud result"},
-                     {"acknowledgedInstructions", Json::array({{{"messageId", move.at("messageId")}, {"step", move.at("step")}}})}},
-                    "Verified after the move"};
+            check(input.task.at("userInstructions").size() == 1, "the move instruction did not reach the completion decision");
+            return {"complete", {{"report", "Cloud result"}}, "Verified after the move"};
         };
         f.reach(sender, "peer_waiting");
         f.peers.at("alpha").front().intake.environmentId = environment;
@@ -3028,6 +3041,8 @@ void prefillInFull() {
 int main() {
     for (const auto& [name, run] : std::vector<std::pair<const char*, void (*)()>>{{"exclusive Runtime database lock",
                                                                                     runtimeDatabaseLockIsExclusive},
+                                                                                   {"work needs no criteria or reason",
+                                                                                    workNeedsNoCriteriaOrReason},
                                                                                    {"invalid decisions", invalidDecisions},
                                                                                    {"transient model recovery",
                                                                                     transientFailuresKeepRetrying},

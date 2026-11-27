@@ -1576,14 +1576,12 @@ void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
         const auto& item = input.task.at("userInstructions").at(0);
         check(item.at("messageId") == receipt.at("messageId") && input.event.at("report") == "Baseline latency is 10 ms",
               "settled decision missed the instruction identity or evidence");
-        Json args = {{"report", "Baseline latency is 10 ms"}};
-        if (++decisions > 1)
-            args["acknowledgedInstructions"] = Json::array({{{"messageId", item.at("messageId")}, {"step", item.at("step")}}});
-        return Decision{"complete", args, "The existing report satisfies the repeated criterion"};
+        ++decisions;
+        return Decision{"complete", {{"report", "Baseline latency is 10 ms"}}, "The existing report satisfies the repeated criterion"};
     };
     f.reach(id, "completed");
-    check(decisions == 2 && f.t3.sent.size() == 1 && f.event(id, "decision").at("args").contains("acknowledgedInstructions"),
-          "completion ignored pending instructions or forced another Run");
+    check(decisions == 1 && f.t3.sent.size() == 1 && f.task(id).value("pendingInstructions", Json::array()).empty(),
+          "completion did not show the pending instruction, or forced another Run");
 }
 
 void twoInstructionsFromOneMessageAreTrackedSeparately() {
