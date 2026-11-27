@@ -39,6 +39,7 @@ async function exercise() {
   check(report.querySelector('strong')?.textContent === 'OPEN' && report.querySelector('li') && !report.textContent.includes('**'),
     'A task report showed its Markdown as typed');
   check(report.classList.contains('foldable-text'), 'A rendered task report can no longer be folded');
+  check(report.tagName !== 'P', 'A task report put its paragraphs and lists inside a paragraph');
   const completed = document.querySelector('#event-4 .event-text');
   check(completed.querySelector('p code') && completed.querySelector('p > .kind-icon'),
     'A completed result lost its Markdown or put its status icon on a separate line');

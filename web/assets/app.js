@@ -1634,7 +1634,7 @@ function eventCard(event, context, place, report) {
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
   else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
   const bubble = node('div', 'bubble');
-  const text = node(['conversation_message', 'conversation_reply'].includes(event.kind) ? 'div' : 'p', 'event-text');
+  const text = node('div', 'event-text');
   const actions = node('div', 'msg-actions');
   actions.append(time);
   const extras = [];
