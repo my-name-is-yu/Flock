@@ -28,8 +28,8 @@
   transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease, background-color var(--dur-fast) ease, padding var(--dur-fast) ease;
 }
 .composer:not(:has(> .decision-reply-context:not([hidden]))):focus-within {
-  border-color: color-mix(in srgb, var(--focus) 45%, var(--hairline));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+  border-color: var(--focus-border);
+  box-shadow: var(--focus-halo);
 }
 .composer.dragover {
   border-style: dashed;
