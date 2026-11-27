@@ -95,7 +95,7 @@
 .pin:active .avatar { transform: translateY(0) scale(.97); }
 .bot-select:active .avatar { transform: scale(.97); }
 .bot-text { flex: 1; min-width: 0; display: grid; gap: .1rem; }
-.bot-name { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: .875rem; font-weight: 600; }
+.bot-name { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: var(--text-md); font-weight: 600; }
 .bot-name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .presence-dot { display: inline-block; width: .4rem; height: .4rem; margin-inline-end: .35rem; border-radius: 50%; vertical-align: .08em; background: currentColor; }
 .bot-row .bot-preview.waiting { color: var(--warning); font-weight: 600; }
@@ -129,7 +129,7 @@
 
 .menu-popover {
   position: fixed; z-index: 30; top: 0; left: 0; right: auto; min-width: 11rem;
-  display: grid; padding: .3rem; border-radius: 12px; background: var(--overlay);
+  display: grid; padding: .3rem; border-radius: var(--radius-md); background: var(--overlay);
   box-shadow: var(--shadow-lg), 0 0 0 1px var(--hairline);
   transform-origin: var(--menu-origin, top right);
   animation: menu-pop .14s cubic-bezier(.2, .9, .25, 1);
