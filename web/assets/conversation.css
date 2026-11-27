@@ -168,7 +168,7 @@
   to { opacity: 1; transform: none; }
 }
 .profile-name, .profile-status, .peer-names bdi { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.profile-name { max-width: 100%; font-size: var(--text-sm); font-weight: 650; line-height: 1.25; }
+.profile-name { max-width: 100%; font-size: var(--text-sm); font-weight: 600; line-height: 1.25; }
 .peer-names { display: inline-flex; align-items: center; gap: .38rem; max-width: 100%; min-width: 0; }
 .profile-status {
   max-width: 100%; font-size: var(--text-xs); line-height: 1.3; color: var(--text-2);
@@ -337,7 +337,7 @@
 .markdown-body p { margin: .45em 0; }
 .markdown-body ul, .markdown-body ol { margin: .4em 0; padding-inline-start: 1.35em; }
 .markdown-body li + li { margin-top: .2em; }
-.markdown-body :is(h1, h2, h3, h4, h5, h6) { margin: .75em 0 .3em; font-weight: 650; line-height: 1.35; }
+.markdown-body :is(h1, h2, h3, h4, h5, h6) { margin: .75em 0 .3em; font-weight: 600; line-height: 1.35; }
 .markdown-body h1 { font-size: 1.15em; }
 .markdown-body h2 { font-size: 1.08em; }
 .markdown-body :is(h3, h4, h5, h6) { font-size: 1em; }

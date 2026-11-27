@@ -109,7 +109,7 @@
 .find-match-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .find-match time { color: var(--text-2); white-space: nowrap; }
 .find-snippet { overflow-wrap: anywhere; line-height: 1.4; font-size: var(--text-sm); }
-.find-snippet mark { background: var(--accent-soft-hover); color: var(--text); font-weight: 650; }
+.find-snippet mark { background: var(--accent-soft-hover); color: var(--text); font-weight: 600; }
 .find-bar, .find-status, .find-more { flex-shrink: 0; }
 .find-more { align-self: flex-start; margin: .2rem .5rem; }
 
