@@ -154,7 +154,7 @@ function renderChannelLinks(bridges) {
     row('channel-links', rowLabel('No channels connected', 'Set up Slack or iMessage in ',
       settingsLink('connections', 'Connections'), ' to link senders to this Bot.'));
   } else if (channelForm.hidden) {
-    row('channel-links', rowLabel('Managed by the server', 'Sender links for these channels are set on the computer running Flock.'));
+    row('channel-links', rowLabel('Managed on the server', 'Sender links for these channels are set on the computer running Flock.'));
   } else if (!bridges.some(bridge => bridge.senders.length)) {
     row('channel-links', rowLabel('No senders linked', 'Link a sender to let them message this Bot from Slack or iMessage.'));
   }
