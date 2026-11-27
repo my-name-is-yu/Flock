@@ -267,7 +267,7 @@ void runtime::RunObserver::cancelDone(TaskData& task) {
     journalStorage.journalCancelled(task.id);
     if (const auto peer = peerStorage.peerExchange(task.id); peer && peer->recipient == task.id)
         peerExchanges.finishPeer(*peer, task, taskRecords.load(peer->sender), "cancelled",
-                                 task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot’s task was cancelled.",
+                                 task.cancelledByBotPause ? "The receiving Bot is paused." : "The receiving Bot’s request was cancelled.",
                                  actionId());
 }
 
