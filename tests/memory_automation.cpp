@@ -367,10 +367,10 @@ void memoryRedactionLimit(const std::filesystem::path& db) {
     const auto secret = secretRequests.requestSecret(alpha.botId, {"short-fixture-value"});
     secretRequests.submitSecret(owner, alpha.botId, secret, "z9q7");
 
-    const std::string suffix(8192 - 10, 'x');
+    const std::string suffix(32768 - 10, 'x');
     const Json tooLong{{"baseVersion", 0}, {"content", "z9q7" + suffix + "tail"}, {"summary", "Edit memory"}};
     rejectsWithConflict([&] { Memory(store).memory(owner, alpha.botId, "write_memory", tooLong); },
-                        "Redacted memory content exceeds 8192 bytes");
+                        "Redacted memory content exceeds 32768 bytes");
     const auto current = Memory(store).memory(owner, alpha.botId, "read_memory", Json::object());
     const auto history = Memory(store).memory(owner, alpha.botId, "memory_history", Json::object());
     check(current.at("version") == 0 && current.at("content") == "Original" && history.at("revisions").empty(),

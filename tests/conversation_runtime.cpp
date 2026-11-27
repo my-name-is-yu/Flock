@@ -1898,7 +1898,7 @@ void sessionLearningsDropProtectedAndOversizedItems() {
     int completions = 0;
     const auto oversizedText = "The configured target is " + [] {
         std::string value;
-        for (int i = 0; i < 100; ++i) value += "界";
+        while (value.size() <= limits::memory::maxLearningBytes) value += "界";
         return value;
     }();
     f.model.onResult = [&](const ModelInput& input) {
@@ -1918,9 +1918,8 @@ void sessionLearningsDropProtectedAndOversizedItems() {
 
     f.model.onResult = [](const ModelInput& input) {
         Json learnings = Json::array();
-        for (const auto* fact :
-             {"The project uses Bash.", "The project uses CMake.", "The project uses Ninja.", "The project uses Chrome."})
-            learnings.push_back({{"text", fact}, {"runId", input.learningRunId}});
+        for (std::size_t tool = 0; tool <= limits::memory::maxLearnings; ++tool)
+            learnings.push_back({{"text", "The project uses tool " + std::to_string(tool) + "."}, {"runId", input.learningRunId}});
         return completeWithLearnings(input, std::move(learnings));
     };
     const auto second = requestLearningTask(f, "Check the installed build tools");
@@ -4147,7 +4146,7 @@ void standingContextFitsAlongsideTheAuthoritativeHandoff() {
     f.role = "Keep fixture credentials private: " + protectedValue + "\n";
     std::string memory = "Use fixture credentials: " + protectedValue + "\n";
     while (f.role.size() + std::string_view("界").size() <= 8192) f.role += "界";
-    while (memory.size() + std::string_view("界").size() <= 8192) memory += "界";
+    while (memory.size() + std::string_view("界").size() <= limits::memory::maxDocumentBytes) memory += "界";
     Memory(*f.store).memory(localOwner, "alpha", "write_memory", {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", memory}});
     SecretRequests secretRequests{*f.store};
     secretRequests.submitSecret(localOwner, "alpha", secretRequests.requestSecret("alpha", {"fixture-key"}), protectedValue);
@@ -4165,7 +4164,7 @@ void standingContextFitsAlongsideTheAuthoritativeHandoff() {
         return notes;
     };
     const auto& first = f.t3.sent.front();
-    const auto notes = checkMemory(first, "Measure and report the fixture", 8192);
+    const auto notes = checkMemory(first, "Measure and report the fixture", limits::memory::maxDocumentBytes);
     check(first.instruction.starts_with("Standing rules from alpha's role:\nKeep fixture credentials private: [redacted]") && notes <= 8192,
           "the Role exceeded its budget or contained a protected value");
     f.role = "Keep the exact inputs.";
@@ -4195,9 +4194,9 @@ void standingContextFitsAlongsideTheAuthoritativeHandoff() {
     f.t3.finish("run-2", "Previous Run settled again");
     f.advanceUntil([&] { return f.t3.sent.size() == 3; }, "the Session did not receive its follow-up");
     const auto& roomier = f.t3.sent.back();
-    check(roomier.target.threadId == "session-2" && roomier.instruction.size() > 8192,
+    check(roomier.target.threadId == "session-2" && roomier.instruction.size() > limits::memory::maxDocumentBytes,
           "a shorter follow-up omitted the longer excerpt of the same memory version");
-    checkMemory(roomier, "Check the baseline again", 8192);
+    checkMemory(roomier, "Check the baseline again", limits::memory::maxDocumentBytes);
 
     f.model.onResult = [](const ModelInput&) {
         return Decision{"delegate", {{"instruction", "Start an independent Session"}}, "Verify independently"};

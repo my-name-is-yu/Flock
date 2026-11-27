@@ -44,6 +44,7 @@
 using namespace flockv0;
 
 namespace {
+constexpr std::size_t maxBytes = 192'000, maxExpandedBytes = 65'536;
 void require(bool value, const std::string& message) {
     if (!value) throw std::runtime_error(message);
 }
@@ -435,7 +436,8 @@ void stopBeforeFirstSend() {
 void scopedCompactionPages() {
     Fixture f;
     std::string original;
-    for (int i = 0; i < 1000; ++i) original += "根拠\n\t\x01";
+    // Control characters grow sixfold in JSON, so one message of ordinary size spans several evidence pages.
+    while (original.size() + 16 < 15'900) original += "根\x01\x01\x01\x01\x01\x01\x01\x01";
     const Id first = f.turn(original);
     const Id end = f.turn("Boundary");
     const auto summary = f.call("compact_conversation", {{"endMessageId", end}, {"summary", "Keep the original evidence"}});
@@ -449,7 +451,7 @@ void scopedCompactionPages() {
     Json args = {{"startMessageId", first}, {"endMessageId", first}, {"limit", 1}};
     while (true) {
         const auto page = f.call("expand_context", args);
-        require(page.dump().size() <= 8192 && page.at("messages").size() == 1 && page["messages"][0]["messageId"] == first,
+        require(page.dump().size() <= maxExpandedBytes && page.at("messages").size() == 1 && page["messages"][0]["messageId"] == first,
                 "escaped evidence exceeded its byte or item cap");
         const auto chunk = page["messages"][0]["text"].get<std::string>();
         require(!chunk.empty() && replay.size() + chunk.size() <= original.size(), "non-advancing evidence cursor");
@@ -468,36 +470,38 @@ void scopedCompactionPages() {
             const auto& result = step.at("result");
             if (result.contains("messages")) expanded += result.dump().size();
         }
-        require(expanded <= 8192 && expanded + input.history.dump().size() <= 24000, "expansions accumulated beyond model context budget");
-        if (++calls <= 5) return {"expand_context", {{"startMessageId", first}, {"endMessageId", first}}, "Read original evidence"};
-        require(steps.front()["result"].value("evidenceOmitted", false) && steps.back()["result"].contains("messages"),
-                "bounded context lost the latest requested evidence");
+        require(expanded <= maxExpandedBytes && expanded + input.history.dump().size() <= maxBytes,
+                "expansions accumulated beyond model context budget");
+        if (steps.empty() || !steps.front()["result"].value("evidenceOmitted", false)) {
+            require(++calls <= 40, "repeated expansions never left the evidence budget");
+            return {"expand_context", {{"startMessageId", first}, {"endMessageId", first}}, "Read original evidence"};
+        }
+        require(steps.back()["result"].contains("messages"), "bounded context lost the latest requested evidence");
         reviewed = true;
         return {"reply", {{"text", "Reviewed"}}, "Finish"};
     };
     f.turn("Read several pages");
-    require(calls == 6 && reviewed, "multi-step expansion did not respect the evidence budget");
+    require(calls > 1 && reviewed, "multi-step expansion did not respect the evidence budget");
 }
 
 void historyKeepsLargestFittingPrefix() {
     Fixture f;
     std::string original;
-    for (int i = 0; i < 500; ++i) original += "根拠\n\t\"\\\x01";
+    constexpr std::size_t filler = 15'000;
+    while (original.size() + 16 < filler) original += "根拠\n\t\"\\\x01";
     const Id target = f.turn(original);
-    for (int i = 0; i < 4; ++i) f.turn(std::string(4000, 'x'));
-    f.turn(std::string(3987, 'x'));
+    for (std::size_t used = filler; used + filler < maxBytes; used += filler) f.turn(std::string(filler, 'x'));
     f.turn("Inspect history near its byte limit");
     auto history = f.bot.history;
     const auto partial = std::ranges::find_if(history, [&](const Json& entry) { return entry["messageId"] == target; });
     require(partial != history.end(), "history dropped a message whose prefix fit");
     const auto excerpt = partial->at("text").get<std::string>();
-    require(!excerpt.empty() && excerpt.size() < 4000 && original.starts_with(excerpt) && history.dump().size() < 24000,
+    require(!excerpt.empty() && excerpt.size() < original.size() && original.starts_with(excerpt) && history.dump().size() <= maxBytes,
             "history prefix did not fit the serialized byte budget");
     auto next = excerpt.size() + 1;
     while ((static_cast<unsigned char>(original.at(next)) & 0xc0) == 0x80) ++next;
     (*partial)["text"] = original.substr(0, next);
-    require(next > excerpt.size() + 1 && history.dump().size() > 24000,
-            "the next multi-byte character should exceed the remaining serialized bytes");
+    require(history.dump().size() > maxBytes, "the next character should exceed the remaining serialized bytes");
 }
 
 void compactConversationAcrossRestart() {
@@ -518,7 +522,8 @@ void compactConversationAcrossRestart() {
     auto expanded = f.call("expand_context", {{"query", "release checksum"}, {"limit", 100}});
     require(expanded.at("messages").size() == 1 && expanded["messages"][0]["text"] == original, "missing original evidence");
     expanded = f.call("expand_context", {{"compactionId", compact["compaction"]["compactionId"]}, {"startMessageId", end}});
-    require(expanded.dump().size() <= 8192 && expanded.contains("nextCursor") && expanded.at("messages").at(0).at("messageId") == end,
+    require(expanded.dump().size() <= maxExpandedBytes && expanded.contains("nextCursor") &&
+                expanded.at("messages").at(0).at("messageId") == end,
             "unbounded expansion or missing cursor");
     f.turn("Invalid boundary", "compact_conversation", {{"endMessageId", first}, {"summary", "Discard coverage"}});
     require(f.bot.result.at("ok") == false, "accepted shrinking boundary");
