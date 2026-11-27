@@ -88,7 +88,7 @@ async function load() {
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
     ? rowLabel('No rules yet', 'Choose Allow for this Flock on an approval card or add a rule below.')
-    : rowLabel('No rules yet', 'An installation administrator can add rules.'));
+    : rowLabel('No rules yet', 'A Flock administrator can add rules.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
     label.className = 'row-label';

@@ -325,7 +325,7 @@ function editMachines(entry = {}) {
   const channels = installation.connections.channels;
   const ownerLabel = (machine) => `Owner · ${machine.personId}`;
   if (channels.hostManaged || !channels.canManageHost) {
-    openEditor('Local computers', 'The installation owner manages which hosts can receive requests to read local files.',
+    openEditor('Local computers', 'The Flock owner manages which hosts can receive requests to read local files.',
       entriesList(channels.localMachines, ownerLabel));
     return;
   }
@@ -366,7 +366,7 @@ function editChannelOptions() {
   }, actions);
   openEditor('Bridge options', canManageHost
     ? 'Configure the URL used for channel previews and the secret used by the local Session bridge.'
-    : 'Configure the URL used for channel previews. The installation owner manages the Session bridge secret.', form);
+    : 'Configure the URL used for channel previews. The Flock owner manages the Session bridge secret.', form);
 }
 
 function editSearch() {
@@ -477,7 +477,7 @@ function renderIntegrations(connections) {
     const viewMachines = !hostManaged && canManageHost || channels.localMachines.length > 0;
     connectionRow('integrations', 'Local computers', canManageHost
       ? 'Computers where approved requests can read local files.'
-      : 'The installation owner manages access to local computers.', {
+      : 'The Flock owner manages access to local computers.', {
       configured: channels.localMachines.length > 0, pending: channels.localMachinesPending,
       hostManaged, readOnly: hostManaged || !canManageHost, manage: viewMachines ? editMachines : null,
     });
@@ -574,7 +574,7 @@ function changeRole({person, adminRoot}) {
   const form = buildForm([
     settingField('role', 'Role', {value: adminRoot ? 'admin' : 'member', choices: {member: 'Member', admin: 'Administrator'}, wide: true}),
   ], 'Save role', ({role}) => saveInstallation('access', {operation: 'role', person, adminRoot: role === 'admin'}));
-  openEditor(`Role for ${person}`, 'Administrators can manage this installation. Members can use Bots shared with them.', form);
+  openEditor(`Role for ${person}`, 'Administrators can manage this Flock. Members can use Bots shared with them.', form);
 }
 
 function resetPassword(person) {
@@ -616,12 +616,12 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
     const item = row('access', rowLabel('Shared access', 'Sign-in is required to use this Flock.'));
     actionButton(item, 'Invite someone', invitePerson, true);
   } else {
-    row('access', rowLabel('Access settings unavailable', 'Sign in as an installation administrator to manage access.'));
+    row('access', rowLabel('Access settings unavailable', 'Sign in as a Flock administrator to manage access.'));
     return;
   }
   for (const {person, adminRoot, pendingUntil: pendingPassword} of users) {
     const owner = person === 'local-owner';
-    const role = owner ? 'Installation owner' : adminRoot ? 'Administrator' : 'Member';
+    const role = owner ? 'Flock owner' : adminRoot ? 'Administrator' : 'Member';
     const item = row('access', rowLabel(person, person === currentPerson ? `${role} · You` : role));
     if (mode !== 'managed') continue;
     const actions = element('div', '', 'row-actions');
@@ -679,7 +679,7 @@ function systemValues(title, current, next, pending) {
 function renderSystem(state) {
   $('system').replaceChildren();
   if (!state) {
-    row('system', rowLabel('Server settings unavailable', 'Sign in as an installation administrator to manage this server.'));
+    row('system', rowLabel('Server settings unavailable', 'Sign in as a Flock administrator to manage this server.'));
     return;
   }
   const {active, next, overrides, pending} = state;
@@ -788,7 +788,7 @@ export async function loadInstallation() {
     showInstallationUnavailable();
     return;
   }
-  if (!response.ok) throw new Error('Couldn’t load installation settings.');
+  if (!response.ok) throw new Error('Couldn’t load Flock settings.');
   installation = await response.json();
   renderIntegrations(installation.connections);
   renderAccess(installation.access);
