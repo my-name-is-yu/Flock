@@ -174,7 +174,7 @@ function renderChannelLinks(bridges) {
     }
   }
   if (bridges.some(bridge => bridge.pending)) {
-    row('channel-links', rowLabel('Restart required', 'Flock uses the saved channel links after it restarts.'));
+    row('channel-links', rowLabel('Restart required', 'Flock uses the saved channel links after it restarts.')).classList.add('restart-notice');
   }
   $('channel-senders').hidden = false;
 }
