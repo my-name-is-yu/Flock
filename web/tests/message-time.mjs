@@ -479,11 +479,11 @@ async function exercise() {
   check(!picker.hidden, 'The Bot conversation picker did not become available');
   picker.click();
   const title = document.getElementById('detail-title');
-  check(title.textContent === 'Release talks with', 'The conversation picker did not name the current Bot');
+  check(title.textContent === 'Release’s talks with other Bots', 'The conversation picker did not name the current Bot');
   window.renameBot('Deploy');
-  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy talks with'; attempt++)
+  for (let attempt = 0; attempt < 20 && title.textContent !== 'Deploy’s talks with other Bots'; attempt++)
     await new Promise(resolve => setTimeout(resolve, 10));
-  check(title.textContent === 'Deploy talks with', 'The open conversation picker kept the old Bot name');
+  check(title.textContent === 'Deploy’s talks with other Bots', 'The open conversation picker kept the old Bot name');
 }
 
 const index = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
