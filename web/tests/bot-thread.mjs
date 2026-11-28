@@ -16,6 +16,8 @@ function fixtures() {
       text: 'I asked Reviewer.', textHtml: '<p>I asked Reviewer.</p>', route: 'reply', status: 'done', replyToMessageId: 30,
       actions: [{ tool: 'message_bot', effect: 'sent', botId: 'reviewer', messageId: 39, text: 'Is it ready?' }],
     } },
+    { id: 43, kind: 'conversation_message', taskId: 0, time: time + 43,
+      data: { text: '', botMessage: { fromBotId: 'reviewer', fromName: 'Reviewer', depth: 1, forwarded: { text: 'Ship it tonight' } } } },
   ];
   const message = (id, fromBotId, textHtml) => ({ id, time: time + id, data: { fromBotId, textHtml } });
   window.dmRequests = [];
@@ -34,7 +36,9 @@ function fixtures() {
       dmRequests.push(params.toString());
       const pair = { bot: { id: 'scout', name: 'Scout' }, peer: { id: 'reviewer', name: 'Reviewer' } };
       if (params.has('before')) return Response.json({ ...pair, events: [message(12, 'scout', '<p>Check the release.</p>')], olderBefore: 0 });
-      return Response.json({ ...pair, olderBefore: 39, hasNewer: params.has('anchor'), events: [
+      return Response.json({ ...pair, olderBefore: 38, hasNewer: params.has('anchor'), events: [
+        { id: 38, time: time + 38, data: { fromBotId: 'reviewer', text: '',
+          forwarded: { text: 'Ship it tonight', textHtml: '<p>Ship it <em>tonight</em></p>' } } },
         message(39, 'scout', '<p>Is it ready?</p>'),
         message(40, 'reviewer', '<p><strong>Ready</strong>. See the <a href="https://example.com">report</a>.</p>'),
       ] });
@@ -81,6 +85,7 @@ async function exercise() {
     sent.querySelector('.bot-message-name').textContent === 'Reviewer' && sent.querySelector('.bot-message-preview').textContent === 'Is it ready?',
     'A message the Bot sent to another Bot did not link to its thread');
   check(!$('#conversation-bot-dms') && !$('.bot-thread-peers'), 'A separate Bot DM entry point is still present');
+  check($('#event-43 .bot-message-preview').textContent === 'Ship it tonight', 'A forward without a note had no preview');
 
   row.click();
   await waitFor(() => $('.bot-thread-anchored') && getComputedStyle(conversation).visibility === 'hidden',
@@ -93,6 +98,11 @@ async function exercise() {
   check(anchored.querySelector('.bot-thread-name').textContent === 'Reviewer' && anchored.querySelector('.bot-thread-avatar'),
     'The sender header was missing');
   check($('#bot-thread-message-39').classList.contains('bot-thread-own'), 'The Bot’s own turn was not distinguished');
+  const forward = $('#bot-thread-message-38');
+  check(forward.querySelector('.bot-thread-forwarded-by').textContent === 'Forwarded by Reviewer' &&
+    forward.querySelector('.bot-thread-forwarded em')?.textContent === 'tonight' && !forward.querySelector('.bot-thread-meta'),
+    'A forwarded message did not show who forwarded the original');
+  check(getComputedStyle(forward.querySelector('.bot-thread-forwarded')).justifyItems === 'end', 'A forwarded message was not on the person’s side');
   check($('#profile-thread').textContent === 'Reviewer' && !$('#profile-thread').hidden && !$('#bot-thread-close').hidden,
     'The header did not show the thread breadcrumb and Close');
   check(!$('#bot-thread-latest').hidden, 'Jump to latest was missing for an anchored thread');

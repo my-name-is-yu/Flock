@@ -47,7 +47,14 @@ ConversationInvitationEntry readInvitation(const Json& data, const RecordDecoder
 }
 
 ConversationBotMessageEntry readBotMessage(const Json& data, const RecordDecoder& row) {
-    return {row.get<std::string>(data, "fromBotId"), row.get<std::string>(data, "fromName"), row.get<Id>(data, "depth")};
+    ConversationBotMessageEntry entry{row.get<std::string>(data, "fromBotId"), row.get<std::string>(data, "fromName"),
+                                      row.get<Id>(data, "depth")};
+    if (const auto forwarded = row.find(data, "forwarded"); forwarded != data.end())
+        entry.forwarded = row.nested("forwarded").decodeClosed(*forwarded, [](const Json& value, const RecordDecoder& field) {
+            return ConversationForwardedMessage{field.get<Id>(value, "messageId"), field.get<std::string>(value, "text"),
+                                                field.get<Id>(value, "time")};
+        });
+    return entry;
 }
 
 ConversationWakeEntry readWake(const Json& data, const RecordDecoder& row) {
@@ -74,7 +81,10 @@ Json encodeConversationWake(const ConversationWakeEntry& entry) {
 }
 
 Json encodeConversationBotMessage(const ConversationBotMessageEntry& entry) {
-    return {{"fromBotId", entry.fromBotId}, {"fromName", entry.fromName}, {"depth", entry.depth}};
+    Json data{{"fromBotId", entry.fromBotId}, {"fromName", entry.fromName}, {"depth", entry.depth}};
+    if (entry.forwarded)
+        data["forwarded"] = {{"messageId", entry.forwarded->messageId}, {"text", entry.forwarded->text}, {"time", entry.forwarded->time}};
+    return data;
 }
 
 ConversationMessageEntry decodeConversationMessage(Id id, const Json& data) {

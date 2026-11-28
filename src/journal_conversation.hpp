@@ -21,9 +21,17 @@ struct ConversationWakeEntry {
     Id taskId = 0;
 };
 
+// The person's message a Bot passed on word for word, as it read when it was sent.
+struct ConversationForwardedMessage {
+    Id messageId;
+    std::string text;
+    Id time;
+};
+
 struct ConversationBotMessageEntry {
     std::string fromBotId, fromName;
     Id depth;
+    std::optional<ConversationForwardedMessage> forwarded;
 };
 
 struct ConversationMessageEntry {

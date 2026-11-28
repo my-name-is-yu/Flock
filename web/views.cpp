@@ -195,8 +195,11 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 copyFields(details["sessionWake"] = Json::object(), *wake, {"threadId", "title", "reason", "sourceMessageId"});
             if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())
                 copyFields(details["sessionInvitation"] = Json::object(), *invitation, {"threadId", "title", "inviterName", "note"});
-            if (const auto bot = data.find("botMessage"); bot != data.end() && bot->is_object())
+            if (const auto bot = data.find("botMessage"); bot != data.end() && bot->is_object()) {
                 copyFields(details["botMessage"] = Json::object(), *bot, {"fromBotId", "fromName"});
+                if (const auto forwarded = bot->find("forwarded"); forwarded != bot->end() && forwarded->is_object())
+                    copyFields(details["botMessage"]["forwarded"] = Json::object(), *forwarded, {"text"});
+            }
         }
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(), *channel, {"channelKind", "fromViewer"});
@@ -209,7 +212,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             for (const auto& action : *actions) {
                 Json item = Json::object();
                 copyFields(item, action, {"tool", "taskId", "effect"});
-                if (field(action, "tool") == "message_bot") copyFields(item, action, {"botId", "messageId", "text"});
+                if (field(action, "tool") == "message_bot") copyFields(item, action, {"botId", "messageId", "text", "forwarded"});
                 details["actions"].push_back(std::move(item));
             }
         }
@@ -479,6 +482,10 @@ Json botDm(Store& store, std::string_view bot, std::string_view peer, Id before,
         const auto text = recipient.text(sender.text(field(data, "text")));
         data["text"] = text;
         data["textHtml"] = markdown::toHtml(text, sensitive);
+        if (data.contains("forwarded")) {
+            const auto original = recipient.text(sender.text(field(data.at("forwarded"), "text")));
+            data["forwarded"] = {{"text", original}, {"textHtml", markdown::toHtml(original, sensitive)}};
+        }
     }
     return {{"events", std::move(events)}, {"olderBefore", olderBefore}, {"hasNewer", hasNewer}};
 }

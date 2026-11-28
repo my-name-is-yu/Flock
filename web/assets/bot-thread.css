@@ -31,7 +31,7 @@
 .bot-thread-meta .msg-time { opacity: 1; }
 .bot-thread-message > .bubble { justify-self: start; }
 .bot-thread-own > .bubble { padding-inline: 0; background: none; }
-.bot-thread-message:focus-visible > .bubble, .bot-thread-anchored > .bubble {
+.bot-thread-message:focus-visible .bubble, .bot-thread-anchored .bubble {
   outline: 2px solid var(--focus); outline-offset: 2px;
 }
 .bot-thread-own.bot-thread-anchored > .bubble { outline-offset: 6px; }
@@ -55,3 +55,12 @@ a.bot-message-row:focus-visible { outline: 2px solid var(--focus); outline-offse
 @media (prefers-reduced-motion: reduce) {
   a.bot-message-row { transition: none; }
 }
+.bot-thread-forwarded {
+  grid-column: 1 / -1; display: grid; justify-items: end; gap: .25rem; margin-bottom: .6rem;
+}
+.bot-thread-forward .bot-thread-avatar { grid-row: 2 / span 2; }
+.bot-thread-forwarded-by {
+  display: flex; align-items: center; gap: .3rem; margin: 0; color: var(--text-3); font-size: var(--text-xs);
+}
+.bot-thread-forwarded-by svg { width: .85rem; height: .85rem; flex: none; }
+.bot-thread-forwarded > .bubble { max-width: min(85%, 36rem); background: var(--user-bubble); color: var(--on-accent); }

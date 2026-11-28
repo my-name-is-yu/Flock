@@ -14,6 +14,8 @@ const clock = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-d
 const day = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' });
 const fullTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'long', timeStyle: 'short' });
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const forwardIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true"><path d="m15 7 5 5-5 5"/><path d="M20 12H10a6 6 0 0 0-6 6v1"/></svg>';
 const openMotion = [{ opacity: 0, transform: 'translateY(12px) scale(.985)' }, { opacity: 1, transform: 'none' }];
 
 function avatar(participant, className) {
@@ -76,6 +78,24 @@ export function mountBotThread() {
     row.tabIndex = -1;
     row.classList.toggle('bot-thread-anchored', String(event.id) === state.anchor);
     row.classList.toggle('group-start', place.groupStart);
+    const { forwarded } = event.data;
+    if (forwarded) {
+      row.classList.add('bot-thread-forward');
+      const block = node('div', 'bot-thread-forwarded');
+      const label = node('p', 'bot-thread-forwarded-by');
+      label.insertAdjacentHTML('afterbegin', forwardIcon);
+      const by = node('span', null, `Forwarded by ${sender.name}`);
+      by.dir = 'auto';
+      label.append(by);
+      const original = node('div', 'bubble');
+      const words = node('div', 'event-text');
+      words.dir = 'auto';
+      setMessageBody(words, forwarded.textHtml, forwarded.text);
+      original.append(words);
+      block.append(label, original);
+      row.append(block);
+      if (!event.data.text) return row;
+    }
     const meta = node('div', place.groupStart ? 'bot-thread-meta' : 'sr-only');
     const name = node('span', 'bot-thread-name', sender.name);
     name.dir = 'auto';
@@ -104,6 +124,8 @@ export function mountBotThread() {
         }
         const sender = state.participants.find(({ id }) => id === event.data.fromBotId);
         const place = botDmPlacement(events[index - 1], event, events[index + 1]);
+        // A forward interrupts the conversation, so whoever speaks next starts a new group.
+        if (event.data.forwarded || events[index - 1]?.data.forwarded) place.groupStart = true;
         rows.push(keep(String(event.id), [event, sender, place], () => drawMessage(event, sender, place)));
       }
       return rows;

@@ -456,7 +456,7 @@ Json Conversations::botDmMessages(std::string_view bot, std::string_view peer, I
     std::lock_guard lock(database_.mutex);
     // Wake turns can inherit Bot-message routing, but only deliveries have a Bot origin in the journal.
     const auto sql = std::string(R"SQL(
-SELECT j.id,j.time,j.conversation_bot_id,m.text
+SELECT j.id,j.time,j.conversation_bot_id,m.text,json_extract(j.data,'$.botMessage.forwarded')
 FROM journal j JOIN messages m ON m.id=j.id
 WHERE j.conversation_bot_id IN (?1,?2) AND j.kind='conversation_message'
   AND j.id BETWEEN ?3 AND ?4
@@ -466,9 +466,9 @@ ORDER BY j.id
     auto rows = database_.query(sql.c_str(), {bot, peer, from, before ? before - 1 : std::numeric_limits<Id>::max(), limit});
     auto result = Json::array();
     while (rows.next()) {
-        result.push_back({{"id", rows.number(0)},
-                          {"time", rows.number(1)},
-                          {"data", {{"fromBotId", rows.string(2) == bot ? peer : bot}, {"text", rows.string(3)}}}});
+        Json data{{"fromBotId", rows.string(2) == bot ? peer : bot}, {"text", rows.string(3)}};
+        if (!rows.null(4)) data["forwarded"] = rows.json(4);
+        result.push_back({{"id", rows.number(0)}, {"time", rows.number(1)}, {"data", std::move(data)}});
     }
     if (!from) std::reverse(result.begin(), result.end());
     return result;

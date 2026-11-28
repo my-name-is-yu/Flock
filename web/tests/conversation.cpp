@@ -891,6 +891,34 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     check(redacted.dump().find("Release key placeholder") == std::string::npos && redacted.dump().find("[redacted]") != std::string::npos,
           "Bot DM exposed a secret registered by the sender");
 
+    constexpr auto original = "Ship the **release** tonight.";
+    std::string forwarded;
+    bool reforwardRejected = false;
+    model.script = [&](const ModelInput& input) -> Decision {
+        const auto& turn = input.event.at("turn");
+        if (input.event.contains("botMessage")) {
+            if (turn.empty()) {
+                forwarded = input.event.at("botMessage").value("forwarded", Json::object()).value("text", "");
+                return {"message_bot", {{"botId", "ernest"}, {"forward", true}}, "Pass it back"};
+            }
+            reforwardRejected = !turn.back().at("result").value("ok", true);
+            return {"reply", {{"text", "Seen."}}, ""};
+        }
+        if (!turn.empty()) return {"reply", {{"text", "Forwarded."}}, ""};
+        return {"message_bot", {{"botId", "reviewer"}, {"forward", true}, {"text", "Please check this."}}, "Forward it"};
+    };
+    const auto forwardAsk = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "forward"}, {"text", original}}, 201);
+    for (int i = 0; i < 4; ++i) runtime.runConversations();
+    check(forwarded == original, "Reviewer did not receive the person's message word for word");
+    check(reforwardRejected, "A Bot forwarded another Bot's message as if it came from its person");
+    const auto last = browser.get(pair).at("events").back().at("data");
+    check(last.at("fromBotId") == "ernest" && last.at("text") == "Please check this." && last.at("forwarded").at("text") == original &&
+              field(last.at("forwarded"), "textHtml").find("<strong>release</strong>") != std::string::npos,
+          "The Bot DM lost the forwarded message or its note");
+    const auto forwardReply = conversationReply(browser.get("/api/view?bot=ernest"), forwardAsk.at("messageId"));
+    check(forwardReply.at("actions").at(0).at("forwarded") == true, "Ernest's reply did not record that it forwarded the message");
+    const auto everything = browser.get(pair);
+
     const Person owner{"owner", false};
     BotAccess access{store};
     access.setOwner(owner, "ernest");
@@ -904,8 +932,9 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     Browser::checked(reader.client.Get(pair), 403);
     Browser::checked(reader.client.Get("/api/bot-dms?bot=reviewer&peer=ernest"), 403);
     access.setMember(owner, "reviewer", "reader", true);
-    check(reader.get(pair).at("events") == latest.at("events"),
+    check(reader.get(pair).at("events") == everything.at("events"),
           "A shared reader with access to both Bots could not read the transcript");
+
 }
 
 void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {

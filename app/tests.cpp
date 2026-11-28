@@ -576,7 +576,8 @@ void responseContract() {
               turnTool("request_secret_input")["required"] == Json::array({"name"}) &&
               turnTool("message_session")["required"] == Json::array({"environmentId", "threadId", "text"}) &&
               turnTool("invite_bot")["required"] == Json::array({"botId", "environmentId", "threadId", "note"}) &&
-              turnTool("message_bot")["required"] == Json::array({"botId", "text"}) &&
+              turnTool("message_bot")["required"] == Json::array({"botId"}) &&
+              turnTool("message_bot")["properties"]["forward"]["type"] == "boolean" &&
               turnTool("leave_session")["required"] == Json::array({"environmentId", "threadId"}) &&
               turnTool("start_task")["required"] == Json::array({"request"}) &&
               turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&

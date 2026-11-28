@@ -190,10 +190,18 @@ CallOutcome TurnRunner::executeMessageBot(const Message& message, int step, cons
     Json result;
     try {
         const auto& args = decision.args;
-        if (!args.is_object() || args.size() != 2) throw Conflict("Invalid message_bot arguments");
+        if (!args.is_object() || std::ranges::any_of(args.items(), [](const auto& item) {
+                return item.key() != "botId" && item.key() != "text" && item.key() != "forward";
+            }))
+            throw Conflict("Invalid message_bot arguments");
+        if (args.contains("forward") && !args.at("forward").is_boolean()) throw Conflict("forward must be true or false");
+        const bool forward = args.value("forward", false);
         const auto bot = text(args, "botId", 128, true);
-        const auto body = text(args, "text", limits::messages::maxBodyBytes, true);
+        const auto body = text(args, "text", limits::messages::maxBodyBytes, !forward);
         if (!validBotId(bot) || body.find('\0') != body.npos) throw Conflict("Invalid message_bot arguments");
+        if (forward && (message.routing.contains("botMessage") || message.routing.contains("sessionWake") ||
+                        message.routing.contains("sessionInvitation") || message.text.empty()))
+            throw Conflict("Only a message from your person can be forwarded");
         if (message.principalSource != conversation::PrincipalSource::web &&
             message.principalSource != conversation::PrincipalSource::trusted)
             throw Conflict("Message other Bots from a Flock Web conversation");
@@ -217,7 +225,13 @@ CallOutcome TurnRunner::executeMessageBot(const Message& message, int step, cons
             if (!ctx.intake) throw Conflict("Bot intake is unavailable");
             const auto routing = ctx.intake(bot, body);
             if (routing.botId != bot) throw Conflict("The destination Bot is unavailable");
-            const ConversationBotMessageEntry origin{message.bot, message.routing.at("config").value("botDisplayName", message.bot), depth};
+            ConversationBotMessageEntry origin{message.bot, message.routing.at("config").value("botDisplayName", message.bot), depth};
+            if (forward) {
+                auto sentAt = database.query("SELECT time FROM journal WHERE id=?", {message.id});
+                if (!sentAt.next()) throw Conflict("The person's message is unavailable");
+                origin.forwarded = ConversationForwardedMessage{message.id, secretStorage.redactor(message.bot).text(message.text),
+                                                                sentAt.number(0)};
+            }
             const auto id =
                 conversationTurns.enqueueConversation(actor, routing, message.principalSource, key, body, 0, nullptr, nullptr, &origin);
             result = {{"ok", true}, {"effect", "sent"}, {"messageId", id}, {"depth", depth}};

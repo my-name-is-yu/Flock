@@ -450,9 +450,9 @@ function eventCard(event, context, place, report, dmLink, sender) {
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.botMessage) {
-    const { fromBotId, fromName } = data.botMessage;
+    const { fromBotId, fromName, forwarded } = data.botMessage;
     return botMessageRow({ id: `event-${event.id}`, event, peer: sender ?? { id: fromBotId, name: fromName || fromBotId },
-      text: data.text, link: dmLink });
+      text: data.text || forwarded?.text, link: dmLink });
   }
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
@@ -1021,9 +1021,10 @@ function conversationRows(data, events, keep, source) {
         if (action.tool !== 'message_bot') continue;
         const peer = bots.find(({ id }) => id === action.botId);
         const link = peer ? botThreadUrl(bot.id, peer.id, action.messageId) : null;
-        rows.push(keep(`event-${event.id}-sent-${index}`, [action, peer && [peer.name, peer.avatar], link], () =>
+        const text = action.text || (action.forwarded ? events.find(({ id }) => id === event.data.replyToMessageId)?.data.text : '');
+        rows.push(keep(`event-${event.id}-sent-${index}`, [action, text, peer && [peer.name, peer.avatar], link], () =>
           botMessageRow({ id: `event-${event.id}-sent-${index}`, event, peer: peer ?? { id: action.botId, name: action.botId },
-            text: action.text, link })));
+            text, link })));
       }
     }
     for (const item of approvals) {
