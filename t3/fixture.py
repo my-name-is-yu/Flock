@@ -99,6 +99,8 @@ class Fixture(BaseHTTPRequestHandler):
                 return
             assert len(raw) == upload["sizeBytes"]
             upload["bytes"] = base64.b64encode(raw).decode()
+            if state.get("moveThreadOnUpload"):
+                state["selectedProject"] = "other-project"
             self.reply(code=201)
             return
         if self.path == "/token":
@@ -261,6 +263,7 @@ class Fixture(BaseHTTPRequestHandler):
         if state.get("attachmentTools"):
             if name == "t3_attachment_prepare_upload":
                 assert set(args) == {"upload"}
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
                 uploads = state.setdefault("uploads", {})
                 attachment_id = f"file-{len(uploads) + 1}"
                 uploads[attachment_id] = args["upload"]
@@ -270,6 +273,7 @@ class Fixture(BaseHTTPRequestHandler):
                 state["uploads"].pop(args["attachmentId"])
                 return {}
             if name == "t3_thread_send_attachments" or (name == "t3_thread_launch" and "attachments" in args):
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
                 thread = args.get("threadId", "thread")
                 assert thread == "thread"
                 assert "clientRequestId" not in args or name == "t3_thread_launch"

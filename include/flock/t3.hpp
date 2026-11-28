@@ -6,6 +6,7 @@
 #include "flock/task_interaction.hpp"
 #include "flock/types.hpp"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ struct Delivery {
     bool definitelyUnsent = false;
     std::string delivery = {};
     std::string launchWarning = {};
+    bool noAutomaticRetry = false;
 };
 
 struct Observation {
@@ -67,6 +69,8 @@ struct T3EnvironmentLinks {
 
 class T3 {
 public:
+    using SendAuthorization = std::function<bool()>;
+
     virtual ~T3() = default;
     virtual std::string sessionMessageWake(const SessionTarget&, const RunRef&) { return "unknown"; }
     virtual QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view) { return QueueCancelOutcome::Retry; }
@@ -74,6 +78,13 @@ public:
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
     virtual Delivery send(const Command&) = 0;
+    virtual Delivery send(const Command& command, const SendAuthorization& authorizeAfterStaging) {
+        if (!authorizeAfterStaging) return send(command);
+        return {.kind = Delivery::Kind::Settings,
+                .detail = "This T3 adapter cannot verify authorization after staging.",
+                .definitelyUnsent = true,
+                .noAutomaticRetry = true};
+    }
     virtual Delivery reconcile(const Command&) = 0;
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     // Recover evidence for an already attributed terminal result without waiting on the Run again.

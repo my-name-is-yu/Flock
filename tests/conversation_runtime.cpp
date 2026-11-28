@@ -235,6 +235,14 @@ struct SimulatedT3 : T3 {
         if (waitForSessionRuns && observation != observations.end() && observation->second.kind == Observation::Kind::Running) return {};
         return "finished";
     }
+    Delivery send(const Command& command, const SendAuthorization& authorizeAfterStaging) override {
+        if (!command.attachments.empty() && (!authorizeAfterStaging || !authorizeAfterStaging()))
+            return {.kind = Delivery::Kind::Settings,
+                    .detail = "Attachment authorization changed before delivery",
+                    .definitelyUnsent = true,
+                    .noAutomaticRetry = true};
+        return send(command);
+    }
     Delivery send(const Command& command) override {
         std::function<void(const Command&)> gate;
         Delivery result;

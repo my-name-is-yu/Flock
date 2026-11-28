@@ -974,6 +974,29 @@ std::string attachmentNames(const Command& command) {
     return names;
 }
 
+Delivery attachmentAuthorizationRefusal(std::string detail = "Flock authorization changed or could not be verified before T3 dispatched attachments") {
+    return {.kind = Outcome::Settings, .detail = std::move(detail), .definitelyUnsent = true, .noAutomaticRetry = true};
+}
+
+bool authorizedStagedAttachments(const Command& command, const T3::SendAuthorization& authorize) {
+    if (command.attachments.empty()) return true;
+    if (!authorize) return false;
+    try {
+        return authorize();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool projectStillAuthorized(Client& client, std::string_view projectId) {
+    try {
+        const auto project = client.call("t3_project_read", {{"projectId", projectId}});
+        return field(project, "id") == projectId;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool checkAttachmentTools(Client& client, const Command& command, bool linked, bool pinned) {
     const auto inputs = client.toolInputs();
     const bool launch = command.tool == CommandTool::delegate && !pinned;
@@ -1050,7 +1073,7 @@ Json sendWork(Client& client, const Command& command, std::string_view thread, c
 }
 
 Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning,
-                      const Json& attachments) {
+                      const Json& attachments, const T3::SendAuthorization& authorizeAfterStaging) {
     args.erase("message");
     const auto launched = launchThread(client, std::move(args), warning);
     const auto threadId = field(launched, "threadId");
@@ -1072,6 +1095,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         const auto workspace = workspaceHead(client, command.projectId, thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
+        if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
         const auto sent = sendWork(client, command, threadId, attachments, command.actionId + ":start");
         if (field(sent, "threadId") != threadId || field(sent, "runId").empty() ||
             (field(sent, "delivery") != "started" && field(sent, "delivery") != "queued"))
@@ -1114,6 +1138,14 @@ public:
     }
 
     Delivery send(const Command& command) override {
+        return send(command, {});
+    }
+
+    Delivery send(const Command& command, const SendAuthorization& authorizeAfterStaging) override {
+        const bool taskAttachmentRoute = command.tool == CommandTool::delegate || command.tool == CommandTool::follow_up ||
+                                        command.tool == CommandTool::start_in_session;
+        if (taskAttachmentRoute && !command.attachments.empty() && !authorizeAfterStaging)
+            return attachmentAuthorizationRefusal("Flock must authorize task attachments before T3 dispatch");
         bool invoked = false;
         std::string launchWarning;
         try {
@@ -1168,15 +1200,26 @@ public:
                     if (!loopbackGitHost(origin))
                         return {Outcome::Settings, {}, "Pinned specialist worktrees require a local T3 environment", true};
                     const auto files = stage();
+                    if (!files.empty()) {
+                        if (!projectStillAuthorized(client, command.projectId))
+                            return attachmentAuthorizationRefusal("Could not verify the destination T3 Project after staging attachments");
+                        if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
+                    }
                     invoked = true;
                     auto delivery =
-                        launchPinned(client, command, std::move(launchArguments.parameters), launchArguments.pin, launchWarning, files);
+                        launchPinned(client, command, std::move(launchArguments.parameters), launchArguments.pin, launchWarning, files,
+                                     authorizeAfterStaging);
                     delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run, command.environmentId, origin);
                     return delivery;
                 }
                 auto files = stage();
-                if (!files.empty()) launchArguments.parameters["attachments"] = std::move(files);
+                if (!files.empty()) {
+                    if (!projectStillAuthorized(client, command.projectId))
+                        return attachmentAuthorizationRefusal("Could not verify the destination T3 Project after staging attachments");
+                    if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
+                    launchArguments.parameters["attachments"] = std::move(files);
+                }
                 invoked = true;
                 reply = launchThread(client, std::move(launchArguments.parameters), launchWarning);
                 if (field(reply, "projectId") != command.projectId) invalidResponse();
@@ -1201,6 +1244,37 @@ public:
                         return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                 }
                 const auto files = stage();
+                if (selected && !command.attachments.empty()) {
+                    Json current;
+                    try {
+                        current = threadHead(client, command.target.threadId).at("thread");
+                    } catch (...) {
+                        return {.kind = Outcome::Settings,
+                                .detail = "Could not verify the selected T3 Session before sending files",
+                                .definitelyUnsent = true,
+                                .noAutomaticRetry = true};
+                    }
+                    if (field(current, "projectId") != command.projectId || boolean(current, "archived"))
+                        return {.kind = Outcome::Settings,
+                                .detail = "The selected T3 Session moved projects or was archived",
+                                .definitelyUnsent = true,
+                                .noAutomaticRetry = true};
+                    if (!member(current, "activeRunId").is_null())
+                        return {Outcome::Busy, {}, "The selected T3 Session is still active", true};
+                    if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
+                } else if (command.tool == CommandTool::follow_up && !command.attachments.empty()) {
+                    FollowUp readiness;
+                    try {
+                        readiness = followUpReadiness(client, command);
+                    } catch (...) {
+                        return attachmentAuthorizationRefusal("Could not verify the T3 Session before sending staged follow-up files");
+                    }
+                    if (readiness == FollowUp::SessionUnavailable)
+                        return attachmentAuthorizationRefusal("The T3 Session moved projects or was archived during attachment staging");
+                    if (readiness == FollowUp::Busy)
+                        return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
+                    if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
+                }
                 invoked = true;
                 reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto delivery = field(reply, "delivery");

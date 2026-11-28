@@ -395,6 +395,16 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             }
             return true;
         }
+        if (outcome.noAutomaticRetry && delivery == DeliveryOutcome::DefinitelyUnsent && !cancelling && !task.replanning) {
+            outboxStorage.setOutboxPhase(key, OutboxPhase::closed);
+            task.actionId.clear();
+            task.t3CheckAt.reset();
+            const auto detail = bounded(outcome.detail.empty() ? "T3 authorization changed before delivery." : outcome.detail, 2048);
+            const auto wait = waitStorage.currentWait(task.id);
+            if (!wait || wait->reason() != WaitReason::settings || wait->text != detail)
+                waitStorage.wait(task, SimpleWaitReason::settings, detail);
+            return true;
+        }
         const bool sendStarted = saved->phase == OutboxPhase::started;
         if (action.phase == OutboxPhase::ready && delivery == DeliveryOutcome::DefinitelyUnsent && !cancelling && !task.replanning &&
             readyGeneration && task.generation == *readyGeneration + (sendStarted ? 1 : 0))
@@ -548,16 +558,34 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                         {"environmentId", cmd.environmentId}};
     if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
     if (!action.attachments.empty()) payload["attachments"] = attachmentRefsJson(action.attachments);
+    struct AuthorizationPolicySnapshot {
+        Id settingsRevision;
+        std::optional<PolicyResult> launch;
+        PolicyResult resource;
+    };
+    std::optional<AuthorizationPolicySnapshot> authorizationPolicy;
     const auto assess = [&](const TaskData& current, bool claim) {
         const auto origin = policyApprovals.taskPolicyOrigin(current);
+        std::optional<PolicyResult> launchPolicy;
         if (usesExistingSession) {
             const Resource launch{Action::environment_launch, cmd.environmentId, true};
-            const auto launchPolicy = policy.check(cmd.ownerBotId, launch);
-            if (launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
-            if (launchPolicy == PolicyResult::ask && policy.check(cmd.ownerBotId, *resource) == PolicyResult::allow)
-                return policyApprovals.approveAction(origin, launch, operation, payload, clock(), claim);
+            launchPolicy = policy.check(cmd.ownerBotId, launch);
+            if (*launchPolicy == PolicyResult::deny) return ApprovalGate::denied;
         }
-        return resource ? policyApprovals.approveAction(origin, *resource, operation, payload, clock(), claim) : ApprovalGate::allow;
+        const auto resourcePolicy = resource ? policy.check(cmd.ownerBotId, *resource) : PolicyResult::allow;
+        const bool approveLaunch = usesExistingSession && launchPolicy == PolicyResult::ask &&
+                                   resourcePolicy == PolicyResult::allow;
+        const auto gate = approveLaunch
+                              ? policyApprovals.approveAction(origin, {Action::environment_launch, cmd.environmentId, true}, operation,
+                                                             payload, clock(), claim)
+                              : resource ? policyApprovals.approveAction(origin, *resource, operation, payload, clock(), claim)
+                                         : ApprovalGate::allow;
+        if (claim && gate == ApprovalGate::allow && resource) {
+            auto revision = database.query("SELECT revision FROM policy_settings WHERE id=1");
+            if (!revision.next()) return ApprovalGate::stale;
+            authorizationPolicy = AuthorizationPolicySnapshot{revision.number(0), launchPolicy, resourcePolicy};
+        }
+        return gate;
     };
     if (resource) {
         ApprovalGate gate;
@@ -623,7 +651,6 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
         if (!action.attachments.empty())
             cmd.attachments = attachments.taskAttachments(cmd.ownerBotId, action.attachments, policy.secretRedactor(cmd.ownerBotId));
         if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
-        // A refused send is retried until T3 accepts it. One entry per action is enough for the history.
         if (!database
                  .query("SELECT 1 FROM journal WHERE task_id=? AND action_id=? AND kind='send_started' LIMIT 1",
                         {current.id, action.command.actionId})
@@ -652,7 +679,46 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
     if (!sessionActionAllowed(task) || (resource && policy.forbidden(cmd.ownerBotId, resource->action, resource->target)) ||
         (usesExistingSession && policy.forbidden(cmd.ownerBotId, Action::environment_launch, cmd.environmentId)))
         return refused(ApprovalGate::denied, OutboxPhase::started);
-    contact([&] { return t3.send(cmd); });
+    const auto authorizeStagedAttachments = [&] {
+        try {
+            const auto [current, actionStarted] = [&] {
+                std::lock_guard lock(database.mutex);
+                auto latest = taskRecords.load(id);
+                const auto saved = outboxStorage.outbox(latest, cmd.actionId);
+                return std::pair{std::move(latest), saved && saved->phase == OutboxPhase::started && !saved->stop};
+            }();
+            if (!actionStarted || current.generation != task.generation + 1 || terminal(current) ||
+                current.state == TaskState::cancelling || current.replanning || shutdown.stop_requested() ||
+                botLifecycle.botPaused(cmd.ownerBotId) ||
+                (destination && !taskRouting.projectRouteReady(id, cmd.actionId)) ||
+                (!destination && current.actionId != action.command.actionId) || disconnected())
+                return false;
+            if (!sessionActionAllowed(current)) return false;
+            if (resource) {
+                if (!authorizationPolicy) return false;
+                const auto currentRevision = [&]() -> std::optional<Id> {
+                    std::lock_guard lock(database.mutex);
+                    auto revision = database.query("SELECT revision FROM policy_settings WHERE id=1");
+                    return revision.next() ? std::optional<Id>(revision.number(0)) : std::nullopt;
+                }();
+                if (!currentRevision || *currentRevision != authorizationPolicy->settingsRevision) return false;
+                if (usesExistingSession) {
+                    const Resource launch{Action::environment_launch, cmd.environmentId, true};
+                    if (!authorizationPolicy->launch || policy.check(cmd.ownerBotId, launch) != *authorizationPolicy->launch)
+                        return false;
+                }
+                if (policy.check(cmd.ownerBotId, *resource) != authorizationPolicy->resource) return false;
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+    if (!cmd.attachments.empty() &&
+        (cmd.tool == CommandTool::delegate || cmd.tool == CommandTool::follow_up || cmd.tool == CommandTool::start_in_session))
+        contact([&] { return t3.send(cmd, authorizeStagedAttachments); });
+    else
+        contact([&] { return t3.send(cmd); });
 }
 
 bool runtime::OutboxDispatch::refreshSessionSettings(TaskData& task, const Outbox& action) {
