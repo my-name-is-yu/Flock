@@ -337,7 +337,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
         if (policy.forbidden(bot, *parseAction("repository." + std::string(op)), repo.resource()))
             throw Conflict("Repository access denied");
         database.exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)", {taskId, key, dedupe});
-        database.writeJournal(taskId, "git_mutation",
+        database.writeJournal(taskId, JournalKind::git_mutation,
                               secretStorage.sharedRedactor().record(gitJournal(
                                   context, decision.tool, repo, {{"status", "pending"}, {"target", audit}, {"reason", decision.reason}})));
         tx.commit();
@@ -367,7 +367,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     database.exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
                   " WHERE task_id=?2 AND invocation=?3",
                   {result, taskId, key});
-    database.writeJournal(taskId, "git_mutation",
+    database.writeJournal(taskId, JournalKind::git_mutation,
                           scrub.record(gitJournal(context, decision.tool, repo, {{"target", audit}, {"outcome", result}})));
     tx.commit();
     return result;

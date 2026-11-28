@@ -621,7 +621,7 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
 
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";
-    const auto cutoff = database.writeJournal({.bot = bot, .kind = "session_participation_stop", .time = policyApprovals.now()},
+    const auto cutoff = database.writeJournal({.bot = bot, .kind = JournalKind::session_participation_stop, .time = policyApprovals.now()},
                                               {{"participationId", id}, {"state", state}});
     database.exec((stopCascade + R"SQL(
 UPDATE session_participations SET state=?3, stopped_through=?2

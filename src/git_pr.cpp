@@ -107,7 +107,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous') D
                  runJson(context.run), intent});
             auto pending = prResult(request.operationId, "pending");
             pending["reason"] = reason;
-            database.writeJournal(context.taskId, "git_mutation",
+            database.writeJournal(context.taskId, JournalKind::git_mutation,
                                   secretStorage.sharedRedactor().record(gitJournal(context, "git_open_pr", base, pending)));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
@@ -190,7 +190,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous') D
         auto entry = gitJournal(context, "git_open_pr", base, result);
         entry["run"] = run;
         entry["recovered"] = state == "created" && !create;
-        database.writeJournal(context.taskId, "git_mutation", scrub.record(std::move(entry)));
+        database.writeJournal(context.taskId, JournalKind::git_mutation, scrub.record(std::move(entry)));
     }
     transaction.commit();
     return scrub.record(result, SecretRedactor::Fields::external);

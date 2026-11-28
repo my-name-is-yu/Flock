@@ -33,7 +33,6 @@ struct OutboxStop {
 
 struct OutboxCommit {
     std::string expected;
-    bool markedChecks;
 };
 
 struct OutboxContext {

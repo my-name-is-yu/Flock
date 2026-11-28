@@ -58,7 +58,7 @@ Json BotSetupStorage::apply(std::string_view bot, std::string_view operation, co
                   throw Conflict("Bot settings contain protected material");
               event = database.writeJournal(
                   {.bot = bot,
-                   .kind = "bot_setup_updated",
+                   .kind = JournalKind::bot_setup_updated,
                    .time = now,
                    .task = task ? std::optional<Id>(task) : std::nullopt,
                    .operationId = operation},
@@ -84,7 +84,7 @@ void BotSetupStorage::undo(const Person& actor, std::string_view bot, Id event) 
          {data.at("before"), operation,
           [&](const Json&, const Json&, const Json&) {
               database.exec("UPDATE journal SET data=json_set(data,'$.undone',json('true')) WHERE id=?", {event});
-              database.writeJournal({.bot = bot, .kind = "bot_setup_undone", .time = unixTime()}, {{"eventId", event}});
+              database.writeJournal({.bot = bot, .kind = JournalKind::bot_setup_undone, .time = unixTime()}, {{"eventId", event}});
           },
           &expected},
          Json::array());

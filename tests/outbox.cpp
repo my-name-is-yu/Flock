@@ -48,7 +48,6 @@ Json payload() {
             {"sourceResultRefs", Json::array({source})},
             {"destinationAction", true},
             {"expectedCommit", "abc123"},
-            {"markedCommitChecks", true},
             {"receipt", {{"threadId", "receipt-thread"}, {"runId", "receipt-run"}, {"link", "receipt-link"}}},
             {"stopRunId", "stop-run"},
             {"stopThreadId", "stop-thread"},

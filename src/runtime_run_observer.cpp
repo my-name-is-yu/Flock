@@ -112,7 +112,7 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
                     reports.writeRunReport(task, report);
             }
             if (task.runStop) {
-                database.writeJournal(task.id, "interrupt_settled", runStopJson(*task.runStop));
+                database.writeJournal(task.id, JournalKind::interrupt_settled, runStopJson(*task.runStop));
                 task.runStop.reset();
             }
             if (state == TaskState::cancelling)
@@ -155,7 +155,7 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
             taskEvents.event(task, "question/" + task.environmentId + "/" + run.threadId + "/" + observed.question.requestId, data);
             task.question =
                 TaskQuestion{observed.question.fields, {std::nullopt, task.eventId, taskWaitRun(task), observed.question.requestId}};
-            database.writeJournal(task.id, "session_question", data);
+            database.writeJournal(task.id, JournalKind::session_question, data);
             task.state = TaskState::deciding;
             return true;
         }
@@ -279,7 +279,7 @@ void runtime::RunObserver::finishReplan(const TaskData& task) {
                 current.gatewayEnvironmentId = destination->route.gatewayEnvironmentId;
             current.newSessionRequired = true;
             current.selectedSession.reset();
-            database.writeJournal(id, "session_destination_changed",
+            database.writeJournal(id, JournalKind::session_destination_changed,
                                   {{"from", oldEnvironment},
                                    {"to", destination->route.environmentId},
                                    {"fromProject", oldProject},
@@ -308,7 +308,7 @@ void runtime::RunObserver::stopNote(const TaskData& snapshot, const std::string&
         auto& saved = cancel ? task.cancellationDetail : task.replanningDetail;
         if (saved == detail) return false;
         saved = detail;
-        database.writeJournal(task.id, cancel ? "cancelling" : "replanning",
+        database.writeJournal(task.id, cancel ? JournalKind::cancelling : JournalKind::replanning,
                               {{"detail", detail}, {"run", assignedRunJson(task.activeRun)}});
         return true;
     });

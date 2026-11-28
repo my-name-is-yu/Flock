@@ -351,7 +351,7 @@ ORDER BY r.id DESC LIMIT 21
                     {"version", result.at("version")},
                     {"replyToMessageId", sourceMessage}};
         if (shared) notice["docId"] = id;
-        database_.writeJournal({.bot = bot, .kind = "memory_remembered", .time = now}, notice);
+        database_.writeJournal({.bot = bot, .kind = JournalKind::memory_remembered, .time = now}, notice);
     }
     return result;
 }
