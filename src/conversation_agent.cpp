@@ -847,7 +847,12 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 
 bool ConversationTurns::allowsSilentFinish(const Message& message) const {
     const auto wake = message.routing.find("sessionWake");
-    if (wake != message.routing.end()) return wake->contains("taskId") && field(*wake, "reason") == "finished";
+    if (wake != message.routing.end()) {
+        if (field(*wake, "reason") != "finished") return false;
+        const auto task = wokenTask(message);
+        const auto report = task ? currentWakeReport(database, *task) : std::nullopt;
+        return report && report->second.status == "completed";
+    }
     if (!message.channelScope.empty() || message.routing.contains("sessionOrigin")) return false;
     auto sends = database.query(R"SQL(
 SELECT count(*),count(*) FILTER (WHERE json_extract(result,'$[0].effect')='sent')
@@ -866,7 +871,6 @@ void ConversationTurns::finishTurn(const Message& message, std::optional<std::st
     const auto reason = woken ? field(message.routing.at("sessionWake"), "reason") : std::string{};
     const auto report = woken && route == reply && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
     const bool completed = report && report->second.status == "completed";
-    if (!text && woken && !completed) throw ToolError("Reply to the user about the unsuccessful or missing Session result");
     const bool pendingReceipt = sessionSendReceipts.persistPending(message.id);
     if (route == session_access || route == access || route == channel_access || route == bot_paused) {
         auto pending = database.query(R"SQL(

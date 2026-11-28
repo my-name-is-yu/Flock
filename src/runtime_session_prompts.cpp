@@ -179,7 +179,7 @@ runtime::SessionPrompts::WorkPrompt runtime::SessionPrompts::workPrompt(const Ta
         const auto* schedule = std::get_if<TimedTaskTrigger>(&task.trigger->details);
         if (schedule && schedule->kind == TimedTriggerKind::schedule)
             instruction +=
-                "\n\nSchedule context (follow the task intent for how to handle these occurrences):"
+                "\n\nScheduled execution times covered by this task (follow the task intent for what to process):"
                 "\nFirst covered occurrence (inclusive): " +
                 scheduledTime(schedule->coveredFrom) + "\nLast covered occurrence (inclusive): " + scheduledTime(schedule->targetTime) +
                 "\nOccurrence count: " + std::to_string(schedule->occurrenceCount) + "\nSchedule time zone: " + schedule->timezone;

@@ -854,11 +854,13 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
 }
 
-void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path, bool failed = false) {
+void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path, std::string status, std::string report) {
     struct ScriptedModel final : Model {
         std::function<Decision(const ModelInput&)> script;
         ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
+    const bool canFinishSilently = status == "completed" && !report.empty();
+    const auto* replyText = status == "failed" ? "The release check failed." : "The release check has no readable result.";
     bool woke = false;
     model.script = [&](const ModelInput& input) -> Decision {
         if (input.event.contains("sessionWake")) {
@@ -866,9 +868,9 @@ void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path, bool fai
             check(input.event.contains("task") && input.event.contains("botMessage"), "the task wake lost the Bot that asked for the work");
             for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
                 check(std::ranges::find(input.tools, tool) == input.tools.end(), "a Bot-started task woke with the person's authority");
-            check((std::ranges::find(input.tools, "no_reply") != input.tools.end()) == !failed,
-                  "The silent tool was unavailable on success or allowed on failure");
-            if (failed) return {"reply", {{"text", "The release check failed."}}, {}};
+            check((std::ranges::find(input.tools, "no_reply") != input.tools.end()) == canFinishSilently,
+                  "The silent tool was unavailable for a readable success or allowed for other results");
+            if (!canFinishSilently) return {"reply", {{"text", replyText}}, {}};
             return {"no_reply", Json::object(), {}};
         }
         if (!input.event.at("turn").empty()) return {"reply", {{"text", "Done."}}, "Tell the person"};
@@ -896,22 +898,20 @@ void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path, bool fai
         runtime.runConversations();
         runtime.tick();
         if (t3.launches == 1)
-            t3.observations["thread-release"] = {.kind = Observation::Kind::Finished,
-                                                 .status = failed ? "failed" : "completed",
-                                                 .report = failed ? "Could not check." : "Checked.",
-                                                 .itemId = "report"};
+            t3.observations["thread-release"] = {
+                .kind = Observation::Kind::Finished, .status = status, .report = report, .itemId = "report"};
     }
     check(woke, "the Bot-started task never woke its conversation");
     const auto work = TaskList(store).tasks("reviewer");
     const auto page = browser.get("/api/view?bot=reviewer");
-    if (failed) {
+    if (!canFinishSilently) {
         check(work.size() == 1 && work.front().task.state == TaskState::waiting &&
-                  hasEvent(page.at("events"), "conversation_reply", "The release check failed."),
-              "The failed task was silently closed");
+                  hasEvent(page.at("events"), "conversation_reply", replyText),
+              "The failed or unreadable task result was silently closed");
         return;
     }
     check(work.size() == 1 && work.front().task.state == TaskState::completed &&
-              conversationCompletion(page, work.front().task.id).at("data").at("text") == "Checked." &&
+              conversationCompletion(page, work.front().task.id).at("data").at("text") == report &&
               std::ranges::count_if(page.at("events"), [](const Json& event) { return event.at("kind") == "conversation_reply"; }) == 1,
           "The silent wake did not retain the finished task report without posting a reply");
 }
@@ -1944,8 +1944,9 @@ int main(int argc, char** argv) {
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         conversationMessagesAnotherBot(directory.path / "message-bot.sqlite");
-        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task.sqlite");
-        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-failed.sqlite", true);
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task.sqlite", "completed", "Checked.");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-failed.sqlite", "failed", "Could not check.");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-empty.sqlite", "completed", "");
         botMessagesStopAtTheExchangeLimit(directory.path / "message-bot-limit.sqlite");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");

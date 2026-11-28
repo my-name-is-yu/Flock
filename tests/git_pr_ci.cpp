@@ -287,6 +287,22 @@ void runner(bool associateExisting = false) {
         runtime.runConversations();
         check(script.notifications == 3 && historyCount(store, sibling, "git_webhook") == 0,
               "A SHA-only CI event woke a task without an unambiguous watch");
+
+        if (associateExisting) {
+            script.rawNotification = [&](const ModelInput& input) -> Decision {
+                if (input.event.at("turn").empty()) {
+                    check(input.event.at("gitEvent").at("taskId") == task, "The merge woke the wrong task");
+                    return {"complete", {{"report", "The associated PR merged."}}, "The watched pull request merged"};
+                }
+                return {"reply", {{"text", "The associated PR merged."}}, {}};
+            };
+            check(
+                GitEvents(store).receiveGitWebhook({hostName, "associated-merge", repoName, "pull_request", "merged", {1}, sha, "Change"}),
+                "The associated PR merge was not accepted");
+            runtime.runConversations();
+            check(Tasks(store).task(task).task.state == TaskState::completed && TaskHistory(store).history(other) == otherHistory,
+                  "The merge did not complete the associated task or woke another task");
+        }
     }
 }
 

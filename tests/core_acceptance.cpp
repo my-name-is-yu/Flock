@@ -524,6 +524,7 @@ void scheduledLaunchIncludesCoveredOccurrences() {
         f.now = first + (count - 1) * 60;
         automations.fireDueAutomations(f.now);
         const auto id = TaskList(*f.store).tasks().front().task.id;
+        f.now += 5 * 60;
         f.restart();
         f.reach(id, "running");
         const auto& prompt = f.t3.seen.front().instruction;
