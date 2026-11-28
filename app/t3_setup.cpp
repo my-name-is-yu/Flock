@@ -1,4 +1,5 @@
 #include "t3_setup.hpp"
+#include "flock/environment.hpp"
 #include "flock/json.hpp"
 #include "flock/types.hpp"
 
@@ -175,7 +176,7 @@ struct ConfigEdit {
 ConfigEdit editCodex(std::string_view url, std::string_view token, const OwnsBearer& owns) {
     constexpr std::string_view begin = "# BEGIN Flock T3 connection\n";
     constexpr std::string_view end = "# END Flock T3 connection\n";
-    ConfigEdit edit(userPath("FLOCK_CODEX_CONFIG", ".codex/config.toml"));
+    ConfigEdit edit(userPath(environment::codexConfig, ".codex/config.toml"));
     auto& config = edit.content;
     const auto start = config.find(begin);
     if (start != config.npos) {
@@ -214,7 +215,7 @@ ConfigEdit editCodex(std::string_view url, std::string_view token, const OwnsBea
 
 std::optional<Json> readClaudeServer() {
     const auto directory = setting("CLAUDE_CONFIG_DIR");
-    const auto path = directory.empty() ? userPath("FLOCK_CLAUDE_CONFIG", ".claude.json") : fs::path(directory) / ".claude.json";
+    const auto path = directory.empty() ? userPath(environment::claudeConfig, ".claude.json") : fs::path(directory) / ".claude.json";
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
         if (fs::exists(path)) throw Conflict("Could not read Claude Code configuration");
@@ -287,13 +288,13 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
                                               const OwnsBearer& owns) {
     std::vector<std::string> providers;
     std::optional<ConfigEdit> codex;
-    const auto claude = setting("FLOCK_CLAUDE_CLI", "claude");
+    const auto claude = setting(environment::claudeCli, "claude");
     std::optional<Json> previousClaude;
     bool codexApplied = false;
     std::optional<Json> replacementClaude;
     try {
         connect([&](std::string_view token) {
-            if (installed(setting("FLOCK_CODEX_CLI", "codex"))) {
+            if (installed(setting(environment::codexCli, "codex"))) {
                 codex = editCodex(url, token, owns);
                 providers.emplace_back("codex");
             }
@@ -340,13 +341,13 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
 }
 
 bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
-    if (installed(setting("FLOCK_CODEX_CLI", "codex")) && !editCodex({}, {}, owns).changed()) return true;
-    return installed(setting("FLOCK_CLAUDE_CLI", "claude")) && !ownsClaudeServer(readClaudeServer(), owns);
+    if (installed(setting(environment::codexCli, "codex")) && !editCodex({}, {}, owns).changed()) return true;
+    return installed(setting(environment::claudeCli, "claude")) && !ownsClaudeServer(readClaudeServer(), owns);
 }
 
 void removeT3Providers(const OwnsBearer& owns) {
     const auto codex = editCodex({}, {}, owns);
-    const auto claude = setting("FLOCK_CLAUDE_CLI", "claude");
+    const auto claude = setting(environment::claudeCli, "claude");
     // Without Claude Code there is no registration to remove, and its leftover file must not block Codex cleanup.
     const bool removeRegistration = installed(claude) && ownsClaudeServer(readClaudeServer(), owns);
     codex.apply();

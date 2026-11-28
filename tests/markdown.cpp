@@ -1,4 +1,5 @@
 #include "flock/markdown.hpp"
+#include "support.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -8,9 +9,7 @@
 using namespace flockv0;
 
 namespace {
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 void issueExample() {
     const std::string source = "**完了**：[結果を見る](https://example.com/result)";

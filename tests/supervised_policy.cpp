@@ -1,4 +1,5 @@
 #include "flock/conversations.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
@@ -50,9 +51,7 @@ namespace {
 const Person requester{"requester"}, member{"member"};
 const Intake intake{"release", "", "env", "project"};
 
-void check(bool value, std::string_view label) {
-    if (!value) throw std::runtime_error(std::string(label));
-}
+using flockv0::test::check;
 
 template <class Error = Conflict, class F> void rejected(F&& action) {
     try {

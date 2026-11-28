@@ -1,4 +1,5 @@
 #include "flock/t3_connection.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -43,9 +44,7 @@ using namespace flockv0;
 using namespace flockv0::live_test;
 
 namespace {
-void check(bool passed, const std::string& failure) {
-    if (!passed) throw std::runtime_error(failure);
-}
+using flockv0::test::check;
 
 void checkReply(const Json& data) {
     const auto outcome = data.at("route").get<std::string>();

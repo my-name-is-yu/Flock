@@ -37,20 +37,20 @@ auto withSession(const std::filesystem::path& directory, const SessionTarget& ta
 }
 
 std::optional<SessionAttachment> attachment(const Json& file) {
-    const auto id = str(file, "id");
+    const auto id = field(file, "id");
     if (id.empty() || id.size() > 1024 || !file.value("available", true)) return {};
-    return SessionAttachment{id, str(file, "name"), str(file, "mimeType"), {}, file.value("truncated", false)};
+    return SessionAttachment{id, field(file, "name"), field(file, "mimeType"), {}, file.value("truncated", false)};
 }
 
 SessionEvent event(const Json& item) {
     SessionEvent result{};
-    result.id = str(item, "itemId");
-    result.time = str(item, "updatedAt");
-    result.kind = str(item, "type");
+    result.id = field(item, "itemId");
+    result.time = field(item, "updatedAt");
+    result.kind = field(item, "type");
     if (result.id.empty() || !session_read::utcTimestamp(result.time) || result.kind.empty()) invalidResponse();
-    result.status = str(item, "status");
-    result.title = str(item, "title");
-    result.text = str(item, "text");
+    result.status = field(item, "status");
+    result.title = field(item, "title");
+    result.text = field(item, "text");
     result.textTruncated = boolean(item, "textTruncated");
     return result;
 }
@@ -73,7 +73,7 @@ void attachMetadata(SessionEvent& result, const Json& item) {
 std::optional<Json> readLocalItem(Client& client, const SessionTarget& target, std::string_view itemId, int chars) {
     auto page = readThread(client, target.threadId, "activity", 1, chars, {{"itemId", itemId}});
     const auto& items = array(page, "items");
-    if (items.empty() || !localItem(items.front(), target.threadId) || str(items.front(), "itemId") != itemId) return {};
+    if (items.empty() || !localItem(items.front(), target.threadId) || field(items.front(), "itemId") != itemId) return {};
     return items.front();
 }
 }
@@ -86,12 +86,12 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
             const auto page = readThread(client, target.threadId, "messages", includeMessages ? session_read::pageSize : 1,
                                          includeMessages ? 240 : 1, {{"beforePosition", maxHistoryPosition}});
             const auto& thread = member(page, "thread");
-            SessionMetadata metadata{str(thread, "title"),
+            SessionMetadata metadata{field(thread, "title"),
                                      {},
-                                     str(thread, "projectId"),
-                                     str(thread, "status"),
-                                     str(thread, "createdAt"),
-                                     str(thread, "updatedAt"),
+                                     field(thread, "projectId"),
+                                     field(thread, "status"),
+                                     field(thread, "createdAt"),
+                                     field(thread, "updatedAt"),
                                      {},
                                      false};
             if (metadata.projectId.empty() || metadata.status.empty() || !session_read::utcTimestamp(metadata.createdAt) ||
@@ -99,8 +99,8 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
                 invalidResponse();
             try {
                 const auto project = client.call("t3_project_read", {{"projectId", metadata.projectId}});
-                if (str(project, "id") != metadata.projectId) invalidResponse();
-                metadata.project = str(project, "title");
+                if (field(project, "id") != metadata.projectId) invalidResponse();
+                metadata.project = field(project, "title");
             } catch (const Failure& error) {
                 if (error.kind != Failure::Kind::Auth && error.reason != Failure::Reason::ProjectNotFound) throw;
             }
@@ -109,7 +109,8 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
                 metadata.moreMessages = !earlier.is_null();
                 if (metadata.moreMessages) position(earlier);
                 for (const auto& item : array(page, "items")) {
-                    if (localItem(item, target.threadId)) metadata.messages.push_back({str(item, "text"), boolean(item, "textTruncated")});
+                    if (localItem(item, target.threadId))
+                        metadata.messages.push_back({field(item, "text"), boolean(item, "textTruncated")});
                 }
             }
             return metadata;
@@ -172,7 +173,7 @@ std::optional<SessionCounts> sessionCounts(const std::filesystem::path& director
             const auto page = readThread(client, target.threadId, "messages", 100, 1, {{"afterPosition", after}});
             for (const auto& item : array(page, "items")) {
                 advancePosition(item, after);
-                const auto kind = str(item, "type");
+                const auto kind = field(item, "type");
                 if (localItem(item, target.threadId) && (kind == "user_message" || kind == "assistant_message")) ++messages;
             }
             if (!moreHistory(page, after, start)) return SessionCounts{messages, position(member(member(page, "thread"), "runCount"))};
@@ -190,9 +191,9 @@ std::optional<SessionAttachment> sessionAttachment(const std::filesystem::path& 
         if (files == item->end()) return {};
         if (!files->is_array()) invalidResponse();
         for (const auto& file : *files) {
-            if (str(file, "id") != attachmentId) continue;
+            if (field(file, "id") != attachmentId) continue;
             auto value = attachment(file);
-            if (value && file.contains("content")) value->content = str(file, "content");
+            if (value && file.contains("content")) value->content = field(file, "content");
             return value;
         }
         return {};

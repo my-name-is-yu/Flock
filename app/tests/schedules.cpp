@@ -57,7 +57,7 @@ void cronSyntaxAndTimeZones() {
 }
 
 void cronIntakeAndRestart() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto folder = temp.path / "bots" / "release";
     auto config = botConfig();
     config["cron"] = Json::array({
@@ -96,7 +96,7 @@ void cronIntakeAndRestart() {
 }
 
 void invalidSessionSettingsPreserveDueTimes() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     auto config = botConfig();
@@ -128,7 +128,7 @@ void invalidSessionSettingsPreserveDueTimes() {
 }
 
 void configuredScheduleLifecycle() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     auto config = botConfig();
@@ -191,7 +191,7 @@ void configuredScheduleLifecycle() {
 }
 
 void runSettingsChangesResyncConfiguredSchedules() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     auto config = botConfig();
     config["name"] = "Customer Infrastructure Release Reviewer";
@@ -275,7 +275,7 @@ void runSettingsChangesResyncConfiguredSchedules() {
 }
 
 void automationFiringsKeepTheirSavedRoute() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     createBot(folder, botConfig("previous-model"), "", "");
@@ -326,7 +326,7 @@ void automationFiringsKeepTheirSavedRoute() {
 }
 
 void unreadableProfileKeepsAutomationDelivery() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     createBot(home / "release", botConfig("release-saved"), "", "");
     createBot(home / "triage", botConfig("triage-saved"), "", "");
@@ -357,7 +357,7 @@ void unreadableProfileKeepsAutomationDelivery() {
 }
 
 void failedScheduleSyncLeavesWorkspaceUnchanged() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto database = temp.path / "tasks.db";
     auto config = botConfig();
@@ -391,7 +391,7 @@ BEGIN SELECT RAISE(ABORT,'schedule write rejected'); END;
 }
 
 void invalidEntriesPreserveDueSchedule() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     const auto db = temp.path / "tasks.db";
@@ -435,7 +435,7 @@ void invalidEntriesPreserveDueSchedule() {
 }
 
 void malformedDuplicatesDeactivateSchedules() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
     const auto db = temp.path / "tasks.db";

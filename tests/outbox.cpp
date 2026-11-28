@@ -1,4 +1,5 @@
 #include "../src/outbox_storage.hpp"
+#include "support.hpp"
 #include "../src/database.hpp"
 
 #include "flock/record_decode_error.hpp"
@@ -24,9 +25,7 @@ namespace {
 constexpr auto id = "outbox-test-action"sv;
 constexpr auto authGeneration = "auth-generation"sv;
 
-void check(bool passed, std::string_view message) {
-    if (!passed) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 Json payload() {
     const Json source = {{"taskId", 11},

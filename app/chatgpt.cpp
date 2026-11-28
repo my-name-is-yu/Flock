@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
 #include "chatgpt_failure.hpp"
@@ -32,19 +33,6 @@ using namespace std::chrono_literals;
 using chatgpt::field;
 using chatgpt::stringField;
 constexpr std::size_t maxProfile = 4 * 1024 * 1024;
-
-class Descriptor {
-public:
-    explicit Descriptor(int fd) : fd_(fd) {}
-    ~Descriptor() {
-        if (fd_ >= 0) ::close(fd_);
-    }
-    Descriptor(const Descriptor&) = delete;
-    Descriptor& operator=(const Descriptor&) = delete;
-    int get() const { return fd_; }
-private:
-    int fd_;
-};
 
 void checkStop(std::stop_token stop) {
     if (stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled", true);
@@ -89,7 +77,7 @@ public:
     }
 
     Json read() const {
-        const Descriptor file(openat(dir_.get(), "profile.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+        const FileDescriptor file(openat(dir_.get(), "profile.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
         if (file.get() < 0 && errno == ENOENT) return Json::object();
         struct stat info{};
         if (!privateFile(file.get(), info) || !S_ISREG(info.st_mode) || info.st_size < 0 ||
@@ -115,7 +103,7 @@ public:
         if (RAND_bytes(random.data(), random.size()) != 1) saveFailed();
         auto temporary = ".profile-" + encodeBase64(std::string_view(reinterpret_cast<const char*>(random.data()), random.size()));
         std::ranges::replace(temporary, '/', '_');
-        const Descriptor file(openat(dir_.get(), temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+        const FileDescriptor file(openat(dir_.get(), temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
         if (file.get() < 0) saveFailed();
         try {
             std::string_view remaining(bytes);
@@ -134,7 +122,7 @@ public:
     }
 private:
     [[noreturn]] static void saveFailed() { throw ModelError("Unable to save Flock's ChatGPT credentials", false); }
-    Descriptor dir_, lock_;
+    FileDescriptor dir_, lock_;
 };
 
 bool hasPlanScope(const Json& profile) {

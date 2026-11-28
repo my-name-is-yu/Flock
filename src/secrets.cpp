@@ -1,4 +1,5 @@
 #include "secret_storage.hpp"
+#include "flock/file_descriptor.hpp"
 #include "database.hpp"
 #include "flock/types.hpp"
 #include "flock/secrets.hpp"
@@ -23,30 +24,21 @@ namespace flockv0 {
 namespace {
 constexpr std::string_view redactionPlaceholder = "[redacted]";
 
-struct File {
-    int fd;
-    explicit File(int value) : fd(value) {}
-    File(const File&) = delete;
-    File(File&& other) noexcept : fd(std::exchange(other.fd, -1)) {}
-    ~File() {
-        if (fd >= 0) close(fd);
-    }
-};
 void verify(int fd, bool directory) {
     struct stat info{};
     if (fstat(fd, &info) || info.st_uid != geteuid() || (info.st_mode & 07777) != (directory ? 0700 : 0600) ||
         !(directory ? S_ISDIR(info.st_mode) : S_ISREG(info.st_mode) && info.st_nlink == 1))
         throw Conflict("Unsafe secret vault permissions");
 }
-File openDirectory(int stateDirectory, bool create) {
+FileDescriptor openDirectory(int stateDirectory, bool create) {
     if (create) {
         if (mkdirat(stateDirectory, "secrets", 0700) == 0) {
             if (fsync(stateDirectory)) throw Conflict("Cannot persist vault directory");
         } else if (errno != EEXIST)
             throw Conflict("Cannot create secret vault");
     }
-    File directory(openat(stateDirectory, "secrets", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY));
-    verify(directory.fd, true);
+    FileDescriptor directory(openat(stateDirectory, "secrets", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY));
+    verify(directory.get(), true);
     return directory;
 }
 
@@ -79,35 +71,35 @@ void SecretStorage::insert(const SecretRef& ref, std::string_view value) {
     if (!ref.valid() || value.empty() || value.size() > 65536) throw Conflict("Invalid secret name or size");
     auto directory = openDirectory(stateDirectory_, true);
     const auto staging = ".pending-" + actionId();
-    File temp(openat(directory.fd, staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
-    if (temp.fd < 0) throw Conflict("Cannot store secret");
+    FileDescriptor temp(openat(directory.get(), staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+    if (temp.get() < 0) throw Conflict("Cannot store secret");
     struct Cleanup {
         int directory;
         const std::string& name;
         ~Cleanup() { unlinkat(directory, name.c_str(), 0); }
-    } cleanup{directory.fd, staging};
-    verify(temp.fd, false);
+    } cleanup{directory.get(), staging};
+    verify(temp.get(), false);
     auto bytes = value;
     while (!bytes.empty()) {
-        auto count = write(temp.fd, bytes.data(), bytes.size());
+        auto count = write(temp.get(), bytes.data(), bytes.size());
         if (count < 0 && errno == EINTR) continue;
         if (count <= 0) throw Conflict("Cannot store secret");
         bytes.remove_prefix(count);
     }
-    if (fsync(temp.fd)) throw Conflict("Cannot persist secret");
-    if (renameat(directory.fd, staging.c_str(), directory.fd, ref.name.c_str())) throw Conflict("Cannot publish secret");
-    if (fsync(directory.fd)) throw Conflict("Cannot persist secret directory");
+    if (fsync(temp.get())) throw Conflict("Cannot persist secret");
+    if (renameat(directory.get(), staging.c_str(), directory.get(), ref.name.c_str())) throw Conflict("Cannot publish secret");
+    if (fsync(directory.get())) throw Conflict("Cannot persist secret directory");
 }
 
 std::string SecretStorage::read(const SecretRef& ref) const {
     if (!ref.valid()) throw Conflict("Invalid secret reference");
     auto directory = openDirectory(stateDirectory_, false);
-    File file(openat(directory.fd, ref.name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
-    verify(file.fd, false);
+    FileDescriptor file(openat(directory.get(), ref.name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+    verify(file.get(), false);
     std::string result;
     char buffer[4096];
     for (;;) {
-        auto count = ::read(file.fd, buffer, sizeof(buffer));
+        auto count = ::read(file.get(), buffer, sizeof(buffer));
         if (count < 0 && errno == EINTR) continue;
         if (count < 0 || result.size() > 65536) throw Conflict("Cannot read secret");
         if (!count) break;

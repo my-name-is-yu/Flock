@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
@@ -51,9 +52,8 @@ namespace {
 const Person owner{"owner", true};
 const Intake alpha{"alpha", "", "env", "alpha-project"}, beta{"beta", "", "env", "beta-project"};
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 template <typename Function> void rejectsWithConflict(Function run, std::string_view expected) {
     try {
@@ -64,20 +64,6 @@ template <typename Function> void rejectsWithConflict(Function run, std::string_
     }
     throw std::runtime_error("Missing conflict: " + std::string(expected));
 }
-
-struct Directory {
-    std::filesystem::path path;
-    Directory() {
-        char name[] = "/tmp/flock-memory-XXXXXX";
-        const auto made = mkdtemp(name);
-        check(made != nullptr, "Temporary directory creation failed");
-        path = made;
-    }
-    ~Directory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-};
 
 struct Adapter : T3 {
     std::string authGeneration(const std::string&, const Json&) override { return {}; }
@@ -813,7 +799,7 @@ void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
 
 int main() {
     try {
-        Directory temp;
+        TemporaryDirectory temp;
         memoryFlow(temp.path / "memory.sqlite3");
         proactiveMemory(temp.path / "proactive-memory.sqlite3");
         memoryRedactionLimit(temp.path / "memory-limit.sqlite3");

@@ -17,6 +17,12 @@ TEST_FILE = re.compile(r"(^|_)tests\.cpp$")
 SINGLE_OWNERS = (
     (re.compile(r"set_content\([^;]*application/json"), "web/http.cpp", "send JSON responses with web::reply or web::error"),
     (re.compile(r'"0123456789abcdef"(\[|;)|\bEVP_Digest\(|\bSHA256\('), "src/digest.cpp", "encode hex with encodeHex and hash with sha256Hex"),
+    (
+        re.compile(r'"(FLOCK|T3CODE)_[A-Z0-9_]+"'),
+        "include/flock/environment.hpp",
+        "name environment variables in flock/environment.hpp",
+    ),
+    (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
 
 
@@ -39,15 +45,18 @@ def layer_of(root, name, includer):
 def violations(root):
     root = root.resolve()
     found = []
-    for layer, allowed in ALLOWED.items():
+    for layer in (*ALLOWED, "tests"):
+        allowed = ALLOWED.get(layer)
         for path in sorted((root / layer).rglob("*")):
             relative = path.relative_to(root)
-            if path.suffix not in SOURCE_SUFFIXES or is_test(relative):
+            if path.suffix not in SOURCE_SUFFIXES:
                 continue
             text = path.read_text(errors="surrogateescape")
             for pattern, owner, advice in SINGLE_OWNERS:
-                if relative.as_posix() != owner and pattern.search(text):
+                if relative.as_posix() != owner and is_test(relative) == is_test(Path(owner)) and pattern.search(text):
                     found.append(f"{relative}: {advice}; only {owner} does this directly")
+            if is_test(relative):
+                continue
             for name in INCLUDE.findall(text):
                 target = layer_of(root, name, path)
                 if layer == "include" and not name.startswith("flock/") and target is not None:

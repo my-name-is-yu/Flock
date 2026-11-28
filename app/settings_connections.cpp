@@ -1,4 +1,5 @@
 #include "settings_connections.hpp"
+#include "flock/environment.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
 #include "bot_tools.hpp"
@@ -218,16 +219,16 @@ SettingsConnections::SettingsConnections(const fs::path& home)
     : home_(home), file_(home / "settings-connections.json"), persisted_(readSettingsFile(file_)), desired_(persisted_) {
     if (!persisted_.is_object()) throw Conflict("Invalid saved connection settings");
     auto github =
-        Json{{"token", environmentValue("FLOCK_GITHUB_TOKEN")}, {"webhookSecret", environmentValue("FLOCK_GITHUB_WEBHOOK_SECRET")}};
+        Json{{"token", environmentValue(environment::githubToken)}, {"webhookSecret", environmentValue(environment::githubWebhookSecret)}};
     github.update(objectField(persisted_, "github"));
     desired_["github"] = std::move(github);
-    const auto channelFile = environmentValue("FLOCK_CHANNEL_BRIDGES_FILE");
+    const auto channelFile = environmentValue(environment::channelBridgesFile);
     hostChannels_ = !channelFile.empty();
     if (hostChannels_)
         desired_["channels"] = readChannelBridgeSettings(channelFile);
     else if (!desired_.contains("channels"))
         desired_["channels"] = Json::object();
-    hostTools_ = !environmentValue("FLOCK_WEB_SEARCH_KEY").empty() || fs::exists(home_ / "bot-tools.json");
+    hostTools_ = !environmentValue(environment::webSearchKey).empty() || fs::exists(home_ / "bot-tools.json");
     if (hostTools_ || !desired_.contains("tools")) desired_["tools"] = readBotToolSettings(home_);
     active_ = desired_;
     loadedTools_ = activeToolSettings(home_, active_.at("tools"));

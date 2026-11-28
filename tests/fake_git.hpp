@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/task_history.hpp"
+#include "support.hpp"
 #include "flock/git_host.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/decision.hpp"
@@ -32,23 +33,8 @@ inline constexpr auto repoName = "org/flock";
 inline constexpr auto repositoryTarget = "github.com/org/flock";
 inline const std::string sha(40, 'a');
 
-inline void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
-
-struct Directory {
-    std::filesystem::path path;
-    Directory() {
-        char name[] = "/tmp/flock-git-XXXXXX";
-        const auto directory = mkdtemp(name);
-        check(directory != nullptr, "could not create fixture directory");
-        path = directory;
-    }
-    ~Directory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-};
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 class FakeHost final : public GitHost {
 public:

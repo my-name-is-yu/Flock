@@ -1,4 +1,5 @@
 #include "flock/t3_connection.hpp"
+#include "../../tests/support.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/web_conversation_intake.hpp"
@@ -78,23 +79,8 @@ constexpr auto proposedOptions = "1. 手動で照合する\n"
                                  "   - 追加・削除・更新の件数を出し、金額が変わった明細を人が確認する。\n"
                                  "3. 公開後に見直す";
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
-
-struct TestDirectory {
-    std::filesystem::path path;
-    TestDirectory() {
-        char name[] = "/tmp/flock-web-XXXXXX";
-        const auto directory = mkdtemp(name);
-        check(directory != nullptr, "could not create fixture directory");
-        path = directory;
-    }
-    ~TestDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-};
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 std::string statusText(const ModelInput& input) {
     std::string text;
@@ -1919,7 +1905,7 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
 
 int main(int argc, char** argv) {
     try {
-        TestDirectory directory;
+        TemporaryDirectory directory;
         if (argc == 2 && std::string_view(argv[1]) == "--chatgpt") {
             chatGPTConversation(directory.path);
             std::cout << "web ChatGPT conversation behavior passed\n";

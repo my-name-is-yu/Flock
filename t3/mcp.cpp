@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/text.hpp"
 #include "flock/detail/json_rpc.hpp"
 #include "flock/detail/traffic_recording.hpp"
 #include "flock/json.hpp"
@@ -57,9 +58,9 @@ size_t receiveHeader(char* data, size_t size, size_t count, void* context) noexc
             auto key = std::string(line.substr(0, end));
             std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
             if (key == "www-authenticate" && headers.contains(key))
-                headers[key] += ", " + trim(line.substr(end + 1));
+                headers[key] += ", " + trimAscii(line.substr(end + 1));
             else
-                headers[key] = trim(line.substr(end + 1));
+                headers[key] = trimAscii(line.substr(end + 1));
         }
     } catch (...) {
         return 0;
@@ -75,13 +76,13 @@ bool rejectsDelegatedFrom(std::string_view message) {
 }
 
 Json rpcResult(Json message) {
-    if (str(message, "jsonrpc") != "2.0") invalidResponse();
+    if (field(message, "jsonrpc") != "2.0") invalidResponse();
     if (message.contains("error")) {
         const auto& error = message["error"];
         if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() || !error.contains("message") ||
             !error["message"].is_string())
             invalidResponse();
-        const auto detail = str(error, "message");
+        const auto detail = field(error, "message");
         const auto reason =
             error["code"] == -32602 && rejectsDelegatedFrom(detail) ? Failure::Reason::DelegatedFromRejected : Failure::Reason::Other;
         throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + detail, reason);
@@ -89,17 +90,6 @@ Json rpcResult(Json message) {
     if (!message.contains("result") || !message["result"].is_object()) invalidResponse();
     return std::move(message["result"]);
 }
-}
-
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    return std::string(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
-}
-
-std::string str(const Json& object, std::string_view name) {
-    const auto it = object.find(name);
-    return it != object.end() && it->is_string() ? it->get<std::string>() : std::string{};
 }
 
 Json parse(std::string_view body) {
@@ -196,7 +186,7 @@ Client::Client(Credential credential, SessionReadDeadline deadline, std::string 
                {"Content-Type", "application/json"}} {
     try {
         const auto result = rpc("initialize", initializeParams());
-        if (str(result, "protocolVersion") != ProtocolVersion) invalidResponse();
+        if (field(result, "protocolVersion") != ProtocolVersion) invalidResponse();
         headers_["MCP-Protocol-Version"] = ProtocolVersion;
         request("POST", Json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump());
     } catch (...) {
@@ -235,7 +225,7 @@ HttpResponse Client::request(std::string_view method, const std::string& body, l
     }
     if (response.status == 403) {
         const auto body = Json::parse(response.body, nullptr, false);
-        if (body.is_object() && str(body, "error") == "linked_environments_off")
+        if (body.is_object() && field(body, "error") == "linked_environments_off")
             throw Failure(Failure::Kind::Settings,
                           "Linked environments are turned off in T3 Settings > Labs. Turn them on to use this target.",
                           Failure::Reason::LinkedEnvironmentUnavailable);
@@ -268,8 +258,8 @@ Json Client::rpc(std::string_view method, const Json& arguments) {
 // T3 v0.1.11 uses a shared invalid_request code for several distinct outcomes.
 static Failure toolFailure(const Json& payload) {
     const auto& error = payload.contains("error") && payload["error"].is_object() ? payload["error"] : payload;
-    const auto code = str(error, "code");
-    const auto message = str(error, "message");
+    const auto code = field(error, "code");
+    const auto message = field(error, "message");
     if ((code == "invalid_request" || code == "invalid_params") && rejectsDelegatedFrom(message))
         return Failure(Failure::Kind::Tool, "T3 rejected the delegatedFrom launch field", Failure::Reason::DelegatedFromRejected);
     if ((code == "capability_denied" &&
@@ -314,8 +304,8 @@ Json Client::call(std::string_view tool, Json arguments) {
     Json data = response.value("structuredContent", Json());
     if (data.is_null()) {
         const auto content = response.find("content");
-        if (content != response.end() && content->is_array() && content->size() == 1 && str(content->front(), "type") == "text") {
-            const auto detail = str(content->front(), "text");
+        if (content != response.end() && content->is_array() && content->size() == 1 && field(content->front(), "type") == "text") {
+            const auto detail = field(content->front(), "text");
             if (isError && detail.starts_with("MCP error -32602: Input validation error:") && rejectsDelegatedFrom(detail))
                 throw Failure(Failure::Kind::Tool, "T3 rejected the delegatedFrom launch field", Failure::Reason::DelegatedFromRejected);
             data = Json::parse(detail, nullptr, false);
@@ -329,7 +319,7 @@ Json Client::call(std::string_view tool, Json arguments) {
 Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars, Json args, int runLimit) {
     args.update(Json{{"threadId", threadId}, {"view", view}, {"limit", limit}, {"maxCharsPerItem", chars}, {"runLimit", runLimit}});
     auto page = client.call("t3_thread_read", std::move(args));
-    if (str(member(page, "thread"), "threadId") != threadId || array(page, "items").size() > limit) invalidResponse();
+    if (field(member(page, "thread"), "threadId") != threadId || array(page, "items").size() > limit) invalidResponse();
     return page;
 }
 

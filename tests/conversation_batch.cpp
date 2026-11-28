@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
@@ -54,9 +55,7 @@ namespace {
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
-void check(bool ok, const char* message) {
-    if (!ok) throw std::runtime_error(message);
-}
+using flockv0::test::check;
 
 Decision call(std::string tool, Json args = Json::object()) {
     return {std::move(tool), std::move(args), "Check the fixture evidence"};

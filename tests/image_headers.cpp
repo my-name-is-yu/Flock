@@ -1,4 +1,5 @@
 #include "../src/image_headers.hpp"
+#include "support.hpp"
 
 #include <array>
 #include <initializer_list>
@@ -8,9 +9,7 @@
 using namespace flockv0::message_attachments;
 
 namespace {
-void check(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
-}
+using flockv0::test::check;
 
 std::string bytes(std::initializer_list<std::uint8_t> data) {
     return {reinterpret_cast<const char*>(data.begin()), data.size()};

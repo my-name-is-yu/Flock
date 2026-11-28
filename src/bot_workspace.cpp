@@ -1,4 +1,5 @@
 #include "flock/secrets.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/bot_id.hpp"
 #include "secret_storage.hpp"
 #include "conversation_tools.hpp"
@@ -35,33 +36,20 @@ std::string replaceInvalidUtf8(std::string_view value) {
     return Json::parse(Json(std::string(value)).dump(-1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
 }
 
-class Fd {
-    int value_;
-public:
-    explicit Fd(int value) : value_(value) {
-        if (value < 0) throw Conflict("Workspace path or descriptor is unavailable");
-    }
-    Fd(const Fd&) = delete;
-    Fd(Fd&& other) noexcept : value_(std::exchange(other.value_, -1)) {}
-    Fd& operator=(Fd&& other) noexcept {
-        std::swap(value_, other.value_);
-        return *this;
-    }
-    ~Fd() {
-        if (value_ >= 0) close(value_);
-    }
-    int get() const { return value_; }
-    int release() { return std::exchange(value_, -1); }
-};
+FileDescriptor opened(int fd) {
+    if (fd < 0) throw Conflict("Workspace path or descriptor is unavailable");
+    return FileDescriptor(fd);
+}
 
-Fd directoryAt(int parent, const fs::path& relative) {
-    Fd current(openat(parent, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-    for (const auto& part : relative) current = Fd(openat(current.get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+FileDescriptor directoryAt(int parent, const fs::path& relative) {
+    auto current = opened(openat(parent, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    for (const auto& part : relative)
+        current = opened(openat(current.get(), part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     return current;
 }
 
-Fd directory(const fs::path& root) {
-    const Fd slash(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+FileDescriptor directory(const fs::path& root) {
+    const auto slash = opened(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     return directoryAt(slash.get(), root.relative_path());
 }
 
@@ -82,8 +70,8 @@ template <class Visit> bool visitDirectory(int parent, const Visit& visit) {
     }
 }
 
-Fd regularFile(int parent, const fs::path& filename) {
-    Fd file(openat(parent, filename.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC));
+FileDescriptor regularFile(int parent, const fs::path& filename) {
+    auto file = opened(openat(parent, filename.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC));
     struct stat info{};
     if (fstat(file.get(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_nlink != 1)
         throw Conflict("Only regular files with one link are readable");
@@ -116,7 +104,7 @@ void writeFile(int root, const fs::path& relative, std::string_view data) {
         throw Conflict("Cannot inspect workspace file");
 
     const auto temporary = ".flock-write-" + actionId();
-    const Fd file(openat(parent.get(), temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    const auto file = opened(openat(parent.get(), temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     try {
         while (!data.empty()) {
             const auto count = write(file.get(), data.data(), data.size());
@@ -174,7 +162,7 @@ Json searchWorkspace(int root, const fs::path& relative, std::string_view query)
     return {{"files", files}, {"truncated", truncated || !complete}};
 }
 
-Fd openWorkspace(const fs::path& database, const std::string& bot) {
+FileDescriptor openWorkspace(const fs::path& database, const std::string& bot) {
     if (!validBotId(bot)) throw Conflict("Invalid Bot workspace");
     const auto state = fs::canonical(database.has_parent_path() ? database.parent_path() : fs::path("."));
     const auto basePath = state / "workspaces";
@@ -185,9 +173,9 @@ Fd openWorkspace(const fs::path& database, const std::string& bot) {
     }
     const auto stateFd = directory(state);
     if (mkdirat(stateFd.get(), "workspaces", 0700) != 0 && errno != EEXIST) throw Conflict("Cannot create workspace storage");
-    const Fd base(openExactChildDirectory(stateFd.get(), "workspaces"));
+    const auto base = opened(openExactChildDirectory(stateFd.get(), "workspaces"));
     if (mkdirat(base.get(), bot.c_str(), 0700) != 0 && errno != EEXIST) throw Conflict("Cannot create Bot workspace");
-    return Fd(openExactChildDirectory(base.get(), bot));
+    return opened(openExactChildDirectory(base.get(), bot));
 }
 }
 

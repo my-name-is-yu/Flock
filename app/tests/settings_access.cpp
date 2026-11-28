@@ -24,7 +24,7 @@ std::string authorization(const Json& password) {
 }
 
 void accessLifecycle() {
-    Sandbox home;
+    TemporaryDirectory home;
     Store store(home.path / "flock.sqlite3");
     SettingsAccess access(store, nullptr);
     auto identity = access.identities();
@@ -90,7 +90,7 @@ void accessLifecycle() {
 }
 
 void externalAccess() {
-    Sandbox home;
+    TemporaryDirectory home;
     const auto identities = home.path / "identities.json";
     constexpr auto header = "Bearer fixture-read-only";
     constexpr auto memberHeader = "Bearer fixture-member-only";

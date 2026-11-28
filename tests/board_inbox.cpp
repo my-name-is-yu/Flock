@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -46,9 +47,8 @@ using namespace flockv0;
 namespace {
 const Person owner{"owner", true}, alice{"alice"}, bob{"bob"}, reader{"reader"};
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 template <class Error, class Work> void rejected(Work work, std::string_view message) {
     try {
@@ -58,20 +58,6 @@ template <class Error, class Work> void rejected(Work work, std::string_view mes
     }
     throw std::runtime_error(std::string(message));
 }
-
-struct Directory {
-    std::filesystem::path path;
-    Directory() {
-        char name[] = "/tmp/flock-board-inbox-XXXXXX";
-        const auto directory = mkdtemp(name);
-        check(directory != nullptr, "could not create fixture directory");
-        path = directory;
-    }
-    ~Directory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-};
 
 struct Database {
     sqlite3* db = nullptr;
@@ -372,7 +358,7 @@ void chatDecision(const std::filesystem::path& path) {
 
 int main() {
     try {
-        Directory directory;
+        TemporaryDirectory directory;
         const auto path = directory.path / "state.db";
         exercise(path);
         protectedInputSource(directory.path / "protected-input.db");

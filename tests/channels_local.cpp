@@ -1,4 +1,5 @@
 #include "flock/t3_connection.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -58,9 +59,7 @@ const Person root{"root", true}, owner{"fixture-user", false};
 const std::string image =
     decodeAttachment("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==", 128);
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 void rejects(const std::function<void()>& action) {
     try {

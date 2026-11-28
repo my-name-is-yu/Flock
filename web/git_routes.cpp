@@ -39,11 +39,6 @@ bool verified(const httplib::Request& request, const std::string& secret) {
     return signature.size() == expected.size() && CRYPTO_memcmp(signature.data(), expected.data(), expected.size()) == 0;
 }
 
-std::string str(const Json& data, const char* key) {
-    const auto field = data.find(key);
-    return field != data.end() && field->is_string() ? field->get<std::string>() : std::string{};
-}
-
 Id number(const Json& object, const char* key) {
     const auto& value = object.at(key);
     if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>() > std::numeric_limits<Id>::max()) ||
@@ -78,20 +73,20 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
     GitWebhook event;
     event.host = "github.com";
     event.eventId = request.get_header_value("X-GitHub-Delivery");
-    event.action = str(payload, "action");
+    event.action = field(payload, "action");
     if (type == "pull_request" || type == "pull_request_review" || type == "pull_request_review_comment") {
         const auto& pr = payload.at("pull_request");
         event.prNumbers.push_back(number(pr, "number"));
         event.kind = type == "pull_request" ? "pull_request" : type == "pull_request_review" ? "review" : "comment";
-        event.headSha = str(pr.at("head"), "sha");
-        event.summary = str(pr, "title");
+        event.headSha = field(pr.at("head"), "sha");
+        event.summary = field(pr, "title");
         if (event.kind == "pull_request" && event.action == "closed" && pr.contains("merged") && pr.at("merged") == true)
             event.action = "merged";
-        const bool open = str(pr, "state") != "closed";
+        const bool open = field(pr, "state") != "closed";
         if (event.kind == "review") {
             const auto& review = payload.at("review");
-            const auto state = str(review, "state");
-            const auto body = str(review, "body");
+            const auto state = field(review, "state");
+            const auto body = field(review, "body");
             event.summary = state + "\n" + body;
             event.feedbackId = number(review, "id");
             if (event.action == "submitted" && open) {
@@ -101,8 +96,8 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
         }
         if (event.kind == "comment") {
             const auto& comment = payload.at("comment");
-            event.summary = str(comment, "body");
-            GitReviewLocation location{number(comment, "id"), str(comment, "path"), str(comment, "side")};
+            event.summary = field(comment, "body");
+            GitReviewLocation location{number(comment, "id"), field(comment, "path"), field(comment, "side")};
             if (comment.contains("line") && !comment.at("line").is_null()) {
                 location.line = number(comment, "line");
             } else if (comment.contains("original_line") && !comment.at("original_line").is_null()) {
@@ -118,32 +113,32 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
         event.prNumbers.push_back(number(issue, "number"));
         event.kind = "comment";
         const auto& comment = payload.at("comment");
-        event.summary = str(comment, "body");
+        event.summary = field(comment, "body");
         event.feedbackId = number(comment, "id");
     } else if (type == "check_run" || type == "check_suite" || type == "workflow_job" || type == "workflow_run") {
         if (event.action != "completed") return {};
         const auto& check = payload.at(type);
         event.kind = type.starts_with("check_") ? "check" : "ci";
-        event.headSha = str(check, "head_sha");
+        event.headSha = field(check, "head_sha");
         if (addPulls(event, check, payload.at("repository")) && event.prNumbers.empty()) return {};
-        const auto conclusion = str(check, "conclusion");
-        event.summary = str(check, "name") + " " + str(check, "status") + " " + conclusion;
+        const auto conclusion = field(check, "conclusion");
+        event.summary = field(check, "name") + " " + field(check, "status") + " " + conclusion;
         if (type == "workflow_job") event.jobId = number(check, "id");
         if ((type == "check_run" || type == "workflow_job") &&
             (conclusion == "failure" || conclusion == "timed_out" || conclusion == "startup_failure"))
             event.followup = GitFollowup::failedCheck;
     } else if (type == "status") {
         event.kind = "check";
-        event.action = str(payload, "state");
-        event.headSha = str(payload, "sha");
-        event.summary = str(payload, "context") + " " + str(payload, "description");
+        event.action = field(payload, "state");
+        event.headSha = field(payload, "sha");
+        event.summary = field(payload, "context") + " " + field(payload, "description");
         if (event.action == "failure" || event.action == "error") event.followup = GitFollowup::failedCheck;
     } else if (type == "code_scanning_alert") {
         const auto& alert = payload.at("alert");
         event.kind = "code_scan";
-        pullFromRef(event, str(payload, "ref"));
-        event.headSha = str(payload, "commit_oid");
-        event.summary = str(alert.at("rule"), "description") + "\n" + str(alert, "html_url");
+        pullFromRef(event, field(payload, "ref"));
+        event.headSha = field(payload, "commit_oid");
+        event.summary = field(alert.at("rule"), "description") + "\n" + field(alert, "html_url");
     } else
         return {};
     if (event.prNumbers.empty() && event.headSha.empty()) return {};

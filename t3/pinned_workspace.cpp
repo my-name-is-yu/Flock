@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/json.hpp"
 
 #include <nlohmann/json.hpp>
@@ -26,21 +27,6 @@
 namespace flockv0::t3detail {
 namespace {
 
-class Fd {
-public:
-    explicit Fd(int fd) : fd_(fd) {}
-    ~Fd() { close(); }
-    Fd(const Fd&) = delete;
-    Fd& operator=(const Fd&) = delete;
-    int get() const { return fd_; }
-    void close() {
-        if (fd_ >= 0) ::close(fd_);
-        fd_ = -1;
-    }
-private:
-    int fd_;
-};
-
 class SpawnActions {
 public:
     SpawnActions() : ready(posix_spawn_file_actions_init(&actions) == 0) {}
@@ -59,7 +45,7 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory, std
 #else
     if (pipe(pipes) != 0) return {};
 #endif
-    Fd reader(pipes[0]), writer(pipes[1]);
+    FileDescriptor reader(pipes[0]), writer(pipes[1]);
 #if !defined(__linux__)
     if (fcntl(reader.get(), F_SETFD, FD_CLOEXEC) != 0 || fcntl(writer.get(), F_SETFD, FD_CLOEXEC) != 0) return {};
 #endif
@@ -158,8 +144,8 @@ bool loopbackGitHost(std::string_view origin) {
 
 std::optional<WorkspaceHead> workspaceHead(Client& client, std::string_view projectId, const Json& thread) {
     const auto project = client.call("t3_project_read", {{"projectId", projectId}});
-    if (str(project, "id") != projectId) return {};
-    const auto root = localDirectory(str(project, "workspaceRoot"));
+    if (field(project, "id") != projectId) return {};
+    const auto root = localDirectory(field(project, "workspaceRoot"));
     if (!root) return {};
     const auto& path = member(thread, "worktreePath");
     if (!path.is_string()) return {};

@@ -126,14 +126,14 @@ Id bodyId(const Json& body, std::string_view key, Id minimum = 1) {
 }
 
 std::string requiredText(const Json& body, std::string_view key, std::size_t bytes) {
-    auto text = web::field(body, key);
+    auto text = field(body, key);
     if (text.find_first_not_of(" \t\r\n") == std::string::npos || text.size() > bytes || text.find('\0') != std::string::npos)
         throw InputError("invalid_text");
     return text;
 }
 
 const Json* botById(const Json& bots, std::string_view id) {
-    const auto bot = std::ranges::find_if(bots, [&](const Json& descriptor) { return web::field(descriptor, "id") == id; });
+    const auto bot = std::ranges::find_if(bots, [&](const Json& descriptor) { return field(descriptor, "id") == id; });
     return bot == bots.end() ? nullptr : &*bot;
 }
 
@@ -559,8 +559,8 @@ private:
             if (!Policy{store_}.allows(creator, Action::bot_create, "")) return error(res, 403, "access_denied");
             auto parsed = parseBotProfile(body, true);
             if (parsed.profile.contains("projectId")) {
-                const auto environment = web::field(parsed.profile, "environmentId");
-                const auto project = web::field(parsed.profile, "projectId");
+                const auto environment = field(parsed.profile, "environmentId");
+                const auto project = field(parsed.profile, "projectId");
                 bool available;
                 try {
                     available = web::projectAvailable(store_, callbacks_, creator, environment, project);
@@ -571,7 +571,7 @@ private:
             }
             const auto created = callbacks_.createBot(creator, parsed.profile, parsed.image);
             changes_.rescan();
-            return reply(res, 201, redactBot(web::field(created, "id"), web::botSettings(created)));
+            return reply(res, 201, redactBot(field(created, "id"), web::botSettings(created)));
         } catch (const InputError& e) {
             error(res, 400, e.what());
         } catch (const BotProfileError& e) {
@@ -587,7 +587,7 @@ private:
         if (req.body.size() > web::maxStandardPayload) return error(res, 413, "payload_too_large");
         const auto body = Json::parse(req.body, nullptr, false);
         if (!body.is_object()) return error(res, 400, "invalid_json");
-        const auto bot = web::field(body, "botId");
+        const auto bot = field(body, "botId");
         if (!validBotId(bot)) return error(res, 400, "invalid_bot");
         const auto actor = web::person(callbacks_, req);
         if (findBot(bot).is_null()) {
@@ -609,7 +609,7 @@ private:
         if (req.body.size() > web::maxStandardPayload) return error(res, 413, "payload_too_large");
         const auto body = Json::parse(req.body, nullptr, false);
         if (!body.is_object()) return error(res, 400, "invalid_json");
-        const auto bot = web::field(body, "botId");
+        const auto bot = field(body, "botId");
         if (!validBotId(bot)) return error(res, 400, "invalid_bot");
         const auto paused = body.find("paused");
         if (paused == body.end() || !paused->is_boolean()) return error(res, 400, "invalid_paused");
@@ -639,7 +639,7 @@ private:
 
     Json findBot(std::string_view id) const {
         for (auto& bot : bots())
-            if (web::field(bot, "id") == id) return std::move(bot);
+            if (field(bot, "id") == id) return std::move(bot);
         return nullptr;
     }
 
@@ -651,20 +651,20 @@ private:
         std::map<std::string, std::string> names;
         std::vector<std::string> configured;
         for (const auto& bot : bots()) {
-            const auto id = web::field(bot, "id");
+            const auto id = field(bot, "id");
             configured.push_back(id);
-            names.emplace(id, web::field(bot, "name"));
+            names.emplace(id, field(bot, "name"));
         }
         auto page = Notifications(store_).notificationEventsSince(person, configured, after, scope);
-        for (const auto& [bot, cursor] : page.scope) names.at(bot) = web::field(redactBot(bot, {{"name", names.at(bot)}}), "name");
+        for (const auto& [bot, cursor] : page.scope) names.at(bot) = field(redactBot(bot, {{"name", names.at(bot)}}), "name");
         auto inbox = Json::array();
         for (const auto& item : Inbox(store_).inbox(person, {})) {
-            const auto id = web::field(item, "botId");
-            if (!page.scope.contains(id) || !item.value("canDecide", false) || web::field(item, "status") == "expired") continue;
-            const auto kind = web::field(item, "itemKind");
+            const auto id = field(item, "botId");
+            if (!page.scope.contains(id) || !item.value("canDecide", false) || field(item, "status") == "expired") continue;
+            const auto kind = field(item, "itemKind");
             inbox.push_back({{"id", item.at("itemId")}, {"botId", id}, {"botName", names.at(id)}, {"kind", kind}});
         }
-        for (auto& event : page.events) event["botName"] = names.at(web::field(event, "botId"));
+        for (auto& event : page.events) event["botName"] = names.at(field(event, "botId"));
         return {{"through", page.through},
                 {"scope", std::move(page.scope)},
                 {"more", page.more},
@@ -709,12 +709,12 @@ private:
         auto visible = bots();
         Policy policy{store_};
         visible.erase(std::remove_if(visible.begin(), visible.end(),
-                                     [&](const Json& bot) { return !policy.allows(person, Action::bot_view, web::field(bot, "id")); }),
+                                     [&](const Json& bot) { return !policy.allows(person, Action::bot_view, field(bot, "id")); }),
                       visible.end());
         auto list = web::botList(store_, visible);
         if (list.empty()) return list;
         for (auto& bot : list) {
-            const auto id = web::field(bot, "id");
+            const auto id = field(bot, "id");
             bot = redactBot(id, bot);
             bot["canDelete"] = policy.allows(person, Action::bot_settings, id);
             bot["paused"] = BotLifecycle(store_).botPaused(id);

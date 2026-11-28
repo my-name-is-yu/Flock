@@ -260,7 +260,7 @@ std::string readBytes(const std::filesystem::path& path) {
 }
 
 class OAuthFixture {
-    Sandbox sandbox_;
+    TemporaryDirectory sandbox_;
 public:
     const std::filesystem::path home = sandbox_.path;
     const std::filesystem::path directory = home / "chatgpt";

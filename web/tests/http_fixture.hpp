@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/web.hpp"
+#include "../../tests/support.hpp"
 #include "flock/decision.hpp"
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
@@ -26,23 +27,8 @@ namespace flockv0::http_test {
 
 inline constexpr auto privateValue = "private-token-value";
 
-inline void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
-
-struct TestDirectory {
-    std::filesystem::path path;
-    TestDirectory() {
-        char name[] = "/tmp/flock-web-XXXXXX";
-        const auto directory = mkdtemp(name);
-        check(directory != nullptr, "could not create fixture directory");
-        path = directory;
-    }
-    ~TestDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-};
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 struct FixedModel : Model {
     ModelTurn decide(const ModelInput& input) override {

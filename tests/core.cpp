@@ -1,4 +1,5 @@
 #include "flock/task_control.hpp"
+#include "support.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_target.hpp"
 #include "flock/person.hpp"
@@ -36,9 +37,7 @@
 
 using namespace flockv0;
 namespace {
-void check(bool b, std::string_view message) {
-    if (!b) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, int application, int version, int currentVersion) {
     {

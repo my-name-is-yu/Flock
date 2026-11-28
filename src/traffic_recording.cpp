@@ -1,4 +1,5 @@
 #include "flock/detail/traffic_recording.hpp"
+#include "flock/environment.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -59,13 +60,13 @@ bool containsPrivateData(const Json& value) {
 std::unique_ptr<Capture> configure(Provider provider, const char* pathVariable) noexcept {
     const auto* path = std::getenv(pathVariable);
     if (!path || !*path) return {};
-    const auto* commit = std::getenv("FLOCK_RECORD_COMMIT");
+    const auto* commit = std::getenv(environment::recordCommit);
     if (!commit || !validCommit(commit)) {
         refused("FLOCK_RECORD_COMMIT must be a full Git commit SHA");
         return {};
     }
     try {
-        const auto* model = provider == Provider::ChatGPT ? std::getenv("FLOCK_RECORD_CHATGPT_MODEL") : "";
+        const auto* model = provider == Provider::ChatGPT ? std::getenv(environment::recordChatGPTModel) : "";
         if (provider == Provider::ChatGPT && (!model || !validRevision(provider, model) || privateText(model))) {
             refused("FLOCK_RECORD_CHATGPT_MODEL must name the model selected for capture");
             return {};
@@ -123,10 +124,10 @@ void Fields::literal(std::string_view key, std::initializer_list<std::string_vie
 
 Capture* Capture::configured(Provider provider) noexcept {
     if (provider == Provider::T3) {
-        static const auto capture = configure(provider, "FLOCK_RECORD_T3");
+        static const auto capture = configure(provider, environment::recordT3);
         return capture.get();
     }
-    static const auto capture = configure(provider, "FLOCK_RECORD_CHATGPT");
+    static const auto capture = configure(provider, environment::recordChatGPT);
     return capture.get();
 }
 

@@ -142,7 +142,7 @@ Json projectResult(const Json& value, Call call, recording::Ids& ids) {
             Fields block(item);
             block.literal("type", {"text"});
             block.pick("text", [&](const Json& data) {
-                if (str(item, "type") != "text" || !data.is_string()) return redactedShape(data);
+                if (field(item, "type") != "text" || !data.is_string()) return redactedShape(data);
                 const auto parsed = Json::parse(data.get_ref<const std::string&>(), nullptr, false);
                 return parsed.is_discarded() ? redactedShape(data) : Json(payload(parsed).dump());
             });
@@ -161,11 +161,11 @@ void Client::record(recording::Capture& capture, unsigned id, std::string_view m
         std::string tool;
         if (method == "initialize") {
             if (const auto result = message.find("result"); result != message.end()) {
-                if (const auto info = result->find("serverInfo"); info != result->end()) recordingVersion_ = str(*info, "version");
+                if (const auto info = result->find("serverInfo"); info != result->end()) recordingVersion_ = field(*info, "version");
             }
         } else {
             if (method != "tools/call") return;
-            tool = str(arguments, "name");
+            tool = field(arguments, "name");
             if (tool == "t3_thread_launch")
                 call = Call::Launch;
             else if (tool == "t3_thread_wait")

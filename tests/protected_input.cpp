@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
@@ -46,9 +47,7 @@
 
 using namespace flockv0;
 namespace {
-void check(bool good, const char* message) {
-    if (!good) throw std::runtime_error(message);
-}
+using flockv0::test::check;
 template <class F> void denied(F action) {
     try {
         action();

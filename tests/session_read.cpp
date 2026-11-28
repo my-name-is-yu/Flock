@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/secret_ref.hpp"
@@ -55,9 +56,7 @@ constexpr auto timestamp = "2026-11-21T12:34:56.123Z";
 constexpr auto failureId = "internal-failed-event";
 constexpr auto logId = "internal-test-log";
 
-void check(bool pass, const char* why) {
-    if (!pass) throw std::runtime_error(why);
-}
+using flockv0::test::check;
 
 struct Backend : T3 {
     std::map<std::string, bool> denied;

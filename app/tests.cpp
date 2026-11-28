@@ -120,7 +120,7 @@ enum class NotesRecovery { Restore, Edit };
 enum class NotesFailurePoint { Planning, Dispatch };
 
 void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesFailurePoint failure) {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto folder = temp.path / "bots";
     createBot(folder / "release", botConfig(), "Release role", "");
     createBot(folder / "triage", botConfig(), "Triage role", "");
@@ -190,7 +190,7 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
 }
 
 void notesAndRoutingOnRestart() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto folder = temp.path / "bots";
     const auto db = temp.path / "tasks.db";
     createBot(folder / "first", botConfig(), "First version", "First memory");
@@ -287,7 +287,7 @@ void notesAcrossConversationAndWork() {
         }
     } model;
 
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto folder = temp.path / "bots";
     BotNotes first{"Verify evidence before reporting.\n", "Lead with the conclusion.\n"};
     first.soul.resize(8191, 's');
@@ -416,7 +416,7 @@ void notesAcrossConversationAndWork() {
 }
 
 void peersUseBotOwnership() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const Bots bots(temp.path);
     Store store(temp.path / "state.db");
     BotAccess access(store);
@@ -465,7 +465,7 @@ void peersUseBotOwnership() {
 }
 
 void removedBotConfigKeysAreRejected() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const Bots bots(temp.path);
     for (const auto key : {"allowedBots", "conversationEnvironments", "services", "mcpServers"}) {
         auto config = botConfig();
@@ -744,7 +744,7 @@ void responseContract() {
 }
 
 void oversizedRequestStopsBeforeAccessingCredentials() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto credentials = temp.path / "credentials";
     ChatGPTModel model(credentials);
     const ModelInput input{
@@ -755,7 +755,7 @@ void oversizedRequestStopsBeforeAccessingCredentials() {
 }
 
 void missingChatGPTSignInIsTyped() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     ChatGPTModel model(temp.path / "credentials");
     auto config = botConfig();
     config["modelProvider"] = "chatgpt";
@@ -770,7 +770,7 @@ void missingChatGPTSignInIsTyped() {
 }
 
 void fixedDemoWithUserCriteriaAndContinuation() {
-    Sandbox fixture;
+    TemporaryDirectory fixture;
     Store store(fixture.path / "state.db");
     struct ChangeModel final : Model {
         std::string tool;
@@ -851,7 +851,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
 }
 
 void fixedDemoFollowUpKeepsTheExplainedResult() {
-    Sandbox fixture;
+    TemporaryDirectory fixture;
     Store store(fixture.path / "state.db");
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
@@ -879,7 +879,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
 }
 
 void fixedDemoAnswersAnAnchoredQuestion() {
-    Sandbox fixture;
+    TemporaryDirectory fixture;
     Store store(fixture.path / "state.db");
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
@@ -912,7 +912,7 @@ void botCreationCollisionIsRecoverable() {
             return {{{"request_bot_change", {{"operation", "create_bot"}, {"targetBotId", "Target"}, {"name", "Target Bot"}}, {}}}};
         }
     } model;
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto directory = temp.path / "bots";
     const auto target = directory / "Target";
     std::filesystem::create_directories(target);
@@ -952,7 +952,7 @@ void conversationCreatedBotAvatars() {
             return {{{"request_bot_change", args, {}}}};
         }
     } model;
-    Sandbox temp;
+    TemporaryDirectory temp;
     Bots bots(temp.path / "bots");
     Store store(temp.path / "state.db");
     const Person creator{"creator", false};
@@ -1026,7 +1026,7 @@ void conversationCreatedBotAvatars() {
 }
 
 void botProfilesAndAvatars() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     Bots bots(temp.path / "bots");
 
     {
@@ -1202,7 +1202,7 @@ void botProfilesAndAvatars() {
 }
 
 void pullRequestSettings() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto root = temp.path / "bots";
     const auto folder = root / "release";
     const auto config = botConfig();
@@ -1246,7 +1246,7 @@ int main() {
         oversizedRequestStopsBeforeAccessingCredentials();
         missingChatGPTSignInIsTyped();
         {
-            Sandbox temp;
+            TemporaryDirectory temp;
             Store store(temp.path / "state.db");
             sessionConversationDispatch(store, botConfig());
         }

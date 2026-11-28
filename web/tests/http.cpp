@@ -1923,7 +1923,7 @@ void cancelWithoutWaitOperation(const std::filesystem::path& path) {
 
 int main() {
     try {
-        TestDirectory directory;
+        TemporaryDirectory directory;
         conversationRequestApproval(directory.path / "conversation-approval.db");
         cancelWithoutWaitOperation(directory.path / "cancel-no-wait.db");
         exercise(directory.path / "state.db");

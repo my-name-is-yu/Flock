@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "../tests/support.hpp"
 #include "flock/command.hpp"
 #include "flock/json.hpp"
 #include "flock/t3.hpp"
@@ -19,9 +20,7 @@ using namespace flockv0;
 using flockv0::t3detail::http;
 
 namespace {
-void check(bool passed, std::string_view reason) {
-    if (!passed) throw std::logic_error(std::string(reason));
-}
+using flockv0::test::check;
 
 }
 

@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/text.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
@@ -99,13 +100,6 @@ bool present(const std::string& text) {
     return text.find_first_not_of(" \t\r\n") != std::string::npos;
 }
 
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(first, last - first + 1));
-}
-
 std::string hashHex(std::string_view bytes) {
     std::uint64_t hash = 14695981039346656037ULL;
     for (const unsigned char ch : bytes) {
@@ -129,7 +123,7 @@ std::string sanitizeFilename(std::string_view raw) {
         if (ch < 32 || ch == 127) continue;
         cleaned.push_back(static_cast<char>(ch));
     }
-    return bounded(trim(cleaned), 120);
+    return bounded(trimAscii(cleaned), 120);
 }
 
 std::string slugForName(std::string_view name) {
