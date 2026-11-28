@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { environmentWithoutFlock, startFlock } from './daemon.mjs';
 
 const [, , executable, python] = process.argv;
 const home = mkdtempSync(join(tmpdir(), 'flock-bot-deletion-'));
@@ -13,7 +13,7 @@ const identities = join(home, 'identities.json');
 const root = 'Bearer fixture-deletion-root';
 const owner = 'Bearer fixture-deletion-owner';
 const member = 'Bearer fixture-deletion-member';
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('FLOCK_')));
+const env = environmentWithoutFlock();
 env.FLOCK_WEB_IDENTITIES_FILE = identities;
 const cliOptions = { encoding: 'utf8', timeout: 5000, env };
 const cli = (...args) => JSON.parse(execFileSync(executable, [...cliArgs, ...args], cliOptions));
@@ -21,40 +21,15 @@ const sqlite = (script, ...args) => execFileSync(python, ['-c', script, join(hom
 let daemon;
 
 async function start() {
-  const child = spawn(executable, [...cliArgs, 'run', '--fixed', '--port', '0'], {
-    env, stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const closed = once(child, 'close');
-  daemon = { child, closed };
-  let stdout = '';
-  let stderr = '';
-  child.stderr.setEncoding('utf8').on('data', (text) => { stderr += text; });
-  const ready = new Promise((resolve, reject) => {
-    child.stdout.setEncoding('utf8').on('data', (text) => {
-      stdout += text;
-      const match = stdout.match(/Flock Web UI at (http:\/\/127\.0\.0\.1:\d+)/);
-      if (match) resolve(match[1]);
-    });
-    child.once('error', reject);
-    child.once('close', (code) => reject(new Error(`Flock exited during startup (${code}): ${stderr}`)));
-  });
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Flock did not start: ${stderr}`)), 5000);
-  });
-  try {
-    daemon.origin = await Promise.race([ready, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
+  daemon = await startFlock(executable, home, { env });
 }
 
 async function stop() {
-  if (!daemon) return;
-  daemon.child.kill();
-  await daemon.closed;
+  await daemon?.stop();
   daemon = undefined;
 }
+
+
 
 async function api(path, { actor = root, body, status = 200, origin = daemon.origin } = {}) {
   const headers = actor ? { Authorization: actor } : {};

@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { environmentWithoutFlock, startFlock } from './daemon.mjs';
 
 const [, , executable] = process.argv;
 const home = mkdtempSync(join(tmpdir(), 'flock-project-assignment-'));
 const identities = join(home, 'identities.json');
 const owner = 'Bearer fixture-project-owner';
 const editor = 'Bearer fixture-project-editor';
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('FLOCK_')));
+const env = environmentWithoutFlock();
 env.FLOCK_WEB_IDENTITIES_FILE = identities;
 
 async function verify(origin) {
@@ -78,28 +78,11 @@ try {
     { person: 'project-owner', authorization: owner },
     { person: 'project-editor', authorization: editor, adminRoot: true },
   ]), { mode: 0o600 });
-  const daemon = spawn(executable, ['--home', home, 'run', '--fixed', '--port', '0'],
-    { env, stdio: ['ignore', 'pipe', 'inherit'] });
-  const closed = once(daemon, 'close');
-  let timer;
+  const daemon = await startFlock(executable, home, { env });
   try {
-    const origin = await new Promise((resolve, reject) => {
-      let output = '';
-      daemon.stdout.setEncoding('utf8').on('data', (chunk) => {
-        output += chunk;
-        const match = output.match(/Flock Web UI at (http:\/\/127\.0\.0\.1:\d+)/);
-        if (match) resolve(match[1]);
-      });
-      daemon.once('error', reject);
-      daemon.once('close', (code) => reject(new Error(`Flock exited during startup (${code})`)));
-      timer = setTimeout(() => reject(new Error('Flock did not start')), 5000);
-    });
-    clearTimeout(timer);
-    await verify(origin);
+    await verify(daemon.origin);
   } finally {
-    clearTimeout(timer);
-    daemon.kill();
-    await closed;
+    await daemon.stop();
   }
 } finally {
   rmSync(home, { recursive: true, force: true });

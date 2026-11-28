@@ -1,41 +1,23 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { environmentWithoutFlock, startFlock } from './daemon.mjs';
 
 const executable = process.argv[2];
 const home = mkdtempSync(join(tmpdir(), 'flock-cli-bot-pause-'));
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('FLOCK_')));
-const run = (...args) => spawnSync(executable, ['--home', home, ...args], { env, encoding: 'utf8', timeout: 5000 });
-
+const env = environmentWithoutFlock();
 async function withDaemon(verify) {
-  const child = spawn(executable, ['--home', home, 'run', '--fixed', '--port', '0'],
-    { env, stdio: ['ignore', 'pipe', 'inherit'] });
-  const closed = once(child, 'close');
-  const started = new Promise((resolve, reject) => {
-    let stdout = '';
-    child.stdout.setEncoding('utf8').on('data', (text) => {
-      stdout += text;
-      const origin = stdout.match(/Flock Web UI at (http:\/\/127\.0\.0\.1:\d+)/)?.[1];
-      if (origin) resolve(origin);
-    });
-    child.once('error', reject);
-    child.once('close', (code) => reject(new Error(`Flock exited during startup (${code})`)));
-  });
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Flock did not start')), 5000);
-  });
+  const daemon = await startFlock(executable, home, { env });
   try {
-    await verify(await Promise.race([started, timeout]));
+    await verify(daemon.origin);
   } finally {
-    clearTimeout(timer);
-    child.kill();
-    await closed;
+    await daemon.stop();
   }
 }
+const run = (...args) => spawnSync(executable, ['--home', home, ...args], { env, encoding: 'utf8', timeout: 5000 });
+
 
 async function setPaused(origin, paused) {
   const response = await fetch(`${origin}/api/bots/pause`, {
