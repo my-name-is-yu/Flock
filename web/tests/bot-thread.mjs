@@ -97,7 +97,6 @@ async function exercise() {
     'The thread lost Markdown');
   check(anchored.querySelector('.bot-thread-name').textContent === 'Reviewer' && anchored.querySelector('.bot-thread-avatar'),
     'The sender header was missing');
-  check($('#bot-thread-message-39').classList.contains('bot-thread-own'), 'The Bot’s own turn was not distinguished');
   const forward = $('#bot-thread-message-38');
   check(forward.querySelector('.bot-thread-forwarded-by').textContent === 'Forwarded by Reviewer' &&
     forward.querySelector('.bot-thread-forwarded em')?.textContent === 'tonight' && !forward.querySelector('.bot-thread-meta'),

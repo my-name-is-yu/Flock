@@ -72,8 +72,7 @@ export function mountBotThread() {
   }
 
   function drawMessage(event, sender, place) {
-    const own = sender.id === state.bot;
-    const row = node('article', `bot-thread-message${own ? ' bot-thread-own' : ''}`);
+    const row = node('article', 'bot-thread-message');
     row.id = `bot-thread-message-${event.id}`;
     row.tabIndex = -1;
     row.classList.toggle('bot-thread-anchored', String(event.id) === state.anchor);

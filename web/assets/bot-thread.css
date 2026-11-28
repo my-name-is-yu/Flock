@@ -30,11 +30,9 @@
 .bot-thread-name { overflow: hidden; color: var(--text); font-size: var(--text-sm); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .bot-thread-meta .msg-time { opacity: 1; }
 .bot-thread-message > .bubble { justify-self: start; }
-.bot-thread-own > .bubble { padding-inline: 0; background: none; }
 .bot-thread-message:focus-visible .bubble, .bot-thread-anchored .bubble {
   outline: 2px solid var(--focus); outline-offset: 2px;
 }
-.bot-thread-own.bot-thread-anchored > .bubble { outline-offset: 6px; }
 
 .bot-message-row {
   display: flex; align-items: center; gap: .45rem; width: fit-content; min-width: 0; max-width: min(100%, 40rem);
