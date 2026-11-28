@@ -70,7 +70,6 @@ HttpResponse http(const std::string& url, std::string_view method, const Headers
                   long timeoutMs = 6000);
 std::string decode(std::string_view value);
 std::string trim(std::string_view value);
-std::string str(const Json& object, std::string_view name);
 Json parse(std::string_view body);
 [[noreturn]] void invalidResponse();
 
@@ -95,7 +94,7 @@ inline Id position(const Json& value) {
     return value.get<Id>();
 }
 inline bool localItem(const Json& item, std::string_view threadId) {
-    return str(item, "sourceThreadId") == threadId && str(item, "visibility") == "local";
+    return field(item, "sourceThreadId") == threadId && field(item, "visibility") == "local";
 }
 
 struct Credential {

@@ -25,11 +25,6 @@ constexpr std::string_view markerPrefix = "<!-- flock-pr-operation: ";
 constexpr std::string_view markerSuffix = " -->";
 constexpr std::size_t responseLimit = 2 * 1024 * 1024;
 
-std::string str(const Json& json, const char* key) {
-    const auto it = json.find(key);
-    return it != json.end() && it->is_string() ? it->get<std::string>() : std::string{};
-}
-
 std::string marker(std::string_view operationId) {
     return std::string(markerPrefix) + std::string(operationId) + std::string(markerSuffix);
 }
@@ -122,16 +117,16 @@ GitPullRequest pull(const Json& value) {
     const auto baseRepo = GitRepository::parse("github.com", base.at("repo").at("full_name").get<std::string>());
     const auto headRepo = GitRepository::parse("github.com", head.at("repo").at("full_name").get<std::string>());
     const auto number = value.at("number").get<Id>();
-    return {{baseRepo, headRepo, str(base, "ref"), str(head, "ref")},
+    return {{baseRepo, headRepo, field(base, "ref"), field(head, "ref")},
             number,
             "https://" + baseRepo.resource() + "/pull/" + std::to_string(number),
-            correlation(str(value, "body")),
-            str(head, "sha")};
+            correlation(field(value, "body")),
+            field(head, "sha")};
 }
 
 Json compactPr(const Json& value) {
     auto result = pick(value, {"number", "html_url", "title", "state", "draft", "merged", "mergeable", "review_comments"});
-    result["headSha"] = str(value.at("head"), "sha");
+    result["headSha"] = field(value.at("head"), "sha");
     return result;
 }
 
@@ -146,7 +141,7 @@ Json compactIssue(const Json& value) {
 
 Json compactComment(const Json& value) {
     auto result = pick(value, {"id", "html_url", "body", "updated_at"});
-    result["author"] = str(value.at("user"), "login");
+    result["author"] = field(value.at("user"), "login");
     return result;
 }
 
@@ -177,7 +172,7 @@ public:
         const auto response = json("GET", "/user/repos?sort=full_name&per_page=100&page=" + std::to_string(page));
         if (!response.is_array()) throw Conflict("Expected a list of GitHub repositories");
         for (const auto& item : response) {
-            auto repo = GitRepository::parse(name(), str(item, "full_name"));
+            auto repo = GitRepository::parse(name(), field(item, "full_name"));
             if (repo.repo.find(query) != repo.repo.npos) matches.push_back(std::move(repo));
         }
         return {std::move(matches), response.size() == 100};
@@ -205,7 +200,7 @@ public:
             const auto response = json("GET", url + std::to_string(page));
             if (!response.is_array()) throw Conflict("Expected a list of GitHub pull requests");
             for (const auto& raw : response) {
-                if (raw.at("head").at("repo").is_null() || str(raw, "body").find(markerPrefix) == std::string::npos) continue;
+                if (raw.at("head").at("repo").is_null() || field(raw, "body").find(markerPrefix) == std::string::npos) continue;
                 auto candidate = pull(raw);
                 if (candidate.target == target) results.push_back(std::move(candidate));
             }
@@ -249,18 +244,18 @@ public:
             auto body = pick(args, {"title", "state"});
             if (args.contains("baseRef")) body["base"] = args.at("baseRef");
             if (args.contains("body")) {
-                const auto operation = correlation(str(json("GET", pr), "body"));
+                const auto operation = correlation(field(json("GET", pr), "body"));
                 body["body"] = args.at("body");
-                if (!operation.empty()) body["body"] = str(body, "body") + "\n\n" + marker(operation);
+                if (!operation.empty()) body["body"] = field(body, "body") + "\n\n" + marker(operation);
             }
             return compactPr(json("PATCH", pr, body));
         }
         if (tool == "git_request_review")
             return compactPr(json("POST", pr + "/requested_reviewers", {{"reviewers", args.at("reviewers")}}));
         if (tool == "git_submit_review") {
-            const auto verdict = str(args, "verdict");
+            const auto verdict = field(args, "verdict");
             const auto value = verdict == "approve" ? "APPROVE" : verdict == "request_changes" ? "REQUEST_CHANGES" : "COMMENT";
-            return pick(json("POST", pr + "/reviews", {{"event", value}, {"body", str(args, "body")}}),
+            return pick(json("POST", pr + "/reviews", {{"event", value}, {"body", field(args, "body")}}),
                         {"id", "html_url", "state", "submitted_at"});
         }
         throw GitRejected("Unsupported GitHub operation");
@@ -338,7 +333,7 @@ private:
         const Json body{{"body", args.at("body")}};
         if (!args.contains("commentId")) return compactComment(json("POST", target + "/comments", body));
         const auto endpoint = root + "/issues/comments/" + id(args, "commentId");
-        auto issueUrl = str(json("GET", endpoint), "issue_url");
+        auto issueUrl = field(json("GET", endpoint), "issue_url");
         std::ranges::transform(issueUrl, issueUrl.begin(), [](unsigned char c) { return std::tolower(c); });
         if (issueUrl != std::string(api) + target) throw GitRejected("Comment does not belong to the selected PR or issue");
         return compactComment(json("PATCH", endpoint, body));
@@ -350,7 +345,7 @@ private:
     }
 
     Json issue(const std::string& root, const Json& args) const {
-        const auto action = str(args, "action");
+        const auto action = field(args, "action");
         const auto issues = root + "/issues";
         const auto target = args.contains("issueNumber") ? issues + "/" + id(args, "issueNumber") : issues;
         const auto pageNumber = args.value("page", Id{1});

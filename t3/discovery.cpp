@@ -75,7 +75,7 @@ std::optional<LocalT3Environment> discoverLocalT3() {
     const auto port = boundedInteger(record, "port", 65535);
     if (pid == 0 || port == 0 || (kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM)) return {};
 
-    const auto origin = t3detail::str(record, "origin");
+    const auto origin = field(record, "origin");
     const auto portSuffix = ":" + std::to_string(port);
     if (origin != "http://127.0.0.1" + portSuffix && origin != "http://localhost" + portSuffix && origin != "http://[::1]" + portSuffix)
         return {};
@@ -84,10 +84,10 @@ std::optional<LocalT3Environment> discoverLocalT3() {
         const auto response = t3detail::http(origin + "/.well-known/t3/environment", "GET", {}, {}, 1000);
         if (response.status != 200) return {};
         const auto descriptor = t3detail::parse(response.body);
-        auto id = t3detail::str(descriptor, "environmentId");
-        const auto label = t3detail::str(descriptor, "label");
-        const auto version = t3detail::str(descriptor, "serverVersion");
-        const auto recordedVersion = t3detail::str(record, "serverVersion");
+        auto id = field(descriptor, "environmentId");
+        const auto label = field(descriptor, "label");
+        const auto version = field(descriptor, "serverVersion");
+        const auto recordedVersion = field(record, "serverVersion");
         if (id.empty() || id.size() > 512 || std::ranges::any_of(id, [](unsigned char c) { return c <= 32 || c == 127; }) ||
             label.empty() || label.size() > 512 || version.empty() || (!recordedVersion.empty() && recordedVersion != version))
             return {};

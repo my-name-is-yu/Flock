@@ -29,12 +29,6 @@
 #include <vector>
 
 namespace flockv0::web {
-std::string field(const Json& object, std::string_view key) {
-    if (!object.is_object()) return {};
-    const auto value = object.find(key);
-    return value != object.end() && value->is_string() ? value->get<std::string>() : std::string{};
-}
-
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;

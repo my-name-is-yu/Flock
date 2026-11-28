@@ -165,7 +165,7 @@ std::string sameOrigin(const Url& resource, const std::string& value) {
 
 Failure oauthFailure(std::string_view stage, const HttpResponse& response) {
     const auto payload = Json::parse(response.body, nullptr, false);
-    const auto code = str(payload, "error");
+    const auto code = field(payload, "error");
     auto message = "T3 OAuth " + std::string(stage) + " failed (HTTP " + std::to_string(response.status) + ")";
     if (!code.empty()) message += ": " + code;
     return Failure(Failure::Kind::Auth, message);
@@ -270,19 +270,19 @@ OAuthEndpoints discover(const Url& resource) {
         if (auto advertised = bearerMetadata(auth->second)) metadataUrl = sameOrigin(resource, *advertised);
     }
     const auto metadata = oauthJson("discovery", metadataUrl);
-    if (checkedUrl(str(metadata, "resource")).full != resource.full) invalidResponse();
+    if (checkedUrl(field(metadata, "resource")).full != resource.full) invalidResponse();
     const auto authorities = metadata.value("authorization_servers", Json::array());
     if (!authorities.is_array() || authorities.size() != 1 || !authorities.front().is_string()) invalidResponse();
     const auto issuer = checkedUrl(authorities.front().get<std::string>());
     if (issuer.origin != resource.origin || issuer.path != "/") invalidResponse();
     const auto oauth = oauthJson("discovery", issuer.origin + "/.well-known/oauth-authorization-server");
-    if (checkedUrl(str(oauth, "issuer")).full != issuer.full || !supports(oauth, "code_challenge_methods_supported", "S256") ||
+    if (checkedUrl(field(oauth, "issuer")).full != issuer.full || !supports(oauth, "code_challenge_methods_supported", "S256") ||
         !supports(oauth, "token_endpoint_auth_methods_supported", "none") ||
         !supports(oauth, "grant_types_supported", "authorization_code") || !supports(oauth, "scopes_supported", OperateScope) ||
         !supports(oauth, "scopes_supported", ReadScope))
         invalidResponse();
-    return {str(oauth, "issuer"), sameOrigin(resource, str(oauth, "authorization_endpoint")),
-            sameOrigin(resource, str(oauth, "token_endpoint")), sameOrigin(resource, str(oauth, "registration_endpoint"))};
+    return {field(oauth, "issuer"), sameOrigin(resource, field(oauth, "authorization_endpoint")),
+            sameOrigin(resource, field(oauth, "token_endpoint")), sameOrigin(resource, field(oauth, "registration_endpoint"))};
 }
 
 int listenOnLoopback() {
@@ -396,13 +396,16 @@ static Credential readCredential(const std::filesystem::path& path, const std::s
         bytes.append(buffer.data(), static_cast<std::size_t>(n));
     }
     const auto saved = Json::parse(bytes, nullptr, false);
-    if (!saved.is_object() || str(saved, "environmentId") != environmentId || !saved.contains("expiresAt") ||
+    if (!saved.is_object() || field(saved, "environmentId") != environmentId || !saved.contains("expiresAt") ||
         !saved["expiresAt"].is_number_integer() || !saved.contains("operate") || !saved["operate"].is_boolean())
         noCredential();
-    const auto url = checkedUrl(str(saved, "mcpUrl"));
-    Credential credential{
-        url.full,           str(saved, "token"), str(saved, "generation"), saved["expiresAt"].get<Seconds>(), saved["operate"].get<bool>(),
-        str(saved, "label")};
+    const auto url = checkedUrl(field(saved, "mcpUrl"));
+    Credential credential{url.full,
+                          field(saved, "token"),
+                          field(saved, "generation"),
+                          saved["expiresAt"].get<Seconds>(),
+                          saved["operate"].get<bool>(),
+                          field(saved, "label")};
     if (credential.label.empty() || url.path != "/mcp" || !validToken(credential.token) || credential.generation.size() != 43 ||
         credential.generation.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
         noCredential();
@@ -467,7 +470,7 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const st
                                              {"response_types", Json::array({"code"})}}
                                             .dump());
     checkCancelled(stop);
-    const auto clientId = str(registration, "client_id");
+    const auto clientId = field(registration, "client_id");
     if (clientId.empty() || clientId.size() > 8192) invalidResponse();
     const auto state = randomValue();
     const auto verifier = randomValue();
@@ -490,14 +493,14 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const st
                                              {"client_id", clientId},
                                              {"code_verifier", verifier},
                                              {"resource", resource.full}}));
-    const auto token = str(tokenResult, "access_token");
-    if (!validToken(token) || str(tokenResult, "token_type") != "Bearer" || !tokenResult.contains("expires_in") ||
+    const auto token = field(tokenResult, "access_token");
+    if (!validToken(token) || field(tokenResult, "token_type") != "Bearer" || !tokenResult.contains("expires_in") ||
         !tokenResult["expires_in"].is_number_integer())
         invalidResponse();
     const auto expires = tokenResult["expires_in"].get<Seconds>();
     if (expires <= 0 || expires > 31 * 24 * 60 * 60) invalidResponse();
     bool readScope = false, operateScope = false;
-    std::istringstream scopes(str(tokenResult, "scope"));
+    std::istringstream scopes(field(tokenResult, "scope"));
     for (std::string item; scopes >> item;) {
         readScope |= item == ReadScope;
         operateScope |= item == OperateScope;
@@ -509,8 +512,8 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const st
     Credential credential{resource.full, token, randomValue(), unixTime() + expires, operateScope, {}};
     Client client(credential);
     const auto identity = client.call("t3_environment_read", Json::object());
-    auto environmentId = str(identity, "environmentId");
-    credential.label = str(identity, "label");
+    auto environmentId = field(identity, "environmentId");
+    credential.label = field(identity, "label");
     if (credential.label.empty() || credential.label.size() > 1024) invalidResponse();
     if (expectedEnvironmentId && environmentId != *expectedEnvironmentId)
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");

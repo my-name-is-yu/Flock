@@ -144,8 +144,8 @@ bool loopbackGitHost(std::string_view origin) {
 
 std::optional<WorkspaceHead> workspaceHead(Client& client, std::string_view projectId, const Json& thread) {
     const auto project = client.call("t3_project_read", {{"projectId", projectId}});
-    if (str(project, "id") != projectId) return {};
-    const auto root = localDirectory(str(project, "workspaceRoot"));
+    if (field(project, "id") != projectId) return {};
+    const auto root = localDirectory(field(project, "workspaceRoot"));
     if (!root) return {};
     const auto& path = member(thread, "worktreePath");
     if (!path.is_string()) return {};
