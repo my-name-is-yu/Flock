@@ -162,6 +162,7 @@ WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
         auto publicMessage = *botMessage;
         publicMessage.fromBotId = scrub.text(publicMessage.fromBotId);
         publicMessage.fromName = scrub.text(publicMessage.fromName);
+        if (publicMessage.forwarded) publicMessage.forwarded->text = scrub.text(publicMessage.forwarded->text);
         saved["botMessage"] = encodeConversationBotMessage(publicMessage);
         event.detail = std::move(publicMessage);
     }

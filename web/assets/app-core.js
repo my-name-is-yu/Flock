@@ -139,6 +139,10 @@ export function closeConversationActions(focus = false) {
 }
 export function conversationUrl(botId) {
   const url = new URL(location.href);
+  if (url.searchParams.get('bot') !== botId) {
+    url.searchParams.delete('thread');
+    url.searchParams.delete('message');
+  }
   if (botId) url.searchParams.set('bot', botId);
   else url.searchParams.delete('bot');
   return url;

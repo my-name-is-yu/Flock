@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/dialog.css">
   <link rel="stylesheet" href="/bot-editor.css">
   <link rel="stylesheet" href="/board-inbox.css">
+  <link rel="stylesheet" href="/bot-thread.css">
   <link rel="modulepreload" href="/board-inbox.js">
   <script type="module" src="/app.js"></script>
 </head>
@@ -73,13 +74,16 @@
           <button id="show-chat-sidebar" class="icon-button header-menu wide-only" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Show Bot list" data-tooltip="Show Bot list" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9.5 5v14"/></svg>
           </button>
+          <button id="bot-thread-close" class="icon-button header-menu bot-thread-close" type="button" aria-controls="bot-thread" aria-label="Close" data-tooltip="Close" data-shortcut="Esc" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+          </button>
           <div id="profile-identity" class="profile-identity header-identity" hidden>
             <button id="profile-avatar-button" class="profile-face profile-face-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" data-tooltip="Bot settings">
               <span id="profile-avatar" class="avatar avatar-profile" aria-hidden="true"></span>
               <span class="status-indicator" aria-hidden="true"></span>
             </button>
             <h1 id="profile-heading" class="profile-heading profile-caption" aria-labelledby="profile-name">
-              <span id="profile-name" class="profile-name" dir="auto"></span>
+              <span class="profile-crumbs"><span id="profile-name" class="profile-name" dir="auto"></span><span id="profile-thread" class="profile-thread" dir="auto" hidden></span></span>
               <button id="needs-you" type="button" class="needs-you" data-tooltip="Open Needs you" data-shortcut="⌥ ⌥" data-tooltip-anchor=".profile-caption" aria-labelledby="profile-name needs-you-text" aria-controls="decision-panel" aria-expanded="false" aria-keyshortcuts="Alt+Alt" hidden>
                 <span id="needs-you-text">Needs you · <span id="needs-you-count"></span></span>
               </button>
@@ -135,6 +139,14 @@
             <div id="timeline" class="timeline"></div>
           </div>
         </section>
+        <section id="bot-thread" class="conversation bot-thread" tabindex="-1" hidden>
+          <div class="conversation-inner">
+            <p id="bot-thread-status" class="bot-thread-status" role="status"></p>
+            <button id="bot-thread-older" class="text-button older" type="button" hidden>Show earlier messages</button>
+            <div id="bot-thread-timeline" class="timeline bot-thread-timeline" hidden></div>
+          </div>
+        </section>
+        <button id="bot-thread-latest" class="jump-to-latest bot-thread-latest" type="button" aria-controls="bot-thread" hidden>Jump to latest</button>
       </div>
       <div id="decision-layer" class="decision-layer" hidden>
         <div id="decision-shade" class="decision-shade" aria-hidden="true"></div>

@@ -895,7 +895,9 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                 // The answer arrives in a later turn, where history is the only record of what was asked.
                 const auto& sent = calls.at(i).at("args");
                 action["botId"] = sent.at("botId");
-                action["text"] = bounded(secretStorage.redactor(message.bot).text(sent.at("text").get<std::string>()), 2000);
+                action["text"] = bounded(secretStorage.redactor(message.bot).text(sent.value("text", std::string{})), 2000);
+                if (result.contains("messageId")) action["messageId"] = result.at("messageId");
+                if (sent.value("forward", false)) action["forwarded"] = true;
             }
             if (result.contains("taskId")) {
                 action["taskId"] = result.at("taskId");

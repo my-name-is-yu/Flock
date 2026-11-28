@@ -1,0 +1,64 @@
+.profile-crumbs { display: flex; align-items: baseline; gap: .3rem; min-width: 0; max-width: 100%; }
+.profile-thread {
+  display: inline-flex; align-items: baseline; gap: .3rem; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--text-sm); font-weight: 600; line-height: 1.25;
+}
+.profile-thread::before { content: '›'; color: var(--text-3); font-weight: 400; }
+.profile-thread[hidden] { display: none; }
+.bot-thread-open .profile-name { color: var(--text-2); font-weight: 500; }
+
+.bot-thread-open .header-menu:not(.bot-thread-close) { display: none; }
+.bot-thread-open > .jump-to-latest,
+.bot-thread-open #conversation-find { display: none; }
+.bot-thread-covered #conversation { visibility: hidden; }
+
+.conversation-frame > #conversation { grid-area: 1 / 1; }
+.bot-thread { grid-area: 1 / 1; background: var(--canvas); outline: none; overflow-anchor: none; }
+.bot-thread-latest { grid-area: 1 / 1; }
+.bot-thread-status { margin: 1rem 0; color: var(--text-2); text-align: center; }
+.bot-thread-status:empty { display: none; }
+
+.bot-thread-message {
+  display: grid; grid-template-columns: var(--avatar-size) minmax(0, 1fr); column-gap: var(--avatar-gap);
+  margin-top: .3rem; scroll-margin-block: 1rem; outline: none;
+}
+.bot-thread-message.group-start { margin-top: 1.15rem; }
+.bot-thread-avatar { grid-row: 1 / span 2; width: var(--avatar-size); height: var(--avatar-size); }
+.bot-thread-meta, .bot-thread-message > .bubble { grid-column: 2; }
+.bot-thread-meta { display: flex; align-items: baseline; gap: .45rem; min-width: 0; margin-bottom: .2rem; font-size: var(--text-xs); color: var(--text-3); }
+.bot-thread-name { overflow: hidden; color: var(--text); font-size: var(--text-sm); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.bot-thread-meta .msg-time { opacity: 1; }
+.bot-thread-message > .bubble { justify-self: start; }
+.bot-thread-message:focus-visible .bubble, .bot-thread-anchored .bubble {
+  outline: 2px solid var(--focus); outline-offset: 2px;
+}
+
+.bot-message-row {
+  display: flex; align-items: center; gap: .45rem; width: fit-content; min-width: 0; max-width: min(100%, 40rem);
+  /* Pull the hover padding outside so the avatar lines up with the Bot's bubble edge. */
+  margin: .2rem 0 0 calc(var(--avatar-col) - .45rem); padding: .2rem .45rem; border-radius: var(--radius-sm);
+  color: var(--text-3); font-size: var(--text-sm); line-height: 1.35; text-decoration: none;
+}
+.bot-message-row + .bot-message-row, .row:has(> .bot-message-row) + .row:has(> .bot-message-row) { margin-top: 0; }
+@container conversation-layout (max-width: 700px) {
+  .bot-message-row { --avatar-col: 0px; }
+}
+a.bot-message-row { transition: background-color var(--dur-fast) ease; }
+a.bot-message-row:hover { background: var(--hover); }
+a.bot-message-row:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.bot-message-avatar { width: 1.15rem; height: 1.15rem; }
+.bot-message-name { flex: none; max-width: 40%; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.bot-message-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  a.bot-message-row { transition: none; }
+}
+.bot-thread-forwarded {
+  grid-column: 1 / -1; display: grid; justify-items: end; gap: .25rem; margin-bottom: .6rem;
+}
+.bot-thread-forward .bot-thread-avatar { grid-row: 2 / span 2; }
+.bot-thread-forwarded-by {
+  display: flex; align-items: center; gap: .3rem; margin: 0; color: var(--text-3); font-size: var(--text-xs);
+}
+.bot-thread-forwarded-by svg { width: .85rem; height: .85rem; flex: none; }
+.bot-thread-forwarded > .bubble { max-width: min(85%, 36rem); background: var(--user-bubble); color: var(--on-accent); }

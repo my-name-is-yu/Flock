@@ -47,6 +47,9 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/browser-notification-navigation.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_bot_access_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-access.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    add_test(NAME flock_web_bot_thread_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot-thread.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_bot_thread_dom PROPERTIES TIMEOUT 60)
     add_test(NAME flock_web_system_settings_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/system-settings.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_bot_pause_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"

@@ -3,6 +3,7 @@ import { mountBoardInbox, taskWaitDecision } from './board-inbox.js';
 import { mountBotDeletion } from './bot-deletion.js';
 import { createBotEditor } from './bot-editor.js';
 import { mountBotPause } from './bot-pause.js';
+import { mountBotThread } from './bot-thread.js';
 import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from './browser-notifications.mjs';
 import { messageSide } from './chat-grouping.mjs';
 import { screenshotMessage } from './composer-screenshots.mjs';
@@ -181,6 +182,8 @@ function selectBot(botId, { updateHistory = true } = {}) {
   closeConversationActions();
   openNavigation(false);
   if (view?.id === botId) {
+    if (updateHistory) botThread.dismiss();
+    else botThread.sync(botId);
     if (view.source || view.pendingSource) backToLatest();
     else renderBots();
     return;
@@ -197,6 +200,7 @@ function selectBot(botId, { updateHistory = true } = {}) {
     if (updateHistory) history.pushState(null, '', url);
     else history.replaceState(null, '', url);
   }
+  botThread.sync(botId);
   save('flock-selected-bot', botId);
   render('bottom');
   if (prevBotId && prevBotId !== botId) animateViewTransition('bot-switch');
@@ -341,6 +345,7 @@ const botDeletion = mountBotDeletion(byId('bot-delete'), {
 });
 assignBotDeletion(botDeletion);
 const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
+const botThread = mountBotThread();
 assignBotPause(botPause);
 
 elements['composer-banner-action'].addEventListener('click', async (event) => {
@@ -563,6 +568,7 @@ async function submit(event) {
   const context = view;
   if (!context?.composer || elements.send.disabled) return;
   if (decisions.composer()) return decisions.submitAnswer();
+  botThread.dismiss();
   if (leaveConversationSource(context)) {
     render('bottom');
   }
@@ -756,7 +762,8 @@ function openCurrentBotSettings() {
 elements['profile-avatar-button'].addEventListener('click', openCurrentBotSettings);
 byId('conversation-bot-settings')?.addEventListener('click', openCurrentBotSettings);
 byId('profile-heading')?.addEventListener('click', (event) => {
-  if (byId('needs-you')?.hidden && !event.target.closest('button')) openCurrentBotSettings();
+  if (botThread.isOpen()) botThread.dismiss();
+  else if (byId('needs-you')?.hidden && !event.target.closest('button')) openCurrentBotSettings();
 });
 byId('conversation-recent-decisions').addEventListener('click', () => {
   closeConversationActions();

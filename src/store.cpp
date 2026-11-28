@@ -452,6 +452,28 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
+Json Conversations::botDmMessages(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from) const {
+    std::lock_guard lock(database_.mutex);
+    // Wake turns can inherit Bot-message routing, but only deliveries have a Bot origin in the journal.
+    const auto sql = std::string(R"SQL(
+SELECT j.id,j.time,j.conversation_bot_id,m.text,json_extract(j.data,'$.botMessage.forwarded')
+FROM journal j JOIN messages m ON m.id=j.id
+WHERE j.conversation_bot_id IN (?1,?2) AND j.kind='conversation_message'
+  AND j.id BETWEEN ?3 AND ?4
+  AND json_extract(j.data,'$.botMessage.fromBotId')=CASE j.conversation_bot_id WHEN ?1 THEN ?2 ELSE ?1 END
+ORDER BY j.id
+)SQL") + (from ? " ASC LIMIT ?5" : " DESC LIMIT ?5");
+    auto rows = database_.query(sql.c_str(), {bot, peer, from, before ? before - 1 : std::numeric_limits<Id>::max(), limit});
+    auto result = Json::array();
+    while (rows.next()) {
+        Json data{{"fromBotId", rows.string(2) == bot ? peer : bot}, {"text", rows.string(3)}};
+        if (!rows.null(4)) data["forwarded"] = rows.json(4);
+        result.push_back({{"id", rows.number(0)}, {"time", rows.number(1)}, {"data", std::move(data)}});
+    }
+    if (!from) std::reverse(result.begin(), result.end());
+    return result;
+}
+
 Json Conversations::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events, const Person* viewer) const {
     if (before == std::numeric_limits<Id>::min()) return Json::array();
     const auto through = before ? before - 1 : std::numeric_limits<Id>::max();
