@@ -67,16 +67,10 @@ namespace {
 using flockv0::test::check;
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     std::filesystem::path dir;
 
-    Fixture() {
-        char pattern[] = "/tmp/flock-conversation-XXXXXX";
-        if (const auto* path = mkdtemp(pattern))
-            dir = path;
-        else
-            throw std::runtime_error("Cannot create fixture");
-    }
-    ~Fixture() { std::filesystem::remove_all(dir); }
+    Fixture() : dir(scratch.path) {}
 
     std::filesystem::path database() const { return dir / "state.db"; }
     static Intake bot(std::string id = "alpha", std::string project = "project") {

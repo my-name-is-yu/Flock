@@ -383,10 +383,9 @@ void exercise(const std::filesystem::path& dir) {
 }
 }
 int main() {
-    char tmp[] = "/tmp/flock-access-XXXXXX";
-    if (!mkdtemp(tmp)) return 1;
+    const flockv0::test::TemporaryDirectory scratch;
     try {
-        const std::filesystem::path directory(tmp);
+        const auto& directory = scratch.path;
         policyRules(directory / "race.db");
         freshLaunch(directory / "fresh.db");
         runningSessions(directory / "peers.db");
@@ -397,8 +396,6 @@ int main() {
         exercise(directory);
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
-        std::filesystem::remove_all(tmp);
         return 1;
     }
-    std::filesystem::remove_all(tmp);
 }

@@ -25,5 +25,5 @@
   "include/flock/types.hpp": 146,
   "include/flock/wait.hpp": 91,
   "src/database.hpp": 61,
-  "tests/support.hpp": 43
+  "tests/support.hpp": 45
 }

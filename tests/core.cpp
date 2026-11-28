@@ -130,8 +130,8 @@ struct FixedT3 : T3 {
 };
 }
 int main() {
-    char temp[] = "/tmp/flock-core-XXXXXX";
-    const auto path = std::filesystem::path(mkdtemp(temp));
+    const flockv0::test::TemporaryDirectory scratch;
+    const auto path = scratch.path;
     try {
         const auto db = path / "state.db";
         FixedModel model;
@@ -175,10 +175,8 @@ int main() {
                       (*completion)["data"]["doneWhen"] == "",
                   "completion history lost or duplicated the report");
         }
-        std::filesystem::remove_all(path);
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
-        std::filesystem::remove_all(path);
         return 1;
     }
 }

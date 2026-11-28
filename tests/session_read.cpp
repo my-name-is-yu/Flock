@@ -200,6 +200,7 @@ struct Agent : Model {
 };
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     std::filesystem::path dir;
     std::unique_ptr<Store> store;
     std::unique_ptr<Runtime> runtime;
@@ -209,16 +210,12 @@ struct Fixture {
     Seconds now = unixTime();
 
     Fixture() {
-        char pattern[] = "/tmp/flock-session-read-XXXXXX";
-        const auto* path = mkdtemp(pattern);
-        if (!path) throw std::runtime_error("cannot create test state");
-        dir = path;
+        dir = scratch.path;
         restart();
     }
     ~Fixture() {
         runtime.reset();
         store.reset();
-        std::filesystem::remove_all(dir);
     }
     void restart() {
         runtime.reset();

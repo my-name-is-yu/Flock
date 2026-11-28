@@ -76,16 +76,14 @@ void checkSink(const std::filesystem::path& path) {
 }
 
 int main() {
-    auto scratch = (std::filesystem::temp_directory_path() / "flock-recording-XXXXXX").string();
-    if (!mkdtemp(scratch.data())) return 1;
+    const flockv0::test::TemporaryDirectory scratch;
     int result = 0;
     try {
         checkIds();
-        checkSink(std::filesystem::path(scratch) / "traffic.jsonl");
+        checkSink(scratch.path / "traffic.jsonl");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         result = 1;
     }
-    std::filesystem::remove_all(scratch);
     return result;
 }

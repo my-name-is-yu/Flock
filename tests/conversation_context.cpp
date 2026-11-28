@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_history.hpp"
 #include "flock/notifications.hpp"
 #include "flock/tasks.hpp"
@@ -108,6 +109,7 @@ struct Bot : Model {
 };
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     std::filesystem::path dir;
     Bot bot;
     SessionService t3;
@@ -116,15 +118,12 @@ struct Fixture {
     std::unique_ptr<Store> store;
     std::unique_ptr<Runtime> runtime;
     explicit Fixture() {
-        char name[] = "/tmp/flock-conversation-context-XXXXXX";
-        if (!mkdtemp(name)) throw std::runtime_error("Cannot create test directory");
-        dir = name;
+        dir = scratch.path;
         restart();
     }
     ~Fixture() {
         runtime.reset();
         store.reset();
-        std::filesystem::remove_all(dir);
     }
     void restart() {
         runtime.reset();

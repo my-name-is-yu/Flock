@@ -105,7 +105,7 @@ struct Turn {
 };
 
 struct Scene {
-    ScratchDirectory directory;
+    flockv0::test::TemporaryDirectory directory;
     Store store;
     Tasks taskStore{store};
     TaskList taskList{store};

@@ -255,6 +255,7 @@ struct SimulatedT3 : T3 {
 };
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     std::filesystem::path directory;
     std::unique_ptr<Store> store;
     std::unique_ptr<Runtime> runtime;
@@ -266,16 +267,12 @@ struct Fixture {
     std::map<std::string, std::vector<PeerBot>, std::less<>> peers;
 
     explicit Fixture(bool requireConnection = false) : requireT3Connection(requireConnection) {
-        char temp[] = "/tmp/flock-acceptance-XXXXXX";
-        const auto* path = mkdtemp(temp);
-        if (!path) throw std::runtime_error("Cannot create test directory");
-        directory = path;
+        directory = scratch.path;
         restart();
     }
     ~Fixture() {
         runtime.reset();
         store.reset();
-        std::filesystem::remove_all(directory);
     }
     void restart() {
         runtime.reset();
