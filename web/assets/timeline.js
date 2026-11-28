@@ -209,9 +209,8 @@ export function closeMessageTime() {
   context.revealedTimeRow = null;
 }
 
-function conversationMessageRow(id) {
-  // A collapsed Session report can be an anchor inside the completion row.
-  return byId(`event-${id}`)?.closest('article');
+export function conversationMessageRow(id) {
+  return byId(`event-${id}`)?.closest('article, .bot-message-row');
 }
 export function resetConversationJump(context) {
   if (context) context.pendingSource = null;
@@ -247,10 +246,9 @@ export function updateFindOverlap() {
   }
   return overlap;
 }
-function focusConversationMessage(target) {
+export function focusConversationMessage(target) {
   const row = target?.closest('article') ?? target;
   if (!row) return;
-  // Scroll within the conversation and keep the message clear of the floating controls.
   const scroller = elements.conversation;
   updateFindOverlap();
   const viewport = scroller.getBoundingClientRect();

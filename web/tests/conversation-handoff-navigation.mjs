@@ -191,13 +191,28 @@ async function exercise() {
   check(!new URLSearchParams(location.search).has('message'), 'The one-time message target remained in the URL');
   check(document.activeElement?.id === 'event-42', 'Navigation did not focus the delivered message');
   check(document.querySelector('#event-42').textContent.includes('Review the release.'), 'The delivered message was not readable');
+
+  const linkedMessage = document.createElement('a');
+  linkedMessage.id = 'event-99';
+  linkedMessage.className = 'bot-message-row';
+  linkedMessage.href = '/?bot=sender-fixture';
+  linkedMessage.tabIndex = -1;
+  linkedMessage.append(Object.assign(document.createElement('span'), { className: 'bubble', textContent: 'Linked Bot DM' }));
+  document.querySelector('#conversation').append(linkedMessage);
+  const linkedTarget = window.__conversationMessageRow(99);
+  check(linkedTarget === linkedMessage, 'Navigation did not find the linked Bot DM row');
+  window.__focusConversationMessage(linkedTarget);
+  check(document.activeElement === linkedMessage, 'Navigation did not focus the linked Bot DM row');
 }
 
 const html = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
   <img hidden src="/test-pending.svg">
   <script>(${fixtures})();</script>
   <script type="module">
+    import { conversationMessageRow, focusConversationMessage } from '/timeline.js';
     import '/app.js';
+    window.__conversationMessageRow = conversationMessageRow;
+    window.__focusConversationMessage = focusConversationMessage;
     let failed = false;
     try { await (${exercise})(); document.documentElement.dataset.flockResult = 'pass'; }
     catch (error) {
