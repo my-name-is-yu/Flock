@@ -1145,8 +1145,30 @@ void conversationTaskLaunchesItsRequest() {
     f.reach(task, "running");
     const auto saved = f.task(task);
     check(saved.at("doneWhen") == "Confirm the signature" && saved.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId") &&
-              f.t3.seen.size() == 1 && f.t3.seen.front().instruction.find("Check the release") != std::string::npos,
+              f.t3.seen.size() == 1 && f.t3.seen.front().instruction.find("Check the release") != std::string::npos &&
+              (!f.t3.seen.front().config.contains("session") ||
+               (!f.t3.seen.front().config.at("session").contains("model") &&
+                !f.t3.seen.front().config.at("session").contains("providerInstanceId"))),
           "the conversation task did not launch its request with the saved criterion and source");
+}
+
+void conversationTaskUsesRequestedSessionModelAfterRestart() {
+    Fixture f;
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work-with-model", "Use Codex Sol");
+    const Json selection{{"model", "codex-sol"}, {"providerInstanceId", "provider-codex"}};
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (!input.event.at("turn").empty()) return {"reply", {{"text", "Started."}}, "Tell the person"};
+        return converse(input, "start_task", 0, {{"sessionModel", selection}});
+    };
+    f.runtime->runConversations();
+    const Id task = TaskList(*f.store).tasks("alpha").at(0).task.id;
+    f.restart();
+    f.reach(task, "running");
+    const auto& launch = f.t3.seen.front();
+    const auto session = launch.config.value("session", Json::object());
+    check(launch.tool == CommandTool::delegate && session.value("model", std::string{}) == "codex-sol" &&
+              session.value("providerInstanceId", std::string{}) == "provider-codex",
+          "the requested Session model was not kept on its T3 launch after restart");
 }
 
 void conversationWakeNeedsAReviewedResultToAutoComplete() {
@@ -1297,6 +1319,7 @@ int main() {
              {"cancellation with unavailable report", missingReportDoesNotBlockCancellation},
              {"project owners on task pages", taskPagesShowProjectOwners},
              {"Conversation task launches its request", conversationTaskLaunchesItsRequest},
+             {"Conversation task keeps its requested Session model after restart", conversationTaskUsesRequestedSessionModelAfterRestart},
              {"conversation wake requires a reviewed result for automatic completion", conversationWakeNeedsAReviewedResultToAutoComplete},
              {"Recovered Run accepts its original question", recoveredRunAcceptsQuestion},
              {"wake turn instruction becomes one follow-up", wakeTurnInstructionBecomesOneFollowUp},

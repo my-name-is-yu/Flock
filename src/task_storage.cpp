@@ -268,6 +268,14 @@ Json sessionOriginJson(const SessionOrigin& origin) {
     return data;
 }
 
+SessionModelSelection decodeTaskSessionModel(const Json& data, const RecordDecoder& row) {
+    return {row.get<std::string>(data, "model"), row.get<std::string>(data, "providerInstanceId")};
+}
+
+Json taskSessionModelJson(const SessionModelSelection& selection) {
+    return {{"model", selection.model}, {"providerInstanceId", selection.providerInstanceId}};
+}
+
 namespace {
 void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row) {
     task.intent = row.get<std::string>(data, "intent");
@@ -299,6 +307,8 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     else if (criteriaSource)
         row.fail("criteriaSourceMessageId", "requires proposed completion criteria");
     task.requestedCommit = row.optional<std::string>(data, "requestedCommit");
+    if (const auto found = row.find(data, "requestedSessionModel"); found != data.end())
+        task.requestedSessionModel = row.nested("requestedSessionModel").decodeClosed(*found, decodeTaskSessionModel);
     task.waitingNote = row.optional<std::string>(data, "waitingNote");
     decodeTaskInteraction(task, data, row);
     decodeTaskContext(task, data, row);
@@ -339,6 +349,7 @@ Json encodeTaskPayload(const TaskData& task) {
         data["requestedDoneWhen"] = task.criteriaProposal->doneWhen;
         if (task.criteriaProposal->sourceMessageId) data["criteriaSourceMessageId"] = *task.criteriaProposal->sourceMessageId;
     }
+    if (task.requestedSessionModel) data["requestedSessionModel"] = taskSessionModelJson(*task.requestedSessionModel);
     if (task.requestedCommit) data["requestedCommit"] = *task.requestedCommit;
     if (task.waitingNote) data["waitingNote"] = *task.waitingNote;
     encodeTaskInteraction(data, task);

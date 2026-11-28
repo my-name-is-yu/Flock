@@ -114,6 +114,14 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
             false);
         text("projectId",
              "The exact projectId from the selected environment's projects. Omit to use the saved project or let the task choose.", false);
+        fields["sessionModel"] = {
+            {"type", "object"},
+            {"properties",
+             {{"model", textParameter("Session model ID")}, {"providerInstanceId", textParameter("T3 provider instance ID")}}},
+            {"required", {"model", "providerInstanceId"}},
+            {"additionalProperties", false},
+            {"description", "Model and provider instance ID to use when Flock launches a new T3 Session for this task. "
+                            "Omit to keep the existing Session settings."}};
         const Json target = {{"type", "object"},
                              {"properties",
                               {{"environment", textParameter("A destination name or ID from task.environments.")},
