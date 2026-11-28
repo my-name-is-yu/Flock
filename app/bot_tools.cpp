@@ -1,4 +1,5 @@
 #include "bot_tools.hpp"
+#include "flock/text.hpp"
 #include "flock/environment.hpp"
 #include "flock/percent_encoding.hpp"
 #include "flock/bot_id.hpp"
@@ -45,11 +46,6 @@ struct Response {
     bool truncated = false;
 };
 
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \r\n\t");
-    return first == value.npos ? "" : std::string(value.substr(first, value.find_last_not_of(" \r\n\t") - first + 1));
-}
-
 size_t writeBody(char* data, size_t size, size_t count, void* user) noexcept {
     auto& response = *static_cast<Response*>(user);
     const auto bytes = size * count;
@@ -71,8 +67,8 @@ size_t writeHeader(char* data, size_t size, size_t count, void* user) noexcept {
         if (colon == line.npos) return line.size();
         std::string key(line.substr(0, colon));
         std::ranges::transform(key, key.begin(), [](unsigned char c) { return std::tolower(c); });
-        if (key == "mcp-session-id") response.session = trim(line.substr(colon + 1));
-        if (key == "content-type") response.type = trim(line.substr(colon + 1));
+        if (key == "mcp-session-id") response.session = trimAscii(line.substr(colon + 1));
+        if (key == "content-type") response.type = trimAscii(line.substr(colon + 1));
     } catch (...) {
         return 0;
     }

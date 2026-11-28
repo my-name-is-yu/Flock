@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/text.hpp"
 #include "flock/file_descriptor.hpp"
 #include "flock/percent_encoding.hpp"
 #include "flock/digest.hpp"
@@ -77,7 +78,7 @@ std::string digest(std::string_view value) {
 }
 
 std::string credentialName(const std::string& environmentId) {
-    if (trim(environmentId) != environmentId || environmentId.empty() || environmentId.size() > 512)
+    if (trimAscii(environmentId) != environmentId || environmentId.empty() || environmentId.size() > 512)
         throw Failure(Failure::Kind::Settings, "A canonical T3 environment ID is required");
     return "t3-" + digest(environmentId) + ".json";
 }
@@ -214,10 +215,10 @@ std::optional<std::string> bearerMetadata(std::string_view header) {
             // Other schemes may carry token68 credentials instead of params.
             auto credentials = header.substr(0, header.find(','));
             auto padding = credentials.find('=');
-            auto bare = trim(credentials.substr(0, padding));
+            auto bare = trimAscii(credentials.substr(0, padding));
             if (!bare.empty() &&
                 bare.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~+/") == std::string::npos &&
-                (padding == std::string_view::npos || trim(credentials.substr(padding)).find_first_not_of('=') == std::string::npos)) {
+                (padding == std::string_view::npos || trimAscii(credentials.substr(padding)).find_first_not_of('=') == std::string::npos)) {
                 header.remove_prefix(credentials.size());
                 continue;
             }

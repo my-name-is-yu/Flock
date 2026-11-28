@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/json.hpp"
+#include "flock/text.hpp"
 #include "flock/session_ref.hpp"
 #include "flock/types.hpp"
 
@@ -69,7 +70,6 @@ Url checkedUrl(const std::string& value);
 HttpResponse http(const std::string& url, std::string_view method, const Headers& headers = {}, const std::string& body = {},
                   long timeoutMs = 6000);
 std::string decode(std::string_view value);
-std::string trim(std::string_view value);
 Json parse(std::string_view body);
 [[noreturn]] void invalidResponse();
 

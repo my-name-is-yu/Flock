@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/text.hpp"
 #include "flock/detail/json_rpc.hpp"
 #include "flock/detail/traffic_recording.hpp"
 #include "flock/json.hpp"
@@ -57,9 +58,9 @@ size_t receiveHeader(char* data, size_t size, size_t count, void* context) noexc
             auto key = std::string(line.substr(0, end));
             std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
             if (key == "www-authenticate" && headers.contains(key))
-                headers[key] += ", " + trim(line.substr(end + 1));
+                headers[key] += ", " + trimAscii(line.substr(end + 1));
             else
-                headers[key] = trim(line.substr(end + 1));
+                headers[key] = trimAscii(line.substr(end + 1));
         }
     } catch (...) {
         return 0;
@@ -89,12 +90,6 @@ Json rpcResult(Json message) {
     if (!message.contains("result") || !message["result"].is_object()) invalidResponse();
     return std::move(message["result"]);
 }
-}
-
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    return std::string(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
 }
 
 Json parse(std::string_view body) {

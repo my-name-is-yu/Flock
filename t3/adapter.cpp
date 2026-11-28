@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/text.hpp"
 #include "flock/percent_encoding.hpp"
 #include "flock/commit_check.hpp"
 #include "flock/command.hpp"
@@ -583,8 +584,8 @@ void verifyCommand(const Command& command) {
                               !command.target.threadId.empty() && command.target.runId.empty()) ||
                              (command.tool == CommandTool::follow_up && hasRun(command.target));
     if (!validTarget || (command.tool != CommandTool::message_session && command.projectId.empty()) || command.actionId.empty() ||
-        command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
-        command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
+        command.actionId.size() > 256 || trimAscii(command.actionId) != command.actionId ||
+        command.actionId.find_first_of("\r\n[]") != std::string::npos || trimAscii(command.instruction).empty() ||
         sessionPrompt(command.actionId, command.instruction).size() > limits::session_prompt::maxBytes)
         throw Failure(Failure::Kind::Settings, "Invalid T3 command, action ID or destination");
 }
