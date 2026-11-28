@@ -1,4 +1,5 @@
 #include "settings_routes.hpp"
+#include "http.hpp"
 #include "views.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
@@ -22,11 +23,6 @@ namespace {
 using httplib::Request;
 using httplib::Response;
 
-void reply(Response& res, int status, const Json& data) {
-    res.status = status;
-    res.set_content(data.dump(), "application/json");
-}
-
 Id queryId(const Request& req, const char* name) {
     const auto value = req.get_param_value(name);
     Id id = 0;
@@ -43,15 +39,15 @@ Json body(const Request& req) {
 }
 
 template <class F> void handle(const Request& req, Response& res, F run) {
-    if (req.body.size() > 128 * 1024) return reply(res, 413, {{"error", "payload_too_large"}});
+    if (req.body.size() > maxStandardPayload) return error(res, 413, "payload_too_large");
     try {
         run();
     } catch (const AccessDenied&) {
-        reply(res, 403, {{"error", "access_denied"}});
+        error(res, 403, "access_denied");
     } catch (const Json::exception&) {
-        reply(res, 400, {{"error", "invalid_input"}});
-    } catch (const Conflict& error) {
-        reply(res, 409, {{"error", error.what()}});
+        error(res, 400, "invalid_input");
+    } catch (const Conflict& failure) {
+        error(res, 409, failure.what());
     }
 }
 

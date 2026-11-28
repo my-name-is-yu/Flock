@@ -1,7 +1,7 @@
 #include "board_inbox_routes.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/decision_errors.hpp"
-#include "settings_routes.hpp"
+#include "http.hpp"
 #include "views.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/json.hpp"
@@ -24,15 +24,6 @@ namespace flockv0::web {
 namespace {
 using httplib::Request;
 using httplib::Response;
-
-void reply(Response& res, int status, const Json& body) {
-    res.status = status;
-    res.set_content(body.dump(-1, ' ', false, Json::error_handler_t::replace), "application/json; charset=utf-8");
-}
-
-void error(Response& res, int status, std::string_view code, std::string_view message = {}) {
-    reply(res, status, {{"error", code}, {"message", message}});
-}
 
 std::string parameter(const Request& request, const char* name) {
     if (request.get_param_value_count(name) > 1) throw std::invalid_argument("Repeated query parameter");
@@ -79,7 +70,7 @@ void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks&
         [&store](const Person& actor, const std::string& bot) { return Inbox(store).decisionHistory(actor, bot); });
 
     server.Post("/api/inbox/decide", [&store, &callbacks](const Request& req, Response& res) {
-        if (req.body.size() > 128 * 1024) return error(res, 413, "payload_too_large");
+        if (req.body.size() > maxStandardPayload) return error(res, 413, "payload_too_large");
         try {
             const auto body = Json::parse(req.body);
             const auto kind = parseInboxKind(body.at("itemKind").get<std::string>());

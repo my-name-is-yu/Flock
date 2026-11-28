@@ -1,4 +1,5 @@
 #include "mcp_routes.hpp"
+#include "http.hpp"
 #include "flock/limits.hpp"
 #include "views.hpp"
 #include "flock/bot_id.hpp"
@@ -41,11 +42,6 @@ struct InvalidToolArguments {
 
 std::string utf8Limit(std::size_t maxBytes) {
     return "Maximum " + std::to_string(maxBytes) + " UTF-8 bytes.";
-}
-
-void reply(httplib::Response& res, int status, const Json& data) {
-    res.status = status;
-    res.set_content(data.dump(), "application/json; charset=utf-8");
 }
 
 std::string identifier(const Json& object, std::string_view field, std::size_t maxBytes = 1024) {
@@ -309,10 +305,10 @@ void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*tool
         auto result = callTool(tool, arguments);
         if (result.is_null()) return rpcError(res, 200, *id, -32602, "Unknown tool");
         return rpcResult(res, *id, std::move(result));
-    } catch (const InvalidToolArguments& error) {
-        rpcError(res, 200, *id, -32602, error.message);
-    } catch (const Conflict& error) {
-        rpcResult(res, *id, {{"isError", true}, {"content", toolContent(error.what())}});
+    } catch (const InvalidToolArguments& failure) {
+        rpcError(res, 200, *id, -32602, failure.message);
+    } catch (const Conflict& failure) {
+        rpcResult(res, *id, {{"isError", true}, {"content", toolContent(failure.what())}});
     } catch (const std::exception&) {
         rpcError(res, 200, *id, -32603, "Flock could not process the request");
     }

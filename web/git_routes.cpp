@@ -1,4 +1,5 @@
 #include "git_routes.hpp"
+#include "http.hpp"
 #include "flock/git_events.hpp"
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
@@ -24,11 +25,6 @@
 namespace flockv0::web {
 namespace {
 constexpr std::size_t maxWebhookBytes = 1024 * 1024;
-
-void reply(httplib::Response& response, int status, const Json& result) {
-    response.status = status;
-    response.set_content(result.dump(), "application/json");
-}
 
 std::string hexDigest(const unsigned char* digest, unsigned length) {
     constexpr char hex[] = "0123456789abcdef";
@@ -169,12 +165,11 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
 
 void gitRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     server.Post(R"(/api/git/webhooks/([^/]+))", [&store, &callbacks](const httplib::Request& req, httplib::Response& res) {
-        if (req.matches[1].str() != "github.com" || callbacks.githubWebhookSecret.empty())
-            return reply(res, 404, {{"error", "unknown_git_webhook"}});
-        if (req.body.size() > maxWebhookBytes) return reply(res, 413, {{"error", "payload_too_large"}});
-        if (!verified(req, callbacks.githubWebhookSecret)) return reply(res, 401, {{"error", "invalid_webhook_signature"}});
+        if (req.matches[1].str() != "github.com" || callbacks.githubWebhookSecret.empty()) return error(res, 404, "unknown_git_webhook");
+        if (req.body.size() > maxWebhookBytes) return error(res, 413, "payload_too_large");
+        if (!verified(req, callbacks.githubWebhookSecret)) return error(res, 401, "invalid_webhook_signature");
         if (req.get_header_value_count("X-GitHub-Delivery") != 1 || req.get_header_value_count("X-GitHub-Event") != 1)
-            return reply(res, 400, {{"error", "invalid_webhook_headers"}});
+            return error(res, 400, "invalid_webhook_headers");
         try {
             auto event = githubEvent(req);
             if (!event) return reply(res, 202, {{"status", "ignored"}});
@@ -183,11 +178,11 @@ void gitRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
             event->payloadDigest = hexDigest(digest, SHA256_DIGEST_LENGTH);
             reply(res, 202, {{"status", GitEvents(store).receiveGitWebhook(*event) ? "received" : "duplicate"}});
         } catch (const Json::exception&) {
-            reply(res, 400, {{"error", "invalid_git_webhook"}});
+            error(res, 400, "invalid_git_webhook");
         } catch (const std::invalid_argument&) {
-            reply(res, 400, {{"error", "invalid_git_webhook"}});
+            error(res, 400, "invalid_git_webhook");
         } catch (const Conflict&) {
-            reply(res, 400, {{"error", "invalid_git_webhook"}});
+            error(res, 400, "invalid_git_webhook");
         }
     });
 }

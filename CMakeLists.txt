@@ -232,10 +232,10 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
   add_test(NAME flock_header_fanout COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/header_fanout.py")
-  add_test(NAME flock_layering COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-layering.py" "${CMAKE_CURRENT_SOURCE_DIR}")
-  add_test(NAME flock_layering_check COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/layering.py")
+  add_test(NAME flock_architecture COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-architecture.py" "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME flock_architecture_check COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/architecture.py")
   if(FLOCK_LIVE_TESTS)
     foreach(test flock_live_t3 flock_live_conversation)
       add_test(NAME ${test} COMMAND ${test} --live)
