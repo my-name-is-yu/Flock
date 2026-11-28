@@ -838,6 +838,33 @@ int main(int argc, char** argv) {
               "mismatched login preserves the credential for the canonical environment");
 
         fixture({{"scope", "orchestration:read orchestration:operate"},
+                 {"scenario", "settled"},
+                 {"revoked", false},
+                 {"denyRead", false},
+                 {"delayRunId", false},
+                 {"sessionWakeFixture", false},
+                 {"lineageFixture", false},
+                 {"lineageSessions", Json::object()}});
+        check(signIn("env-1"), "Could not restore the Operate credential for model-selection launch test");
+        Command selectedLaunch = launch;
+        selectedLaunch.actionId = "flock-action-selected-model";
+        selectedLaunch.config = {{"session", {{"model", "codex-sol"}, {"providerInstanceId", "provider-codex"}}}};
+        selectedLaunch.authGeneration = adapter->authGeneration(selectedLaunch.environmentId, selectedLaunch.config);
+        const auto launchesBefore = effects("t3_thread_launch").size();
+        const auto selectedDelivery = adapter->send(selectedLaunch);
+        const auto launchesAfter = effects("t3_thread_launch");
+        const auto selectedPayload = std::find_if(launchesAfter.begin(), launchesAfter.end(), [&](const Json& payload) {
+            return payload.value("clientRequestId", std::string{}) == selectedLaunch.actionId;
+        });
+        const auto selection = selectedPayload == launchesAfter.end()
+                                   ? Json::object()
+                                   : selectedPayload->value("modelSelection", Json::object());
+        check(selectedDelivery.kind == Delivery::Kind::Accepted && launchesAfter.size() == launchesBefore + 1 &&
+                  selectedPayload != launchesAfter.end() && selection.value("model", std::string{}) == "codex-sol" &&
+                  selection.value("instanceId", std::string{}) == "provider-codex",
+              "T3 did not receive the requested model selection for the matching launch");
+
+        fixture({{"scope", "orchestration:read orchestration:operate"},
                  {"denyRead", false},
                  {"lineageFixture", true},
                  {"lineageSessions", Json::object()}});

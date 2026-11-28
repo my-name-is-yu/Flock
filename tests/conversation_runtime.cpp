@@ -2300,7 +2300,7 @@ void ambiguousLinkedProjectsDoNotMoveTask() {
     check(f.t3.sent.size() == 1, "an ambiguous linked destination received work");
 }
 
-Id twoLinkedDestinationTask(Fixture& f) {
+Id twoLinkedDestinationTask(Fixture& f, Json sessionModel = Json::object()) {
     T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
     auto route = f.routing("Start work on both linked targets");
     f.t3.linksByGateway["desktop"].links = {{{"cloud", "desktop"}, "Cloud", T3EnvironmentLink::Status::reachable},
@@ -2308,12 +2308,31 @@ Id twoLinkedDestinationTask(Fixture& f) {
     f.t3.projectsByEnvironment["cloud"] = {{"cloud-project", "Cloud fixture", {}}};
     f.t3.projectsByEnvironment["other"] = {{"other-project", "Other fixture", {}}};
     constexpr auto request = "Start work on both linked targets";
-    f.script(request, {start({{"environments", {"cloud", "other"}}})});
+    Json args{{"environments", {"cloud", "other"}}};
+    if (!sessionModel.empty()) args["sessionModel"] = std::move(sessionModel);
+    f.script(request, {start(std::move(args))});
     ConversationIntake(*f.store).receive(localOwner, route, "two-linked-targets", request);
     f.runtime->runConversations();
     const auto id = TaskList(*f.store).tasks("alpha").front().task.id;
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "both linked destinations were not dispatched");
     return id;
+}
+
+void twoLinkedDestinationsKeepTheirRoutesWithRequestedSessionModel() {
+    Fixture f;
+    const Json selection{{"model", "codex-sol"}, {"providerInstanceId", "provider-codex"}};
+    twoLinkedDestinationTask(f, selection);
+    const auto cloud = std::ranges::find_if(f.t3.sent, [](const Command& command) { return command.environmentId == "cloud"; });
+    const auto other = std::ranges::find_if(f.t3.sent, [](const Command& command) { return command.environmentId == "other"; });
+    const auto hasSelection = [](const Command& command) {
+        const auto session = command.config.value("session", Json::object());
+        return command.tool == CommandTool::delegate && session.value("model", std::string{}) == "codex-sol" &&
+               session.value("providerInstanceId", std::string{}) == "provider-codex";
+    };
+    check(f.t3.sent.size() == 2 && cloud != f.t3.sent.end() && other != f.t3.sent.end() &&
+              cloud->projectId == "cloud-project" && cloud->gatewayEnvironmentId == "desktop" && hasSelection(*cloud) &&
+              other->projectId == "other-project" && other->gatewayEnvironmentId == "desktop" && hasSelection(*other),
+          "each linked destination must keep its own route and receive the requested Session model");
 }
 
 Json destinationRunFor(const Json& task, std::string_view environment) {
@@ -4414,6 +4433,7 @@ int main(int argc, char** argv) {
         discoveredLinkedNameMoveKeepsRoute();
         ambiguousLinkedProjectsDoNotMoveTask();
         destinationFollowupValidatesAndRedactsSourceReport();
+        twoLinkedDestinationsKeepTheirRoutesWithRequestedSessionModel();
         savedDestinationFollowupsRemainTaskWork();
         savedDestinationFollowupStopTargetsOnlyItsRun();
         savedDestinationFollowupStopTargetsOnlyItsRun("cancelled");

@@ -1154,6 +1154,11 @@ void conversationTaskLaunchesItsRequest() {
 
 void conversationTaskUsesRequestedSessionModelAfterRestart() {
     Fixture f;
+    const Json botSession{{"model", "bot-default-model"}, {"providerInstanceId", "provider-default"}, {"runtimeMode", "auto"}};
+    f.intake = [botSession](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "e", "p", {{"session", botSession}}};
+    };
+    f.restart();
     ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work-with-model", "Use Codex Sol");
     const Json selection{{"model", "codex-sol"}, {"providerInstanceId", "provider-codex"}};
     f.model.script = [&](const ModelInput& input) -> Decision {
@@ -1166,9 +1171,33 @@ void conversationTaskUsesRequestedSessionModelAfterRestart() {
     f.reach(task, "running");
     const auto& launch = f.t3.seen.front();
     const auto session = launch.config.value("session", Json::object());
+    const auto savedSession = Tasks(*f.store).task(task).task.config.value("session", Json::object());
     check(launch.tool == CommandTool::delegate && session.value("model", std::string{}) == "codex-sol" &&
               session.value("providerInstanceId", std::string{}) == "provider-codex",
           "the requested Session model was not kept on its T3 launch after restart");
+    check(session.value("runtimeMode", std::string{}) == "auto" && savedSession.value("model", std::string{}) == "bot-default-model" &&
+              savedSession.value("providerInstanceId", std::string{}) == "provider-default",
+          "the per-task selection changed the Bot's saved Session defaults");
+
+    f.model.script = [](const ModelInput&) -> Decision { return {"reply", {{"text", "Completed."}}, "Close the completed task"}; };
+    f.t3.finish("run-1");
+    f.reach(task, "completed");
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work-with-default", "Use Bot defaults");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (!input.event.at("turn").empty()) return {"reply", {{"text", "Started with defaults."}}, "Tell the person"};
+        return converse(input, "start_task", 0, Json::object());
+    };
+    f.runtime->runConversations();
+    const auto tasks = TaskList(*f.store).tasks("alpha");
+    const auto followup = std::find_if(tasks.begin(), tasks.end(), [task](const auto& item) { return item.task.id != task; });
+    check(followup != tasks.end(), "the omitted-model follow-up task was not created");
+    f.reach(followup->task.id, "running");
+    const auto& defaultLaunch = f.t3.seen.back();
+    const auto defaultSession = defaultLaunch.config.value("session", Json::object());
+    check(defaultLaunch.tool == CommandTool::delegate && defaultSession.value("model", std::string{}) == "bot-default-model" &&
+              defaultSession.value("providerInstanceId", std::string{}) == "provider-default" &&
+              defaultSession.value("runtimeMode", std::string{}) == "auto",
+          "a follow-up that omitted sessionModel did not use the unchanged Bot defaults");
 }
 
 void conversationWakeNeedsAReviewedResultToAutoComplete() {
