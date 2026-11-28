@@ -197,8 +197,10 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 for (const auto& file : *files) {
                     Json item = Json::object();
                     copyFields(item, file, {"id", "name", "sizeBytes"});
-                    const auto preview = conversationMediaKind(field(file, "mimeType"));
-                    if (!preview.empty()) item["preview"] = preview;
+            const auto mime = field(file, "mimeType");
+            const auto preview = conversationMediaKind(mime);
+            if (!preview.empty()) item["preview"] = preview;
+            if (preview == "image" && mime != "image/jpeg") item["mayAnimate"] = true;
                     projected.push_back(std::move(item));
                 }
             }

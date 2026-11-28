@@ -508,7 +508,7 @@ void attachmentsInConversation(const std::filesystem::path& path) {
     const Json mixedFiles = Json::array({
         {{"id", 1}, {"name", "clip.webm"}, {"sizeBytes", 4}, {"preview", "video"}},
         {{"id", 2}, {"name", "reader's 日本語.html"}, {"sizeBytes", 20}},
-        {{"id", 3}, {"name", image.at("name")}, {"sizeBytes", png.body.size()}, {"preview", "image"}}
+        {{"id", 3}, {"name", image.at("name")}, {"sizeBytes", png.body.size()}, {"preview", "image"}, {"mayAnimate", true}}
     });
     checkFileList(browser.get("/api/view?bot=release"), mixed, mixedFiles);
     checkFileList(browser.get(conversation), mixed, mixedFiles);

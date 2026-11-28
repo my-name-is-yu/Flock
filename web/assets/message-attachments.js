@@ -1,9 +1,11 @@
 import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 import { node } from './dom.js';
+import { reducedMotion } from './app-state.js';
 
 const glyphs = {
   file: '<path d="M7 3h7l4 4v14H7z M14 3v5h4 M10 12h5 M10 16h5"/>',
   download: '<path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/>',
+  photo: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m3 17 5-4 3 2 4-5 6 6"/>',
 };
 
 function glyph(name) {
@@ -94,8 +96,21 @@ function photoViewer() {
       image.replaceWith(node('p', 'attachment-preview-error', available ? 'Preview unavailable.' : 'Attachment unavailable.'));
       download.hidden = !available;
     }, { once: true });
-    image.src = file.url;
-    stage.replaceChildren(image);
+    const showImage = () => {
+      image.src = file.url;
+      stage.replaceChildren(image);
+    };
+    if (file.mayAnimate && reducedMotion.matches) {
+      const play = node('button', 'attachment-preview-play', 'Show image');
+      play.type = 'button';
+      play.addEventListener('click', () => {
+        showImage();
+        close.focus();
+      });
+      stage.replaceChildren(play);
+    } else {
+      showImage();
+    }
     setDownload(download, file);
     previous.hidden = next.hidden = photos.length < 2;
   };
@@ -147,8 +162,19 @@ function photoTile(file, photos, messageId) {
   image.loading = 'lazy';
   image.decoding = 'async';
   image.addEventListener('error', () => void replaceFailedPreview(tile, file), { once: true });
-  image.src = file.url;
-  tile.append(image);
+  if (file.mayAnimate) {
+    const picture = node('picture');
+    const source = node('source');
+    source.media = '(prefers-reduced-motion: no-preference)';
+    source.srcset = file.url;
+    picture.append(source, image);
+    const placeholder = node('span', 'chat-photo-placeholder');
+    placeholder.append(glyph('photo'), fileName(file.name));
+    tile.append(picture, placeholder);
+  } else {
+    image.src = file.url;
+    tile.append(image);
+  }
   tile.addEventListener('click', () => {
     viewer ??= photoViewer();
     viewer.open(photos, file, tile);
