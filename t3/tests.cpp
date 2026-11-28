@@ -591,8 +591,16 @@ int main(int argc, char** argv) {
         const auto moved = adapter->send(follow);
         check(moved.kind == Delivery::Kind::Settings && moved.definitelyUnsent && effects("t3_thread_send").empty(),
               "T3 received a follow-up after the Session moved projects during readiness checks");
-        fixture({{"moveThreadOnQueueList", false}, {"threadProjectId", "project"}});
-        fixture({{"scenario", "settled"}});
+        fixture(
+            {{"moveThreadOnQueueList", false}, {"threadProjectId", "project"}, {"attachmentTools", true}, {"moveThreadOnUpload", true}});
+        auto followWithFile = follow;
+        followWithFile.attachments = {{"report.txt", "text/plain", "Report"}};
+        followWithFile.attachmentCount = followWithFile.attachments.size();
+        const auto movedDuringUpload = adapter->send(followWithFile);
+        check(movedDuringUpload.kind == Delivery::Kind::Settings && movedDuringUpload.definitelyUnsent &&
+                  effects("t3_thread_send_attachments").empty(),
+              "T3 received a follow-up after the Session moved projects during attachment upload");
+        fixture({{"moveThreadOnUpload", false}, {"attachmentTools", false}, {"threadProjectId", "project"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" && delivery.run.runId == "follow",
               "follow-up starts a new Run in the original thread");

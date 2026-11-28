@@ -446,7 +446,7 @@ function eventCard(event, context, place, report) {
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (event.kind === 'answer_delivery_unconfirmed') {
-    const note = node('article', 'system-note session-event', 'T3 did not confirm receipt of the answer.');
+    const note = node('article', 'system-note session-event', 'T3 did not confirm receipt of the answer · ');
     note.id = `event-${event.id}`;
     note.tabIndex = -1;
     note.append(eventTime(event));

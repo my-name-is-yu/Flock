@@ -895,7 +895,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
 
 enum class FollowUp { Ready, Busy, SessionUnavailable };
 
-FollowUp followUpReadiness(Client& client, const Command& command) {
+FollowUp followUpReadiness(Client& client, const Command& command, const auto& stageAttachments) {
     const auto settled = waitForDelegatedWork(client, command.target, 1);
     const auto& effective = settled.parent.runId;
     const auto& resultRun = settled.resultRunId;
@@ -909,6 +909,7 @@ FollowUp followUpReadiness(Client& client, const Command& command) {
     // Newer settled Runs, such as replies from Bots invited into the Session, do not block a follow-up.
     // The Session agent sees them, and Flock attributes the follow-up by the Run that the send returns.
     if (!member(info, "activeRunId").is_null() || position(member(info, "pendingRequestCount")) != 0) return FollowUp::Busy;
+    stageAttachments();
     // A held queue can exist even without an active Run.
     const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
     if (!array(queue, "items").empty()) return FollowUp::Busy;
@@ -1182,6 +1183,7 @@ public:
                 if (field(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 Json previous;
+                Json files;
                 if (selected) {
                     if (gateway == command.environmentId) {
                         const auto environment = client.call("t3_environment_read", Json::object());
@@ -1193,14 +1195,14 @@ public:
                         return {Outcome::Settings, {}, "The selected T3 Session moved projects or was archived", true};
                     if (!command.attachments.empty() && !member(previous, "activeRunId").is_null())
                         return {Outcome::Busy, {}, "The selected T3 Session is still active", true};
+                    files = stage();
                 } else {
-                    const auto readiness = followUpReadiness(client, command);
+                    const auto readiness = followUpReadiness(client, command, [&] { files = stage(); });
                     if (readiness == FollowUp::SessionUnavailable)
                         return {Outcome::Settings, {}, "The T3 Session moved projects or was archived", true};
                     if (readiness == FollowUp::Busy)
                         return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                 }
-                const auto files = stage();
                 invoked = true;
                 reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto delivery = field(reply, "delivery");

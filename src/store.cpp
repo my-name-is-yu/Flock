@@ -460,7 +460,7 @@ Json Conversations::conversation(std::string_view bot, Id before, unsigned limit
 WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
-    AND (?3=0 OR kind IN ('conversation_reply','report','completed','answer_delivery_unconfirmed')
+    AND (?3=0 OR kind IN ('conversation_reply','report','completed')
          OR (kind='waiting' AND wait_reason IN ('user_question','bot_notes_unavailable','auth','settings')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop','bot_setup_undone'))
       OR (conversation_bot_id IS NULL
