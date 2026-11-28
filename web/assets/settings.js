@@ -8,8 +8,9 @@ import {
   confirmSetting, loadInstallation, postSettings, renderRemoteMachines, showInstallationUnavailable, statusBadge,
 } from '/installation-settings.js';
 import { showAvatar } from '/avatars.js';
-import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
+import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
 import { quietSavedStatus } from '/settings-ui.js';
+import { node } from './dom.js';
 
 const $ = (id) => document.getElementById(id);
 const expiryDate = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
@@ -191,11 +192,11 @@ async function loadBots() {
     if (!bots.length) row(rows, rowLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
     for (const bot of bots) {
       const label = rowLabel(bot.name, ...(bot.about ? [bot.about] : []));
-      const face = element('span', '', 'avatar settings-bot-avatar');
+      const face = node('span', 'avatar settings-bot-avatar');
       showAvatar(face, bot);
       const item = row(rows, face);
       item.append(label);
-      const actions = element('span', '', 'row-actions');
+      const actions = node('span', 'row-actions');
       actions.append(link('Settings', `/?${new URLSearchParams({bot: bot.id, settings: '1'})}`, `${bot.name} settings`),
         link('Access', `/settings/${encodeURIComponent(bot.id)}`, `Access for ${bot.name}`));
       item.append(actions);

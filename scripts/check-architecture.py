@@ -24,6 +24,9 @@ SINGLE_OWNERS = (
     ),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
+SCRIPT_OWNERS = (
+    (re.compile(r"\bfunction (node|element)\(tag\b"), "web/assets/dom.js", "create elements with node from dom.js"),
+)
 
 
 def is_test(path):
@@ -45,6 +48,12 @@ def layer_of(root, name, includer):
 def violations(root):
     root = root.resolve()
     found = []
+    for path in sorted((root / "web" / "assets").glob("*.*js")):
+        relative = path.relative_to(root)
+        text = path.read_text(errors="surrogateescape")
+        for pattern, owner, advice in SCRIPT_OWNERS:
+            if relative.as_posix() != owner and pattern.search(text):
+                found.append(f"{relative}: {advice}; only {owner} does this directly")
     for layer in (*ALLOWED, "tests"):
         allowed = ALLOWED.get(layer)
         for path in sorted((root / layer).rglob("*")):

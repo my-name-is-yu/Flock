@@ -1,4 +1,5 @@
 import { timelineMessages } from './event-history.mjs';
+import { node } from './dom.js';
 
 const pagesPerSearch = 4;
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
@@ -31,13 +32,6 @@ function snippetFor(event, pattern) {
     match: match[0],
     after: after.slice(0, 70).join('') + (after.length > 70 ? '…' : ''),
   };
-}
-
-function element(tag, className, text = '') {
-  const item = document.createElement(tag);
-  item.className = className;
-  item.textContent = text;
-  return item;
 }
 
 export function mountConversationFind({ toggle, panel, readPage, describeAuthor, openMatch, beforeOpen }) {
@@ -93,17 +87,17 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
   }
 
   function matchRow(result, index) {
-    const row = element('li', '');
-    const button = element('button', 'find-match');
+    const row = node('li');
+    const button = node('button', 'find-match');
     button.type = 'button';
     const date = new Date(result.time * 1000);
-    const time = element('time', '', matchTimeLabel(date));
+    const time = node('time', null, matchTimeLabel(date));
     time.dateTime = date.toISOString();
     time.title = fullFormat.format(date);
-    const meta = element('span', 'find-match-meta');
-    meta.append(element('span', 'find-match-name', result.author), time);
-    const snippet = element('span', 'find-snippet');
-    snippet.append(result.snippet.before, element('mark', '', result.snippet.match), result.snippet.after);
+    const meta = node('span', 'find-match-meta');
+    meta.append(node('span', 'find-match-name', result.author), time);
+    const snippet = node('span', 'find-snippet');
+    snippet.append(result.snippet.before, node('mark', null, result.snippet.match), result.snippet.after);
     button.append(meta, snippet);
     button.addEventListener('click', () => {
       search.index = index;

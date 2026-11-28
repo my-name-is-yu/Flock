@@ -1,7 +1,8 @@
 import '/tooltip.js';
 import { accentColor } from '/avatars.js';
 import { listenForBrowserNotifications } from '/browser-notifications.mjs';
-import { actionButton, element, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
+import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
+import { node } from './dom.js';
 
 const botId = decodeURIComponent(location.pathname.split('/')[2]);
 listenForBrowserNotifications(() => botId);
@@ -58,7 +59,7 @@ async function save(section, url, data, refresh, success) {
 }
 
 function settingsLink(section, text) {
-  const link = element('a', text);
+  const link = node('a', null, text);
   link.href = navigation.get(section).href;
   return link;
 }
@@ -113,13 +114,13 @@ function renderSecrets({secretInputs}) {
   for (const {id, name, status} of secretInputs) {
     if (status !== 'pending') continue;
     const item = row(inputs, rowLabel(name));
-    const actions = element('form', '', 'row-actions secret-form');
-    const input = element('input');
+    const actions = node('form', 'row-actions secret-form');
+    const input = node('input');
     input.setAttribute('aria-label', name);
     input.type = 'password';
     input.autocomplete = 'new-password';
     input.required = true;
-    const button = element('button', 'Save', 'button primary');
+    const button = node('button', 'button primary', 'Save');
     actions.append(input, button);
     actions.onsubmit = async (event) => {
       event.preventDefault();
@@ -239,19 +240,19 @@ async function loadMachines() {
     (connection.status === 'pending' || connection.status === 'approved'));
   const rows = document.createDocumentFragment();
   for (const {id, machineId, threadId, rules, status} of connections) {
-    const paths = element('ul', '', 'machine-paths');
+    const paths = node('ul', 'machine-paths');
     for (const {operation, path} of rules) {
       const label = operationLabels.get(operation);
       if (!label) throw new Error();
-      const entry = element('li', label + ' ');
-      entry.append(element('code', path));
+      const entry = node('li', null, label + ' ');
+      entry.append(node('code', null, path));
       paths.append(entry);
     }
     const session = `T3 thread ${threadId}`;
     const label = rowLabel(machineId, session);
     label.append(paths);
     const item = row(rows, label);
-    const actions = element('span', '', 'row-actions');
+    const actions = node('span', 'row-actions');
     actions.setAttribute('role', 'group');
     actions.setAttribute('aria-label', `${machineId} · ${session}`);
     if (status === 'pending') {

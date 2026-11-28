@@ -1,5 +1,6 @@
-import { actionButton, element, row, rowLabel, setSettingsStatus } from '/settings-ui.js';
+import { actionButton, row, rowLabel, setSettingsStatus } from '/settings-ui.js';
 import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+import { node } from './dom.js';
 
 const $ = (id) => document.getElementById(id);
 const checkedTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
@@ -28,7 +29,7 @@ function openEditor(title, description, ...content) {
   if (!editor.open) returnFocus = document.activeElement;
   $('installation-editor-title').textContent = title;
   $('installation-editor-content').replaceChildren(
-    element('p', description, 'installation-description'), ...content,
+    node('p', 'installation-description', description), ...content,
   );
   showFeedback('');
   if (!editor.open) editor.showModal();
@@ -49,7 +50,7 @@ editor.addEventListener('close', () => {
 });
 
 function formActions() {
-  return element('div', '', 'installation-form-actions span-form');
+  return node('div', 'installation-form-actions span-form');
 }
 
 async function runEditorAction(commit) {
@@ -77,12 +78,12 @@ export function confirmSetting(title, description, label, commit) {
 }
 
 function settingField(name, label, options = {}) {
-  const wrapper = element('label', label, options.wide ? 'span-form' : '');
-  const input = element(options.choices ? 'select' : 'input');
+  const wrapper = node('label', options.wide ? 'span-form' : '', label);
+  const input = node(options.choices ? 'select' : 'input');
   input.name = name;
   if (options.choices) {
     for (const [value, text] of Object.entries(options.choices)) {
-      const option = element('option', text);
+      const option = node('option', null, text);
       option.value = value;
       input.append(option);
     }
@@ -104,9 +105,9 @@ function settingField(name, label, options = {}) {
 }
 
 function buildForm(fields, label, commit, actions = []) {
-  const form = element('form', '', 'installation-form');
+  const form = node('form', 'installation-form');
   const buttons = formActions();
-  const save = element('button', label, 'button primary');
+  const save = node('button', 'button primary', label);
   save.type = 'submit';
   buttons.append(...actions, save);
   form.append(...fields, buttons);
@@ -129,7 +130,7 @@ async function saveInstallation(section, payload, note = 'Saved.') {
 }
 
 export function statusBadge(text, state) {
-  const badge = element('span', text, 'setting-state');
+  const badge = node('span', 'setting-state', text);
   if (state) badge.dataset.state = state;
   return badge;
 }
@@ -148,7 +149,7 @@ function appendConnectionStates(container, {
 
 function connectionRow(group, title, description, {manage, readOnly, ...status}) {
   const item = row(group, rowLabel(title, description));
-  const actions = element('div', '', 'connection-actions');
+  const actions = node('div', 'connection-actions');
   appendConnectionStates(actions, status);
   if (manage) {
     const label = readOnly ? 'View' : status.configured ? 'Manage' : 'Set up';
@@ -163,11 +164,11 @@ function restartNotice(group) {
 }
 
 function entriesList(entries, description, {edit, remove, test, status} = {}) {
-  const group = element('div', '', 'settings-group');
+  const group = node('div', 'settings-group');
   for (const entry of entries) {
     const item = row(group, rowLabel(entry.id, description(entry)));
-    const actions = element('div', '', 'row-actions');
-    const states = element('span', '', 'connection-states');
+    const actions = node('div', 'row-actions');
+    const states = node('span', 'connection-states');
     const renderStates = () => {
       states.replaceChildren();
       if (status) appendConnectionStates(states, status(entry));
@@ -192,14 +193,14 @@ function entriesList(entries, description, {edit, remove, test, status} = {}) {
 }
 
 function removeButton(label, action) {
-  const control = element('button', label, 'button quiet-danger');
+  const control = node('button', 'button quiet-danger', label);
   control.type = 'button';
   control.onclick = action;
   return control;
 }
 
 function connectionResult() {
-  const note = element('p', '', 'connection-test-result');
+  const note = node('p', 'connection-test-result');
   note.setAttribute('role', 'status');
   note.hidden = true;
   return note;
@@ -239,7 +240,7 @@ function editGitHub() {
   )));
   const checkResult = connectionResult();
   if (tokenSet) {
-    const check = element('button', 'Check connection', 'button');
+    const check = node('button', 'button', 'Check connection');
     check.type = 'button';
     check.onclick = () => void checkConnection(check, checkResult, 'github', {action: 'check'});
     actions.push(check);
@@ -316,7 +317,7 @@ function editChannel(type, entry = {}) {
 }
 
 function cancelEditButton(onReset) {
-  const cancel = element('button', 'Cancel edit', 'button');
+  const cancel = node('button', 'button', 'Cancel edit');
   cancel.type = 'button';
   cancel.onclick = onReset;
   return cancel;
@@ -511,7 +512,7 @@ function confirmCredential(title, person, submitLabel, commit) {
 }
 
 function showCredential(title, {person, password}, {activate} = {}) {
-  const user = element('p', `Username: ${person}`, 'installation-description');
+  const user = node('p', 'installation-description', `Username: ${person}`);
   const credential = settingField('generated', 'Password', {value: password});
   credential.classList.add('invite-credential');
   const input = credential.querySelector('input');
@@ -606,7 +607,7 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
       ? rowLabel('Waiting for password confirmation', 'Confirm the administrator password to let other people sign in.')
       : rowLabel('Private to this computer', 'Enable sharing to create sign-ins for other people.'));
     if (pendingUntil) {
-      const actions = element('div', '', 'row-actions');
+      const actions = node('div', 'row-actions');
       actionButton(actions, 'Generate new password', prepareAccess);
       actionButton(actions, 'Confirm password',
         () => confirmCredential('Administrator password', 'local-owner', 'Enable sharing', activateAdmin), true);
@@ -628,7 +629,7 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
     const details = [role, person === currentPerson && 'You', pendingPassword && 'Password not confirmed'].filter(Boolean);
     const item = row('access', rowLabel(person, details.join(' · ')));
     if (mode !== 'managed') continue;
-    const actions = element('div', '', 'row-actions');
+    const actions = node('div', 'row-actions');
     if (!owner) actionButton(actions, 'Change role', () => changeRole({person, adminRoot}));
     if (!owner || person === currentPerson) {
       if (pendingPassword) actionButton(actions, 'Confirm password',
@@ -665,8 +666,8 @@ function editSystem(key, state) {
 
 function systemValues(title, current, next, pending) {
   if (!pending) return rowLabel(title, String(current));
-  const values = element('span', '', 'system-values');
-  values.append(String(current), ' → ', element('b', String(next)), ' after restart');
+  const values = node('span', 'system-values');
+  values.append(String(current), ' → ', node('b', null, String(next)), ' after restart');
   return rowLabel(title, values);
 }
 
@@ -688,13 +689,13 @@ function renderSystem(state) {
 }
 
 function copyableSetup(label, text) {
-  const wrapper = element('label', label, 'span-form remote-setup');
-  const value = element('textarea');
+  const wrapper = node('label', 'span-form remote-setup', label);
+  const value = node('textarea');
   value.readOnly = true;
   value.spellcheck = false;
   value.rows = text.split('\n').length + 1;
   value.value = text;
-  const copy = element('button', 'Copy', 'button');
+  const copy = node('button', 'button', 'Copy');
   copy.type = 'button';
   copy.onclick = async () => {
     try {
@@ -744,7 +745,7 @@ export function renderRemoteMachines(remote, t3Connected, refresh) {
   if (t3Connected && !remote.url) {
     const item = row('remote-machines', rowLabel('Other computers can’t reach Flock yet',
       'Set the address for other computers in System settings, then restart Flock.'));
-    const open = element('a', 'Open System settings', 'button');
+    const open = node('a', 'button', 'Open System settings');
     open.href = '#system';
     item.append(open);
   }
