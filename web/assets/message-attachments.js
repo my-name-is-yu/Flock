@@ -123,6 +123,12 @@ function photoViewer() {
     event.preventDefault();
     show(index + (event.key === 'ArrowLeft' ? -1 : 1));
   });
+  reducedMotion.addEventListener('change', () => {
+    if (!dialog.open || !photos[index]?.mayAnimate) return;
+    const restoreFocus = stage.contains(document.activeElement);
+    show(index);
+    if (restoreFocus) close.focus();
+  });
   dialog.addEventListener('close', () => {
     stage.replaceChildren();
     photos = [];
