@@ -883,6 +883,52 @@ void selectedTaskFilesSurviveRestart() {
           "The protected attachment was sent or its failure was not safe to display");
 }
 
+void cancelledInitialFilesRequireReselection() {
+    Fixture f;
+    const Json files = Json::array({{{"name", "report.bin"}, {"mimeType", "application/octet-stream"}, {"dataBase64", "AEH/"}}});
+    const auto select = [](Step next) -> Step {
+        return [next](const ModelInput& input) {
+            auto call = next(input);
+            call.args["attachments"] = Json::array({{{"messageId", input.event.at("messageId")}, {"attachmentId", "1"}}});
+            return call;
+        };
+    };
+    constexpr auto launch = "Start report.bin";
+    f.script(launch, {select(start())});
+    ConversationIntake(*f.store).receive(localOwner, f.routing(), "file-launch", launch, 0, files);
+    f.runtime->runConversations();
+    const auto original = TaskList(*f.store).tasks("alpha").front().task.id;
+    check(f.task(original).at("initialAttachments").size() == 1 && f.t3.sent.empty(),
+          "the selected file was not queued before the first T3 send");
+
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(original).task, 0), "cancel");
+    f.reach(original, "cancelled");
+    check(f.t3.sent.empty(), "the cancelled task sent its file to T3");
+    Id cancellation = 0;
+    for (const auto& row : TaskHistory(*f.store).history(original))
+        if (row.at("kind") == "cancelled") cancellation = row.at("id").get<Id>();
+    check(cancellation > 0, "the cancelled task had no resume anchor");
+
+    constexpr auto resume = "Resume report.bin";
+    f.script(resume, {start({{"request", resume}, {"sourceResultMessageId", cancellation}, {"resume", true}})});
+    f.receive("resume-without-file", resume, cancellation);
+    check(f.lastTurn().at(0).at("result").at("ok") == false && TaskList(*f.store).tasks("alpha").size() == 1 && f.t3.sent.empty(),
+          "resume silently dropped files that T3 did not confirm");
+
+    f.script(resume, {select(start({{"request", resume}, {"sourceResultMessageId", cancellation}, {"resume", true}}))});
+    ConversationIntake(*f.store).receive(localOwner, f.routing(), "resume-with-file", resume, cancellation, files);
+    f.runtime->runConversations();
+    Id resumed = 0;
+    for (const auto& item : TaskList(*f.store).tasks("alpha"))
+        if (item.task.id != original) resumed = item.task.id;
+    check(resumed > 0, "explicitly reselected files did not resume the task");
+    f.reach(resumed, "running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.back().attachments.size() == 1 &&
+              f.t3.sent.back().attachments.front().name == "report.bin" &&
+              f.t3.sent.back().attachments.front().bytes == std::string("\0A\xff", 3),
+          "the explicitly reselected file was not delivered unchanged");
+}
+
 void resumedChoicesRecoverSavedSessionCalls() {
     for (const bool started : {false, true}) {
         Fixture f;
@@ -4443,6 +4489,7 @@ int main(int argc, char** argv) {
         latestSuggestionsTakePrecedenceOverAnInheritedQuestion();
         attachedChoiceCanBeInspectedBeforeAnswering();
         selectedTaskFilesSurviveRestart();
+        cancelledInitialFilesRequireReselection();
         resumedChoicesRecoverSavedSessionCalls();
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();

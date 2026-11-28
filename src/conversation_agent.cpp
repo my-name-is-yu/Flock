@@ -694,7 +694,7 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = taskOperations.startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume,
-                                                             selectedSession);
+                                                             selectedSession, !files.empty());
         if (args.contains("projectId")) taskRouting.rememberT3Project(bot, destination.environmentId, destination.projectId);
         if (const auto selected = args.find("environments"); selected != args.end())
             for (std::size_t i = 0; i < targets.size(); ++i)

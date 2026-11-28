@@ -42,7 +42,8 @@ public:
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute&, Id messageId,
-                             const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr);
+                             const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr,
+                             bool attachmentsSelected = false);
     bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
                            const TaskChange* change, std::vector<TaskAttachmentRef> attachments = {});
     Id submitRequest(const Intake&, const Person* requester);

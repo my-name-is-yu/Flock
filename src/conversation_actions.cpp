@@ -1034,10 +1034,12 @@ void rememberSourceResult(TaskData& task, const OutboxSource& source) {
 
 Id TaskOperations::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
                                          Id messageId, const std::optional<OutboxSource>& reference, bool resume,
-                                         const WorkSession* selectedSession) {
+                                         const WorkSession* selectedSession, bool attachmentsSelected) {
     const auto prior = resume ? std::optional{taskRecords.load(reference.value().taskId)} : std::nullopt;
     if (prior && std::ranges::any_of(prior->cancelledInstructions, [](const auto& item) { return !item.attachments.empty(); }))
         throw ToolError("The cancelled task has instructions with unresolved file delivery. Check the T3 Session and start a new task with the files you want to send.");
+    if (prior && !prior->initialAttachments.empty() && !attachmentsSelected)
+        throw ToolError("The cancelled task has files with unconfirmed delivery. Check the T3 Session and re-select the files to resume.");
     if (selectedSession) secretStorage.redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, reference ? &*reference : nullptr);
