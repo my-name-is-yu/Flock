@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "session_participation_records.hpp"
 #include "channel_delivery_queue.hpp"
 #include "conversation_messages.hpp"
 #include "flock/board_inbox.hpp"
@@ -908,12 +909,12 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
     }
     const auto wake = message.routing.find("sessionWake");
     const bool isWake = wake != message.routing.end();
-    const bool stoppedWake = isWake && sessionParticipationStorage.sessionParticipationStopped(
-                                           message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
+    const bool stoppedWake =
+        isWake && sessionParticipations.stopped(message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
     const bool usesSessionOrigin =
         message.principalSource == PrincipalSource::session || (isWake && message.routing.contains("sessionOrigin"));
     // A wake can be queued before a stop commits and reach this turn after it commits.
-    if (stoppedWake || (usesSessionOrigin && !sessionParticipationStorage.activeSessionOrigin(message))) {
+    if (stoppedWake || (usesSessionOrigin && !sessionParticipations.activeOrigin(message))) {
         finishTurn(message, "The T3 Session participation has ended.", nullptr, ConversationReplyRoute::session_access);
         return false;
     }

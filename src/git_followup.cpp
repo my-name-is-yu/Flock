@@ -1,4 +1,5 @@
 #include "journal_git.hpp"
+#include "session_participation_records.hpp"
 #include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "conversation_turns.hpp"
@@ -73,7 +74,7 @@ LIMIT 2
     const auto& connectionEnvironment =
         destination.gatewayEnvironmentId.empty() ? destination.environmentId : destination.gatewayEnvironmentId;
     if (pr.next() || !t3EnvironmentConnected(database, connectionEnvironment) ||
-        sessionParticipationStorage.sessionParticipationStopped(message.bot, destination, message.id))
+        sessionParticipations.stopped(message.bot, destination, message.id))
         return std::nullopt;
 
     std::string requester;
@@ -84,7 +85,7 @@ LIMIT 2
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
             const auto actor = conversationMessages.actor(source);
             if (permissions.allows(actor, Action::bot_talk, source.bot) &&
-                (source.principalSource != session || sessionParticipationStorage.activeSessionOrigin(source)))
+                (source.principalSource != session || sessionParticipations.activeOrigin(source)))
                 requester = policyApprovals.policyOrigin(source).requester;
         }
     } else if (const auto& requesterId = task.requester) {

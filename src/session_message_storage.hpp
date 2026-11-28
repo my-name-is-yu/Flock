@@ -22,7 +22,7 @@ class JournalStorage;
 class OutboxStorage;
 class PolicyApprovals;
 class SecretStorage;
-class SessionParticipationStorage;
+class SessionParticipationRecords;
 class SessionReadStorage;
 class TaskRecords;
 class TaskRunReports;
@@ -40,12 +40,12 @@ public:
                           ConversationMessages& conversationMessages, ConversationTools& conversationTools, GitStorage& gitStorage,
                           const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
                           OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
-                          SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
+                          SessionParticipationRecords& sessionParticipations, SessionReadStorage& sessionReadStorage,
                           TaskRecords& taskRecords, TaskRunReports& taskRunReports)
         : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           conversationTools(conversationTools), gitStorage(gitStorage), permissions(permissions), path(path),
           journalStorage(journalStorage), outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
-          sessionParticipationStorage(sessionParticipationStorage), sessionReadStorage(sessionReadStorage), taskRecords(taskRecords),
+          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), taskRecords(taskRecords),
           taskRunReports(taskRunReports) {}
 
     bool persistPendingReceipt(Id message);
@@ -84,7 +84,7 @@ private:
     OutboxStorage& outboxStorage;
     PolicyApprovals& policyApprovals;
     SecretStorage& secretStorage;
-    SessionParticipationStorage& sessionParticipationStorage;
+    SessionParticipationRecords& sessionParticipations;
     SessionReadStorage& sessionReadStorage;
     TaskRecords& taskRecords;
     TaskRunReports& taskRunReports;

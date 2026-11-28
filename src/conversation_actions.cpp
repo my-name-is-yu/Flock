@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "session_participation_records.hpp"
 #include "conversation_messages.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/decision_errors.hpp"
@@ -301,13 +302,12 @@ bool SessionMessageStorage::recordSessionSendRun(Id message, const SessionSendRe
     const auto& outcome = receipt.outcome;
     using enum SessionSendOutcome::Status;
     if (outcome.status != Started && outcome.status != Queued) return false;
-    database.exec(
-        "INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
-        "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
-        {message, receipt.bot, target.environmentId, target.threadId, outcome.run.runId, receipt.title,
-         interruptAt || !receipt.notify || sessionParticipationStorage.sessionParticipationStopped(receipt.bot, target, message) ? 1 : 0,
-         target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, outcome.status == Queued ? "queued" : "started",
-         secretStorage.redactor(receipt.bot).text(outcome.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
+    database.exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified,gateway_environment,"
+                  "task_id,action_id,delivery,link,interrupt_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),?,?,?)",
+                  {message, receipt.bot, target.environmentId, target.threadId, outcome.run.runId, receipt.title,
+                   interruptAt || !receipt.notify || sessionParticipations.stopped(receipt.bot, target, message) ? 1 : 0,
+                   target.gatewayEnvironmentId, receipt.taskId, receipt.actionId, outcome.status == Queued ? "queued" : "started",
+                   secretStorage.redactor(receipt.bot).text(outcome.run.link), interruptAt ? Json(*interruptAt) : Json(nullptr)});
     if (!receipt.taskId || receipt.actionId.empty()) return true;
     auto task = taskRecords.load(receipt.taskId);
     if (terminal(task)) return true;
@@ -570,8 +570,7 @@ void SessionMessageStorage::addressSessionSend(SessionSend& send) {
         throw ToolError("Use the Session identifiers");
     send.target = {command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
     send.resource = {Action::t3_send, Resource::sessionRead(send.target.environmentId, send.target.threadId).target};
-    if (sessionParticipationStorage.sessionParticipationStopped(message.bot, send.target, message.id))
-        throw ToolError(participationStopped);
+    if (sessionParticipations.stopped(message.bot, send.target, message.id)) throw ToolError(participationStopped);
     if (permissions.forbidden(message.bot, send.resource.action, send.resource.target))
         throw ToolError(std::string(approvalError(ApprovalGate::denied)));
     if (send.namesSession() && !sessionReadStorage.connectedSessionAccess(message, send.target)) throw ToolError(sessionUnavailable);
@@ -651,7 +650,7 @@ std::optional<CallOutcome> SessionMessageStorage::approveSessionSend(SessionSend
         transaction.commit();
         return advance;
     };
-    if (sessionParticipationStorage.sessionParticipationStopped(message.bot, target, id)) return fail(participationStopped);
+    if (sessionParticipations.stopped(message.bot, target, id)) return fail(participationStopped);
     if (!send.error.empty()) return fail(send.error);
     if (send.namesSession() && !sessionReadStorage.connectedSessionAccess(message, target)) return fail(sessionUnavailable);
     auto origin = policyApprovals.policyOrigin(message);
@@ -962,9 +961,8 @@ void SessionMessageStorage::wakeSessionMessages(T3& t3, std::stop_token shutdown
                 !database.query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
                 return false;
             const auto message = conversationMessages.load(wait.message);
-            return !sessionParticipationStorage.sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
-                   (message.principalSource != conversation::PrincipalSource::session ||
-                    sessionParticipationStorage.activeSessionOrigin(message)) &&
+            return !sessionParticipations.stopped(wait.bot, wait.target, wait.message) &&
+                   (message.principalSource != conversation::PrincipalSource::session || sessionParticipations.activeOrigin(message)) &&
                    sessionReadStorage.connectedSessionAccess(message, wait.target);
         };
         // A revoked connection settles the wait silently, including on restart.

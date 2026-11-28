@@ -447,13 +447,13 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                             {actor.id, target.environmentId})
                      .next())
                 throw Conflict(unavailable);
-            if (message.routing.contains("sessionOrigin") && !activeSessionOrigin(message)) throw Conflict(stopped);
+            if (message.routing.contains("sessionOrigin") && !sessionParticipations.activeOrigin(message)) throw Conflict(stopped);
 
             auto inviter = participation(message.bot);
             auto depth = message.routing.value("sessionInvitationDepth", Id{0});
             Id inviterId = 0;
             if (inviter.next()) {
-                if (sessionParticipationStopped(message.bot, target, message.id)) throw Conflict(stopped);
+                if (sessionParticipations.stopped(message.bot, target, message.id)) throw Conflict(stopped);
                 if (inviter.string(1) != actor.id) throw Conflict(unavailable);
                 inviterId = inviter.number(0);
             } else {
@@ -467,7 +467,7 @@ WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND o.tool='delegat
                 if (!launch.next()) throw Conflict("Invite a Bot into a Session you participate in or launched");
                 const SessionTarget origin{launch.string(3), launch.string(4)};
                 if (!origin.environmentId.empty() &&
-                    !activeSessionOrigin(launch.string(1), actor.id, origin, target.environmentId, launch.number(0)))
+                    !sessionParticipations.activeOrigin(launch.string(1), actor.id, origin, target.environmentId, launch.number(0)))
                     throw Conflict(unavailable);
                 depth = std::max(depth, launch.number(2));
             }
@@ -872,7 +872,7 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     result["ok"] = true;
     conversationTools.saveTurnResults(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
-    if (message.principalSource == conversation::PrincipalSource::session && !activeSessionOrigin(message) &&
+    if (message.principalSource == conversation::PrincipalSource::session && !sessionParticipations.activeOrigin(message) &&
         conversationTurns.isNextTurn(message.id)) {
         conversationTurns.finishTurn(message, stopped.summary(), nullptr, ConversationReplyRoute::session_left);
         transaction.commit();
@@ -882,14 +882,14 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     return true;
 }
 
-bool SessionParticipationStorage::activeSessionOrigin(const conversation::Message& message) const {
+bool SessionParticipationRecords::activeOrigin(const conversation::Message& message) const {
     const auto& origin = message.routing.at("sessionOrigin");
     const SessionTarget target{origin.at("environmentId"), origin.at("threadId")};
-    return activeSessionOrigin(message.bot, message.admittedActor.id, target, target.environmentId, message.id);
+    return activeOrigin(message.bot, message.admittedActor.id, target, target.environmentId, message.id);
 }
 
-bool SessionParticipationStorage::activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                                                      std::string_view destinationEnvironment, Id message) const {
+bool SessionParticipationRecords::activeOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
+                                               std::string_view destinationEnvironment, Id message) const {
     return database
         .query(R"SQL(
 SELECT 1 FROM session_participations p
@@ -903,7 +903,7 @@ WHERE p.bot_id=? AND p.environment_id=? AND p.thread_id=? AND p.person_id=? AND 
         .next();
 }
 
-bool SessionParticipationStorage::sessionParticipationStopped(std::string_view bot, const SessionTarget& target, Id message) const {
+bool SessionParticipationRecords::stopped(std::string_view bot, const SessionTarget& target, Id message) const {
     return database
         .query(R"SQL(
 SELECT 1 FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?

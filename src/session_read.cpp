@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "session_participation_records.hpp"
 #include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "session_read_storage.hpp"
@@ -711,7 +712,7 @@ bool SessionReadStorage::connectedSessionAccess(const conversation::Message& mes
         const SessionTarget parent{origin->at("environmentId"), origin->at("threadId")};
         const auto authorized = [&] {
             const auto actor = conversationMessages.actor(message);
-            return sessionParticipationStorage.activeSessionOrigin(message.bot, actor.id, parent, target.environmentId, message.id) &&
+            return sessionParticipations.activeOrigin(message.bot, actor.id, parent, target.environmentId, message.id) &&
                    policy.allows(actor, Action::bot_decide, message.bot);
         };
         if (target == parent) return authorized();

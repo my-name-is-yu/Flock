@@ -1,4 +1,5 @@
 #include "session_dispatch_lock.hpp"
+#include "session_participation_records.hpp"
 #include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "runtime_outbox_dispatch.hpp"
@@ -456,17 +457,16 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
             const auto source = conversationMessages.load(current.sourceMessageId.value());
             const auto actor = conversationMessages.actor(source);
             const auto& parent = origin->target;
-            if (!sessionParticipationStorage.activeSessionOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
+            if (!sessionParticipations.activeOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
                 !policy.allows(actor, Action::bot_decide, cmd.ownerBotId) ||
                 !policy.allows(cmd.ownerBotId, Action::environment_inspect, parent.environmentId))
                 return false;
             if (!sendsToSession) return true;
         }
-        if (sessionParticipationStorage.sessionParticipationStopped(
-                cmd.ownerBotId,
-                {cmd.environmentId, cmd.target.threadId,
-                 cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId},
-                current.sourceMessageId.value_or(0)))
+        if (sessionParticipations.stopped(cmd.ownerBotId,
+                                          {cmd.environmentId, cmd.target.threadId,
+                                           cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId},
+                                          current.sourceMessageId.value_or(0)))
             return false;
         if (!usesExistingSession || !current.selectedSession) return cmd.tool != CommandTool::start_in_session;
         const auto& selected = *current.selectedSession;

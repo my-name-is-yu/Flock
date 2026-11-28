@@ -88,7 +88,7 @@ struct Runtime::Impl {
           runs(storage.database, storage.journalStorage, storage.secretStorage, storage.taskEvents, storage.taskRecords,
                storage.waitStorage, storage.outboxStorage, t3, updates, questions, reports, options.clock, workers.stopToken()),
           dispatch(storage.database, storage.botLifecycle, storage.conversationMessages, storage.journalStorage, storage.path,
-                   storage.policyApprovals, storage.sessionParticipationStorage, storage.sessionReadStorage, storage.taskEvents,
+                   storage.policyApprovals, storage.sessionParticipations, storage.sessionReadStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.taskRunReports, storage.waitStorage, storage.outboxStorage, t3, policy,
                    updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, options.intake,
                    workers.stopToken()),

@@ -12,6 +12,7 @@
 namespace flockv0 {
 class Policy;
 class ConversationStorage;
+class SessionParticipationRecords;
 class ConversationMessages;
 class ConversationTools;
 class SessionMessageStorage;
@@ -40,16 +41,13 @@ public:
                                 TaskRecords& taskRecords, const WebIdentityState& webIdentity, Policy& permissions,
                                 ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
                                 ConversationTools& conversationTools, SessionMessageStorage& sessionMessageStorage,
-                                BotLifecycleStorage& botLifecycle, TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
+                                BotLifecycleStorage& botLifecycle, TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
+                                SessionParticipationRecords& sessionParticipations)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
           permissions(permissions), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           conversationTools(conversationTools), sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle),
-          taskOperations(taskOperations), policyApprovals(policyApprovals) {}
+          taskOperations(taskOperations), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations) {}
 
-    bool activeSessionOrigin(const conversation::Message&) const;
-    bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                             std::string_view destinationEnvironment, Id message) const;
-    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&, Id message) const;
     SessionStop stopSessionParticipation(SessionReadStorage&, const Person&, std::string_view bot, const SessionTarget&, SessionExit,
                                          Id message = 0);
     void stopPausedBotParticipation(std::string_view bot);
@@ -73,6 +71,7 @@ private:
     BotLifecycleStorage& botLifecycle;
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;
+    SessionParticipationRecords& sessionParticipations;
     std::mutex sessionQueueCancellationMutex;
 };
 }
