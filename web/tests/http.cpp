@@ -1281,7 +1281,7 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
                 std::string write;
                 for (const auto* kind : {"instruction_accepted", "instruction_delivered"})
                     write += "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES(" + std::to_string(task) +
-                             ",unixepoch(),'" + kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1)," +
+                             ",CAST(strftime('%s','now') AS INTEGER),'" + kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1)," +
                              std::to_string(message) + ",1);";
                 check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
                       "could not record the historical delivery");
@@ -1337,8 +1337,8 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     check(opened == SQLITE_OK, "could not open the fixture writer");
     sqlite3_busy_timeout(db.get(), 2000);
     const auto event = [&](std::string_view kind) {
-        return "(" + std::to_string(task) + ",unixepoch(),'" + std::string(kind) + "',json_object('messageId'," + std::to_string(message) +
-               ",'step',1)," + std::to_string(message) + ",1)";
+        return "(" + std::to_string(task) + ",CAST(strftime('%s','now') AS INTEGER),'" + std::string(kind) +
+               "',json_object('messageId'," + std::to_string(message) + ",'step',1)," + std::to_string(message) + ",1)";
     };
     const auto write = "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES" + event("instruction_accepted") +
                        "," + event("instruction_delivered");
