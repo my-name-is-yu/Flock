@@ -531,7 +531,8 @@ class Fixture(BaseHTTPRequestHandler):
                 active = state.get("botRunContinuation") or state.get("botRun")
             if state.get("personFinished") and state["botRunStatus"] == "queued":
                 active = None
-        summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
+        summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest,
+                                             "archived": state.get("threadArchived", False),
                                              "pendingRequestCount": count}
         if state.get("sessionWakeFixture"):
             summary |= {"title": "Staging follow-up", "status": "running", "runCount": 2,

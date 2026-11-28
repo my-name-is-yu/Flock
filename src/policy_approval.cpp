@@ -94,6 +94,28 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
         auto owner = database.query("SELECT person FROM bot_owners WHERE bot=?", {origin.bot});
         origin.requester = owner.next() ? owner.string(0) : localOwner.id;
     }
+    auto reply = database.query(R"SQL(
+SELECT answer.id,json_extract(event.data,'$.policyReply.personId'),json_extract(answer.data,'$.messageId')
+FROM events event JOIN journal answer ON answer.id=json_extract(event.data,'$.policyReply.anchor') AND answer.task_id=event.task_id
+WHERE event.id=? AND event.task_id=? AND json_extract(event.data,'$.kind')='policy_outcome'
+  AND answer.kind='user_answer' AND answer.id>?
+)SQL",
+                                {task.eventId, id, source});
+    if (reply.next()) {
+        const auto person = reply.string(1);
+        const auto messageId = reply.number(2);
+        const auto fromReply = [&] {
+            if (!messageId) return true;
+            const auto message = conversationMessages.load(messageId);
+            return !message.routing.contains("sessionWake") && !message.routing.contains("sessionInvitation") &&
+                   !message.routing.contains("botMessage") && policyOrigin(message).requester == person;
+        };
+        if (!person.empty() && fromReply()) {
+            origin.anchor = reply.number(0);
+            origin.requester = person;
+            origin.background = false;
+        }
+    }
     return origin;
 }
 
@@ -182,6 +204,17 @@ WHERE a.status IN ('pending','approved')
 
 void PolicyApprovals::consumePolicyApproval(std::string_view operation) {
     database.exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'", {operation});
+}
+
+void PolicyApprovals::keepUnsentTaskApproval(const TaskData& task, std::string_view action, Id readyGeneration, bool sendStarted,
+                                             Seconds now) {
+    // The caller proved nothing was sent and will save the next generation in this transaction.
+    // The next claim still checks the saved approval against the current policy and exact payload.
+    database.exec(R"SQL(
+UPDATE policy_approvals SET status='approved',generation=?
+WHERE operation=? AND task=? AND generation=? AND status=? AND (expires_at IS NULL OR expires_at>?)
+)SQL",
+                  {task.generation + 1, "outbox/" + std::string(action), task.id, readyGeneration, sendStarted ? "used" : "approved", now});
 }
 
 ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Resource& resource, std::string_view operation,

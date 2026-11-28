@@ -881,28 +881,32 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
     return evidence;
 }
 
-bool followUpReady(Client& client, const Command& command) {
+enum class FollowUp { Ready, Busy, SessionUnavailable };
+
+FollowUp followUpReadiness(Client& client, const Command& command) {
     const auto settled = waitForDelegatedWork(client, command.target, 1);
     const auto& effective = settled.parent.runId;
     const auto& resultRun = settled.resultRunId;
     if (settled.parent.timedOut || !terminal(settled.parent.status) || resultRun.empty() ||
         !ownsResult(client, command.target, effective, resultRun))
-        return false;
+        return FollowUp::Busy;
     const auto response = threadHead(client, command.target.threadId);
     const auto& info = response.at("thread");
+    // Waiting does not bring back a Session that was archived or moved, so the person has to see it.
+    if (field(info, "projectId") != command.projectId || boolean(info, "archived")) return FollowUp::SessionUnavailable;
     // Newer settled Runs, such as replies from Bots invited into the Session, do not block a follow-up.
     // The Session agent sees them, and Flock attributes the follow-up by the Run that the send returns.
-    if (field(info, "projectId") != command.projectId || !member(info, "activeRunId").is_null() || boolean(info, "archived") ||
-        position(member(info, "pendingRequestCount")) != 0)
-        return false;
+    if (!member(info, "activeRunId").is_null() || position(member(info, "pendingRequestCount")) != 0) return FollowUp::Busy;
     // A held queue can exist even without an active Run.
     const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
-    if (!array(queue, "items").empty()) return false;
+    if (!array(queue, "items").empty()) return FollowUp::Busy;
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
     const auto& current = checked.at("thread");
-    return member(current, "activeRunId").is_null() && !boolean(current, "archived") &&
-           field(current, "latestRunId") == field(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
+    if (boolean(current, "archived")) return FollowUp::SessionUnavailable;
+    const bool unchanged = member(current, "activeRunId").is_null() && field(current, "latestRunId") == field(info, "latestRunId") &&
+                           position(member(current, "pendingRequestCount")) == 0;
+    return unchanged ? FollowUp::Ready : FollowUp::Busy;
 }
 
 Delivery answer(Client& client, const Command& command, bool& invoked) {
@@ -1083,8 +1087,12 @@ public:
                     previous = threadHead(client, command.target.threadId).at("thread");
                     if (field(previous, "projectId") != command.projectId || boolean(previous, "archived"))
                         return {Outcome::Settings, {}, "The selected T3 Session moved projects or was archived", true};
-                } else if (!followUpReady(client, command)) {
-                    return result(Outcome::NotAccepted, "T3 has other work or the assigned Run has not settled");
+                } else {
+                    const auto readiness = followUpReadiness(client, command);
+                    if (readiness == FollowUp::SessionUnavailable)
+                        return {Outcome::Settings, {}, "The T3 Session moved projects or was archived", true};
+                    if (readiness == FollowUp::Busy)
+                        return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                 }
                 invoked = true;
                 reply = client.call("t3_thread_send", {{"threadId", command.target.threadId},

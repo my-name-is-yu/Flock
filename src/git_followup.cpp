@@ -82,7 +82,7 @@ LIMIT 2
     if (task.sourceMessageId) {
         const auto source = conversationMessages.load(*task.sourceMessageId);
         requesterBot = source.bot;
-        if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
+        if (!source.botOrigin && !source.routing.contains("sessionWake")) {
             const auto actor = conversationMessages.actor(source);
             if (permissions.allows(actor, Action::bot_talk, source.bot) &&
                 (source.principalSource != session || sessionParticipations.activeOrigin(source)))
@@ -169,6 +169,8 @@ Json GitStorage::applyGitTaskDecision(const conversation::Message& message, cons
     const auto& event = message.routing.at("gitEvent");
     auto task = taskRecords.load(event.at("taskId").get<Id>());
     if (!taskRecords.externalWaitingNote(task)) throw ToolError("The task is no longer waiting for an external event");
+    if (!task.actionId.empty() || task.activeRun || !task.pendingInstructions.empty())
+        throw ToolError("The task still has work to process");
     const bool replacesCheck = task.state != TaskState::external_waiting;
     const auto& args = decision.args;
     if (decision.tool == "wait_for_event") {
@@ -179,7 +181,6 @@ Json GitStorage::applyGitTaskDecision(const conversation::Message& message, cons
     } else {
         if (!gitNotificationCanComplete(message)) throw ToolError("This notification does not confirm a pull request closed or merged");
         if (args.size() != 1) throw ToolError("Provide a report");
-        if (!task.pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
         taskRecords.completeWithReport(task, text(args, "report", limits::session_prompt::maxDecisionTextBytes, true), decision.reason);
     }
     if (replacesCheck) TaskEvents(database).consumeEvent(task);

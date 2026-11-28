@@ -37,6 +37,10 @@ WITH slots AS MATERIALIZED (
     (state IN ('queued','cancelling') OR (state='deciding' AND environment_id<>'')) OR replanning=1
   )
   UNION
+  SELECT task.id FROM tasks task JOIN outbox action ON action.id=task.action_id AND action.task_id=task.id
+  WHERE task.state='sending' AND task.project_id='' AND task.active_run IS NULL
+    AND action.phase='ready' AND action.tool='delegate' AND action.project_id=''
+  UNION
   SELECT task.id FROM tasks task JOIN waits wait ON wait.task_id=task.id AND wait.resolution IS NULL
   WHERE task.state='waiting' AND (
     (task.project_id='' AND wait.reason='settings') OR
@@ -91,12 +95,11 @@ bool runtime::TaskScheduler::selectProject(TaskData& task) {
     return updates.change(
                task,
                [&](TaskData& current) {
-                   if (shutdown.stop_requested()) return false;
+                   if (shutdown.stop_requested() || current.replanning || current.state != task.state || !current.projectId.empty() ||
+                       current.environmentId != task.environmentId || current.gatewayEnvironmentId != task.gatewayEnvironmentId ||
+                       current.actionId != task.actionId)
+                       return false;
                    taskRouting.applyProjectCatalog(current, catalog);
-                   if (current.state == TaskState::queued && current.projectId.empty()) {
-                       if (current.eventId == 0) taskEvents.event(current, "intake", {{"kind", "intake"}});
-                       current.state = TaskState::deciding;
-                   }
                    current.t3CheckAt = current.state == TaskState::waiting ? std::optional{now + 5} : std::nullopt;
                    return true;
                },
@@ -107,6 +110,7 @@ bool runtime::TaskScheduler::selectProject(TaskData& task) {
 void runtime::TaskScheduler::activate(TaskData task) {
     if (task.projectId.empty() && !selectProject(task)) return;
     updates.change(task, [&](TaskData& current) {
+        if (current.state != task.state || current.replanning) return false;
         auto turn = database.query("SELECT 1 FROM task_project_slots WHERE id=? AND blocker_id IS NULL", {current.id});
         if (!turn.next()) return false;
         if (!current.actionId.empty()) {

@@ -75,10 +75,15 @@ void TaskRouting::assignProject(TaskData& task, std::string_view project) {
     rememberT3Project(task.botId, task.environmentId, project);
 }
 
+std::string TaskRouting::selectT3Project(const std::vector<T3Project>& projects, std::string_view preferred, std::string_view remembered) {
+    for (const auto id : {preferred, remembered})
+        if (std::ranges::find(projects, id, &T3Project::id) != projects.end()) return std::string(id);
+    return projects.size() == 1 ? projects.front().id : std::string{};
+}
+
 void TaskRouting::applyProjectCatalog(TaskData& task, const ProjectCatalog& catalog) {
     const auto& bot = task.botId;
     const auto& environment = task.environmentId;
-    const auto pending = std::exchange(task.pendingDestination, std::nullopt);
     const auto showSettings = [&](std::string_view text) {
         const auto wait = waitStorage.currentWait(task.id);
         if (!wait || wait->reason() != WaitReason::settings || wait->text != text)
@@ -96,12 +101,22 @@ void TaskRouting::applyProjectCatalog(TaskData& task, const ProjectCatalog& cata
         showSettings("Add or unarchive a project in this T3 environment.");
         return;
     }
-    const auto preferred = [&](std::string_view id) { return std::ranges::find(projects, id, &T3Project::id); };
-    auto selected = pending ? preferred(pending->route.projectId) : projects.end();
-    if (selected == projects.end()) selected = preferred(remembered);
-    if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
+    const auto& pending = task.pendingDestination;
+    const auto preferred = pending && pending->route.environmentId == environment ? pending->route.projectId : std::string{};
+    const auto selected = selectT3Project(projects, preferred, remembered);
+    if (selected.empty()) {
+        std::string text = "Choose a project for this task in its Bot conversation. Available project IDs include ";
+        constexpr std::size_t displayedProjects = 6;
+        for (std::size_t i = 0; i < std::min(displayedProjects, projects.size()); ++i) {
+            if (i > 0) text += ", ";
+            text += bounded(projects[i].id, 256);
+        }
+        showSettings(text + ".");
+        return;
+    }
     waitStorage.clearWait(task, "connection_restored");
+    task.pendingDestination.reset();
     task.state = TaskState::queued;
-    if (selected != projects.end()) assignProject(task, selected->id);
+    assignProject(task, selected);
 }
 }

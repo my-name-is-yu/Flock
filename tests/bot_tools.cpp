@@ -651,19 +651,28 @@ void protectedArgumentsDoNotChangeToolTargets() {
     const auto invoke = [](Json arguments) {
         return call("mcp_call_tool", {{"server", "fixture"}, {"name", "lookup"}, {"arguments", std::move(arguments)}});
     };
-    const auto steps = f.batch({writeFile(marker + ".txt"), invoke({{"query", {{marker, "protected key"}, {"[redacted]", "public key"}}}}),
-                                writeFile("public-arguments.txt")});
-    check(steps.size() == 3 && steps[0].at("result").at("ok") == false && steps[1].at("result").at("ok") == false &&
-              steps[2].at("result").at("ok") == true && f.mcp->calls == calls && !fs::exists(workspace / (marker + ".txt")) &&
-              !fs::exists(workspace / "[redacted].txt") && read(workspace / "public-arguments.txt") == "Fixture data",
-          "A protected path or structured key changed an effect, or a safe sibling did not execute");
-    const auto persisted =
-        f.sql("SELECT decision || result FROM conversation_steps WHERE step=1 AND message_id=" + std::to_string(f.lastMessage));
-    check(persisted.find(marker) == persisted.npos && steps.dump().find(marker) == std::string::npos &&
+    const auto protectedArgs = invoke({{"query", {{marker, "protected key"}, {"[redacted]", "public key"}}}});
+    const auto steps = f.batch({writeFile(marker + ".txt"), protectedArgs, writeFile("public-arguments.txt")});
+    check(steps.size() == 3 && steps[0].at("result").at("ok") == false && steps[1].at("result").at("notRun") == true &&
+              steps[2].at("result").at("notRun") == true && f.mcp->calls == calls && !fs::exists(workspace / (marker + ".txt")) &&
+              !fs::exists(workspace / "[redacted].txt") && !fs::exists(workspace / "public-arguments.txt"),
+          "A protected path changed an effect or let a later mutation run");
+    const auto recorded = [&] {
+        return f.sql("SELECT group_concat(decision || result) FROM conversation_steps WHERE message_id=" + std::to_string(f.lastMessage));
+    };
+    const auto persistedBatch = recorded();
+    const auto rejected = f.run(protectedArgs);
+    check(rejected.at("ok") == false && !rejected.value("notRun", false) && f.mcp->calls == calls,
+          "The protected structured key reached MCP");
+    const auto persistedCall = recorded();
+    check(persistedBatch.find(marker) == std::string::npos && persistedCall.find(marker) == std::string::npos &&
+              steps.dump().find(marker) == std::string::npos && rejected.dump().find(marker) == std::string::npos &&
               f.model.content.dump().find(marker) == std::string::npos &&
               Conversations(*f.store).conversation("alpha").dump().find(marker) == std::string::npos,
           "Rejected arguments exposed protected material");
 
+    check(f.run(writeFile("public-arguments.txt")).at("ok") == true && read(workspace / "public-arguments.txt") == "Fixture data",
+          "A separate mutation with public arguments did not execute");
     const Json publicArgs{{"query", {{"[redacted]", "literal key"}}}};
     check(f.run(invoke(publicArgs)).at("data").at("arguments") == publicArgs && f.mcp->calls == calls + 1,
           "A public structured argument changed during dispatch");

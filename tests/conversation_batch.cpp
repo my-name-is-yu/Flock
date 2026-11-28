@@ -113,6 +113,7 @@ struct FakeT3 : T3 {
 
 struct FakeMcp : McpTools {
     std::atomic_int calls = 0, reads = 0;
+    bool invokeFails = false;
     std::function<void()> onHasServer, onReadOnlyHint, onRead;
     std::vector<std::string> serverNames() const override { return {"fixture"}; }
     bool hasServer(std::string_view server) const override {
@@ -126,7 +127,7 @@ struct FakeMcp : McpTools {
     Json discover(std::string_view, std::string_view, McpCollection, std::string_view) override { return {}; }
     McpToolResult invoke(std::string_view, std::string_view, const Json&) override {
         ++calls;
-        return {{{"observed", "invoked"}}, false};
+        return {{{"observed", "invoked"}}, invokeFails};
     }
     Json readResource(std::string_view, std::string_view) override {
         ++reads;
@@ -266,19 +267,22 @@ void approval(bool allow) {
     PolicyRules{*f.store}.setMode(localOwner, "supervised");
     f.receive({search, invoke, readResource});
     f.runtime->runConversations();
-    const auto slots = f.results("effect");
-    check(f.status() == "policy_waiting" && slots[0].at("result").at("ok") == true && slots[1].is_null() && slots[2].is_null() &&
-              f.t3.searches == 1 && f.mcp->calls == 0 && f.mcp->reads == 0 && f.model.turns.size() == 1,
+    const auto first = f.results();
+    check(f.status() == "policy_waiting" && first.at(0).at("result").at("ok") == true && f.results("effect", 2).at(0).is_null() &&
+              f.query("SELECT effect FROM conversation_steps" + f.whereStep(3)).empty() && f.t3.searches == 1 && f.mcp->calls == 0 &&
+              f.mcp->reads == 0 && f.model.turns.size() == 1,
           "Approval failed to hold a dependent call or preserve an independent result");
-    check(f.query("SELECT operation FROM policy_approvals") == "turn/" + std::to_string(f.message) + "/1/1",
-          "The policy approval lost its call index");
+    check(f.query("SELECT operation FROM policy_approvals") == "turn/" + std::to_string(f.message) + "/2/0",
+          "The policy approval lost its durable step and slot");
+    f.restart();
     f.decideApproval(allow);
     f.runtime->runConversations();
     f.checkFinished(2);
-    const auto results = f.results();
-    check(f.t3.searches == 1 && f.mcp->calls == (allow ? 1 : 0) && f.mcp->reads == 1 && results[0] == slots[0] &&
-              results[1].at("ok") == allow && results[2].at("data").at("invocations") == (allow ? 1 : 0),
-          "Approval settlement repeated a sibling or let a dependent call overtake it");
+    const auto invokeResult = f.results("result", 2).at(0);
+    const auto readResult = f.results("result", 3).at(0);
+    check(f.t3.searches == 1 && f.mcp->calls == (allow ? 1 : 0) && f.mcp->reads == (allow ? 1 : 0) && f.results() == first &&
+              invokeResult.at("ok") == allow && (allow ? readResult.at("data").at("invocations") == 1 : readResult.value("notRun", false)),
+          "Approval settlement repeated a sibling, ran a dependent read after denial, or let it overtake the invocation");
 }
 
 void checkStoreResponsiveDuringProviderCall(Fixture& f, std::function<void()>& providerCall) {
@@ -356,6 +360,30 @@ void failedActionSkipsLaterOnes() {
           "Later actions ran after an earlier one in the same response failed");
 }
 
+void failedCancelSkipsWorkspaceWriteAndMcpInvocation() {
+    Fixture f;
+    f.receive({call("cancel_task", {{"taskId", 4096}, {"generation", 0}}),
+               call("workspace_write_file", {{"path", "must-not-write.txt"}, {"text", "This file should not exist"}}), invoke, search});
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    check(f.t3.searches == 1 && f.results().at(0).at("result").at("ok") == true && f.results("result", 2).at(0).at("ok") == false &&
+              f.results("result", 3).at(0).value("notRun", false) && f.results("result", 4).at(0).value("notRun", false) &&
+              f.mcp->calls == 0 && !fs::exists(f.home / "workspaces" / "alpha" / "must-not-write.txt"),
+          "A workspace write or MCP invocation ran after a failed cancellation");
+}
+
+void failedMcpInvocationSkipsLaterCalls() {
+    Fixture f;
+    f.mcp->invokeFails = true;
+    f.receive({invoke, invoke, readResource, call("start_task", {{"request", "This task should not start"}})});
+    f.runtime->runConversations();
+    f.checkFinished(2);
+    check(f.mcp->calls == 1 && f.mcp->reads == 0 && f.results().at(0).at("ok") == false &&
+              f.results("result", 2).at(0).value("notRun", false) && f.results("result", 3).at(0).value("notRun", false) &&
+              f.results("result", 4).at(0).value("notRun", false) && f.query("SELECT count(*) FROM tasks") == "0",
+          "A failed MCP invocation did not stop its dependent read and later actions");
+}
+
 void gatewayOnlyCancelDoesNotCancelBatchSibling() {
     Fixture f;
     const auto task = TaskIntake(*f.store).submit({"alpha", "Keep this task running", "env", "project"});
@@ -373,12 +401,13 @@ void gatewayOnlyCancelDoesNotCancelBatchSibling() {
 void conflictingWorkspaceCalls() {
     Fixture f;
     f.receive({call("workspace_write_file", {{"path", "ordered.txt"}, {"text", "Fresh contents"}}),
-               call("workspace_read_file", {{"path", "ordered.txt"}})});
+               call("workspace_read_file", {{"path", "ordered.txt"}}), call("reply", {{"text", "Premature reply"}})});
     f.runtime->runConversations();
     f.checkFinished(2);
-    const auto results = f.results();
-    check(results[0].at("ok") == true && results[1].at("ok") == true && results[1].at("text") == "Fresh contents",
-          "The dependent workspace read overtook the write");
+    const auto results = f.results("result", 2);
+    check(f.results().at(0).at("ok") == true && results[0].at("ok") == true && results[0].at("text") == "Fresh contents" &&
+              results[1].value("notRun", false),
+          "The dependent workspace read overtook the write or the reply skipped model review");
 }
 
 void rejectedCall() {
@@ -411,14 +440,18 @@ void restartWithPartialResults() {
                                           ");"
                                           "INSERT INTO conversation_steps(message_id,step,attempt_id,decision,effect) VALUES(" +
                                           id + ",1,(SELECT id FROM model_attempts WHERE purpose='conversation_turn' AND message_id=" + id +
-                                          "),'" + decisions.dump() + "','" + slots.dump() + "');");
+                                          "),'" + decisions.dump() + "','" + slots.dump() +
+                                          "');"
+                                          "INSERT INTO conversation_steps(message_id,step,decision) VALUES(" +
+                                          id + ",2,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Later action\"}}]');");
     f.restart();
     f.runtime->runConversations();
     f.checkFinished(2);
     const auto results = f.results();
     check(f.model.turns.size() == 1 && f.t3.searches == 0 && f.t3.readinessChecks == 1 && f.mcp->calls == 0 && f.mcp->reads == 1 &&
               results[0] == completed && results[1].at("ready") == true && results[2].at("delivery") == "unknown" &&
-              results[3].at("ok") == true &&
+              results[3].at("ok") == true && f.results("result", 2).at(0).value("notRun", false) &&
+              f.query("SELECT count(*) FROM tasks") == "0" &&
               f.query("SELECT count(*) FROM model_attempts WHERE purpose='bot_tool' AND message_id=" + id) == "3",
           "Restart repeated completed work, lost an interrupted read, or resent an uncertain invocation");
 }
@@ -695,6 +728,8 @@ int main(int argc, char** argv) {
         changingActionsShareOneResponse();
         replyEndsTheTurnAfterItsActions();
         failedActionSkipsLaterOnes();
+        failedCancelSkipsWorkspaceWriteAndMcpInvocation();
+        failedMcpInvocationSkipsLaterCalls();
         gatewayOnlyCancelDoesNotCancelBatchSibling();
         conflictingWorkspaceCalls();
         rejectedCall();

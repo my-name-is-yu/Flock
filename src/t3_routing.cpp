@@ -145,7 +145,7 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
             }
         }
     }
-    if (!listProjects) return result;
+    if (!listProjects && (!change || field(*change, "environment").empty())) return result;
 
     std::map<std::pair<std::string, std::string>, TaskRoute> routes;
     {
@@ -156,16 +156,18 @@ TaskDestinations TaskRouting::discoverTaskDestinations(T3& t3, const conversatio
             auto key = catalogKey(route);
             routes.try_emplace(std::move(key), std::move(route));
         };
-        const auto defaultRoute = taskRoute(bot, routing, {});
-        if (!defaultRoute.environmentId.empty()) {
-            result.direct.push_back({{}, defaultRoute});
-            add(defaultRoute);
-        }
-        for (const auto& gateway : gateways) {
-            if (gateway == defaultRoute.environmentId) continue;
-            TaskRoute route{gateway, {}, gateway};
-            result.direct.push_back({gateway, route});
-            add(std::move(route));
+        if (!change) {
+            const auto defaultRoute = taskRoute(bot, routing, {});
+            if (!defaultRoute.environmentId.empty()) {
+                result.direct.push_back({{}, defaultRoute});
+                add(defaultRoute);
+            }
+            for (const auto& gateway : gateways) {
+                if (gateway == defaultRoute.environmentId) continue;
+                TaskRoute route{gateway, {}, gateway};
+                result.direct.push_back({gateway, route});
+                add(std::move(route));
+            }
         }
         if (change) {
             const auto id = change->find("taskId");
@@ -331,6 +333,24 @@ TaskChange TaskRouting::taskChange(const conversation::Message& message, const J
                            : taskRoute(message.bot, message.routing, environment, &task, &linked);
         if (change.route.environmentId.empty()) throw ToolError("Unknown environment " + environment + "; use one of task.environments");
         linked.chooseProject(change.route, project);
+        if (project.empty() && (change.route.environmentId != task.environmentId ||
+                                change.route.gatewayEnvironmentId != task.gatewayEnvironmentId.value_or(task.environmentId) ||
+                                change.route.projectId.empty())) {
+            const auto* projects = linked.projects(change.route);
+            if (projects) {
+                change.route.projectId =
+                    selectT3Project(*projects, change.route.projectId, rememberedT3Project(message.bot, change.route.environmentId));
+                if (change.route.projectId.empty())
+                    throw ToolError(projects->empty() ? "Add or unarchive a project in the selected T3 environment."
+                                                      : "Choose a listed projectId for the selected T3 environment.",
+                                    {{"projects", projectChoices(*projects, permissions.secretRedactor(message.bot))}});
+            } else {
+                // A named linked route already contains a project verified through its gateway.
+                if (change.route.projectId.empty())
+                    throw ToolError("Flock couldn’t list projects for the selected destination. Check its T3 connection.");
+                linked.chooseProject(change.route, std::string(change.route.projectId));
+            }
+        }
         permissions.secretRedactor(message.bot)
             .requirePublic({change.route.environmentId, change.route.projectId, change.route.gatewayEnvironmentId});
     }

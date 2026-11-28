@@ -60,8 +60,8 @@ struct Runtime::Impl {
     runtime::RunObserver runs;
     runtime::OutboxDispatch dispatch;
     runtime::TaskDecisions decisions;
-    runtime::TaskTurn taskTurn;
     runtime::TaskScheduler taskScheduler;
+    runtime::TaskTurn taskTurn;
     runtime::DatabaseLock lock;
 
     void runTurn(Id id) {
@@ -95,11 +95,10 @@ struct Runtime::Impl {
                    updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, options.intake,
                    workers.stopToken()),
           decisions(storage.conversationTurns, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates, dispatch),
-          taskTurn(storage.database, storage.taskEvents, storage.taskRouting, storage.waitStorage, updates, runs, decisions,
-                   storage.botSetup, storage.memoryStorage, soul, options.intake, t3, options.clock, workers.stopToken(),
-                   options.requireT3Connection),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, options.requireT3Connection, options.clock,
                         workers.stopToken()),
+          taskTurn(storage.database, storage.taskEvents, storage.taskRouting, storage.waitStorage, updates, runs, decisions, taskScheduler,
+                   storage.botSetup, storage.memoryStorage, soul, options.intake, options.clock, workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
 
     ~Impl() { workers.drain(); }
@@ -124,8 +123,7 @@ struct Runtime::Impl {
         else if (state == TaskState::deciding) {
             if (dispatch.step(task, nullptr)) task = updates.snapshot(id);
             if (task.state != TaskState::deciding) return;
-            const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
-            if (!decisions.continueFreshSession(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
+            taskTurn.decide(task);
         } else {
             if (task.activeRun && (state == TaskState::running || state == TaskState::waiting || state == TaskState::sending) &&
                 runs.ingest(task, runs.observe(task)))
@@ -136,7 +134,8 @@ struct Runtime::Impl {
                 wait = waitStorage.currentWait(id);
             }
             if (wait && taskTurn.resumeNotes(task, *wait)) return;
-            if (wait && wait->reason() == WaitReason::settings && task.projectId.empty()) {
+            if (task.projectId.empty() && !task.activeRun &&
+                (state == TaskState::sending || (wait && wait->reason() == WaitReason::settings))) {
                 taskScheduler.activate(std::move(task));
                 return;
             }

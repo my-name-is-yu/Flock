@@ -2,6 +2,7 @@
 #include "flock/types.hpp"
 #include "flock/decision.hpp"
 #include "flock/git_host.hpp"
+#include "model_calls.hpp"
 #include "workspace_internal.hpp"
 #include "flock/json.hpp"
 
@@ -46,10 +47,17 @@ bool filenamesMayMatch(const Decision& a, const Decision& b) {
     const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
     return std::ranges::equal(left, right, [&](char m, char n) { return fold(m) == fold(n); });
 }
-bool validatedCallsConflict(const Decision& a, const Decision& b) {
+bool callsConflict(const Decision& a, const Decision& b) {
     if (a.tool.starts_with("workspace_") && b.tool.starts_with("workspace_")) {
-        if (a.tool == "workspace_write_file" || b.tool == "workspace_write_file")
-            return a.tool == "workspace_search" || b.tool == "workspace_search" || filenamesMayMatch(a, b);
+        if (a.tool == "workspace_write_file" || b.tool == "workspace_write_file") {
+            if (a.tool == "workspace_search" || b.tool == "workspace_search") return true;
+            try {
+                return filenamesMayMatch(a, b);
+            } catch (const Conflict&) {
+                // Leave invalid arguments to the tool's normal validation.
+                return true;
+            }
+        }
     }
     return (a.tool == "mcp_call_tool" || b.tool == "mcp_call_tool") && a.args.contains("server") && b.args.contains("server") &&
            a.args["server"] == b.args["server"];
@@ -62,7 +70,7 @@ CallClass classify(const Decision& call) {
     if (gitOperation(call) == "read") return tool == "git_find_repos" ? CallClass::parallel_read : CallClass::gated_read;
     if (const auto* read = conversationReadSpec(tool)) return read->classification;
 
-    constexpr std::string_view gated[]{"read_channel_attachment", "mcp_call_tool"};
+    constexpr std::string_view gated[]{"read_channel_attachment"};
     if (std::ranges::find(gated, tool) != std::end(gated)) return CallClass::gated_read;
 
     constexpr std::string_view reads[]{"expand_context", "workspace_read_file", "workspace_search", "web_search", "web_fetch",
@@ -77,46 +85,36 @@ ConversationRead conversationRead(std::string_view tool) {
     return read ? read->path : ConversationRead::none;
 }
 
-bool batchable(std::string_view tool) {
-    return isBotTool(tool) || conversationReadSpec(tool);
+bool batchRead(const Decision& call) {
+    return conversationReadSpec(call.tool) || (isBotTool(call.tool) && classify(call) == CallClass::parallel_read);
 }
 
-std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls) {
-    std::vector<std::vector<PlannedCall>> waves;
-    std::vector<std::size_t> waveForCall(validatedCalls.size());
-    for (std::size_t i = 0; i < validatedCalls.size(); ++i) {
-        auto& wave = waveForCall[i];
-        const auto& candidate = validatedCalls[i];
-        PlannedCall call{candidate.slot, {}};
-        for (std::size_t earlier = 0; earlier < i; ++earlier) {
-            const auto& predecessor = validatedCalls[earlier];
-            if (!validatedCallsConflict(candidate.decision, predecessor.decision)) continue;
-            wave = std::max(wave, waveForCall[earlier] + 1);
-            call.predecessors.push_back(predecessor.slot);
-        }
-        if (wave == waves.size()) waves.emplace_back();
-        waves[wave].push_back(std::move(call));
-    }
-    return waves;
-}
-
-std::vector<StepCallIndexes> planSteps(std::span<const std::string> tools) {
-    StepCallIndexes shared;
-    for (std::size_t i = 0; i < tools.size(); ++i)
-        if (tools.size() == 1 || batchable(tools[i])) shared.push_back(i);
+std::vector<StepCallIndexes> planSteps(std::span<const ModelCall> calls) {
+    StepCallIndexes independentReads;
+    StepCallIndexes replies;
     std::vector<StepCallIndexes> steps;
-    const bool hasReads = !shared.empty() && shared.size() < tools.size();
-    for (std::size_t i = 0; i < tools.size(); ++i) {
-        if (std::ranges::find(shared, i) != shared.end()) continue;
-        const bool replyBeforeReadResultsAreSeen = hasReads && tools[i] == "reply";
-        if (replyBeforeReadResultsAreSeen)
-            shared.push_back(i);
-        else
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+        const auto& call = calls[i];
+        if (call.tool == "reply") {
+            replies.push_back(i);
+        } else if (!batchRead(call)) {
             steps.push_back({i});
+        } else if (!std::ranges::any_of(calls.first(i), [&](const auto& earlier) { return callsConflict(earlier, call); })) {
+            independentReads.push_back(i);
+        } else {
+            if (!batchRead(calls[steps.back().front()])) steps.emplace_back();
+            steps.back().push_back(i);
+        }
     }
-    const auto keepsTurnOpen = [&](const StepCallIndexes& step) { return tools[step.front()] != "reply"; };
-    std::ranges::stable_partition(steps, keepsTurnOpen);
-    if (!shared.empty()) steps.insert(steps.begin(), std::move(shared));
+    if (!independentReads.empty()) steps.insert(steps.begin(), std::move(independentReads));
+
+    // A reply bundled with reads is returned as notRun so the model can review their results first.
+    const auto lastRead =
+        std::ranges::find_if(steps.rbegin(), steps.rend(), [&](const auto& step) { return batchRead(calls[step.front()]); });
+    if (lastRead != steps.rend())
+        lastRead->insert(lastRead->end(), replies.begin(), replies.end());
+    else
+        for (const auto reply : replies) steps.push_back({reply});
     return steps;
 }
 

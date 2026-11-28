@@ -387,6 +387,13 @@ LIMIT 1
 Json GitStorage::gitConversationTool(GitHost* host, const conversation::Message& message, const Decision& decision, std::string_view key) {
     try {
         if (!host || !message.channelScope.empty()) throw Conflict("Git tools are available in Flock Web with a connected Git host");
+        if (message.botOrigin && gitOperation(decision) != "read") {
+            std::lock_guard lock(database.mutex);
+            if (gitEffectStarted(key))
+                return {
+                    {"ok", false}, {"delivery", "unknown"}, {"error", "The host outcome is unknown. Check the target before retrying."}};
+            throw Conflict("Git changes need a message from the person");
+        }
         auto call = decision;
         if (message.routing.contains("gitEvent")) {
             const auto& webhook = message.routing.at("gitEvent");

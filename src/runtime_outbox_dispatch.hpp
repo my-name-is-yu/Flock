@@ -57,13 +57,13 @@ public:
     void stop(TaskData task);
     bool step(TaskData& task, const Wait* wait);
     void stepDestination(const TaskData& task, const DestinationRun& run);
-    void queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction, const Json& args, const Json& event,
+    bool queueAction(TaskData& task, const std::string& id, CommandTool tool, std::string instruction, const Json& args, const Json& event,
                      const TaskRoute* destination = nullptr);
     void queueDestinations(TaskData& task, const std::string& first, std::string_view instruction, const Json& args, const Json& event);
 private:
     Command command(const TaskData& task, const Outbox& action);
     void deliver(const TaskData& task, Outbox action);
-    void applyDelivery(Id id, const Outbox& action, Delivery outcome);
+    void applyDelivery(Id id, const Outbox& action, Delivery outcome, std::optional<Id> readyGeneration = {});
     void writeDestinationReport(TaskData& task, DestinationRun& run, const Observation& observed);
     static bool setDestinationStatus(DestinationRun& run, DestinationRunPhase status, std::string detail);
     void destinationStatus(Id id, std::string_view action, DestinationRunPhase status, std::string detail);
@@ -73,7 +73,6 @@ private:
     bool assignedRunMatches(const TaskData& task, const CommandPayload& command, const RunRef& run);
     DeliveryOutcome classifyDelivery(const TaskData& task, const Outbox& action, Delivery& outcome, bool reply);
     AssignedRun recordRunAssignment(const TaskData& task, const Outbox& action, const RunRef& ref, DestinationRun* destination = nullptr);
-    void reportUnconfirmedDelivery(TaskData&, const Outbox&, std::string_view detail);
     bool refreshSessionSettings(TaskData&, const Outbox&);
     bool deferSingleDelivery(TaskData&, const Outbox&, OutboxPhase attemptedPhase, const Delivery&, DeliveryOutcome);
     bool deferDestinationDelivery(TaskData& task, DestinationRun& run, const Outbox& action, const Delivery& outcome,

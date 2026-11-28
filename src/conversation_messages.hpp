@@ -23,6 +23,9 @@ public:
     Person actor(const conversation::Message&) const;
     Person sessionActor(std::string_view person) const;
 private:
+    // Whether the message, or the message a wake traces back to, came from a Bot or a Session and not from the person.
+    bool botOrigin(const conversation::Message&) const;
+
     Database& database;
     const Policy& permissions;
     const WebIdentityState& webIdentity;

@@ -357,7 +357,7 @@ ORDER BY r.id DESC LIMIT 21
 }
 
 bool MemoryStorage::canEditFrom(const conversation::Message& message) {
-    if (message.routing.contains("botMessage")) return false;
+    if (message.botOrigin) return false;
     return permissions.allows(conversationMessages.actor(message), Action::bot_settings, message.bot);
 }
 

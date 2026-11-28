@@ -1032,6 +1032,65 @@ void conversationCanNameProjectsInStartAndChange() {
     check(f.t3.sent.back().environmentId == "desktop" && f.t3.sent.back().projectId == "docs", "change_task launched on the wrong project");
 }
 
+void ambiguousMoveKeepsTheOriginalRun() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    T3Connections(*f.store).connect("cloud", localOwner.id, 48124);
+    f.t3.projectsByEnvironment["cloud"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
+    const auto id = TaskIntake(*f.store).submit(f.routing("Check the build"));
+    f.reach(id, "running");
+    const auto original = f.task(id).at("activeRun");
+
+    constexpr auto ambiguous = "Move the build check to cloud";
+    f.script(ambiguous, {change(id, {{"environment", "cloud"}})});
+    f.receive("ambiguous-move", ambiguous);
+    const auto refused = f.lastTurn().at(0).at("result");
+    f.tick(3);
+    const auto current = f.task(id);
+    check(refused.at("ok") == false && refused.at("projects").at(0).at("projectId") == "docs" &&
+              refused.at("projects").at(1).at("projectId") == "release" && current.at("activeRun") == original &&
+              !current.contains("pendingDestination") && f.t3.interrupted.empty() && f.t3.sent.size() == 1,
+          "an ambiguous move interrupted the original Run or failed to offer the available project IDs");
+
+    constexpr auto choose = "Use the cloud Release project";
+    f.script(choose, {change(id, {{"environment", "cloud"}, {"projectId", "release"}})});
+    f.receive("chosen-move", choose);
+    f.tick();
+    check(f.t3.interrupted.size() == 1, "a validated destination did not stop the old Run");
+    f.t3.finish("run-1", "Desktop Run settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the task did not move to the selected cloud project");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "release", "the task moved to the wrong project");
+}
+
+void savedProjectlessDelegateWaitsForAProject() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop", localOwner.id, 48123);
+    f.t3.projectsByEnvironment["desktop"] = {{"docs", "Docs", {}}, {"release", "Release", {}}};
+    const auto id = TaskIntake(*f.store).submit(f.routing("Check the release", "alpha", "desktop", "release"));
+    f.reach(id, "sending");
+    const auto action = Tasks(*f.store).task(id).task.actionId;
+    {
+        sqlite3* raw = nullptr;
+        check(sqlite3_open(f.store->path().c_str(), &raw) == SQLITE_OK, "could not open the saved task fixture");
+        const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
+        const auto sql = "UPDATE tasks SET project_id='' WHERE id=" + std::to_string(id) +
+                         "; UPDATE outbox SET project_id='' WHERE task_id=" + std::to_string(id) + "; DELETE FROM bot_t3_projects";
+        check(sqlite3_exec(db.get(), sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "could not restore the legacy projectless task");
+    }
+    f.restart();
+    f.reach(id, "waiting");
+    const auto waiting = Tasks(*f.store).task(id);
+    check(waiting.wait && waiting.wait->reason() == WaitReason::settings && waiting.wait->text.find("release") != std::string::npos &&
+              waiting.task.actionId == action && f.t3.sent.empty(),
+          "the saved delegate was lost or sent before the task had a project");
+
+    f.t3.projectsByEnvironment["desktop"].erase(f.t3.projectsByEnvironment.at("desktop").begin());
+    f.now += 5;
+    f.reach(id, "running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().projectId == "release" && f.t3.sent.front().actionId == action,
+          "the saved delegate did not resume with its sole project and original action ID");
+}
+
 void suggestionsStayWithTheBotMessage() {
     Fixture f;
     const auto suggest = [](Json choices) {
@@ -1827,7 +1886,12 @@ void sessionLearningsFollowTheRequestersAuthority() {
     const Id webTask = f.lastTurn().front().at("result").at("taskId");
     expectSource = true;
     f.model.beforeComplete = [&](const ModelInput&) { webRoot = false; };
-    settleLearningTask(f, webTask, report);
+    f.reach(webTask, "running");
+    f.t3.finish(f.task(webTask).at("activeRun").at("runId").get<std::string>(), report);
+    f.reach(webTask, "waiting");
+    check(f.task(webTask).at("wait").at("reason") == "user_question" &&
+              lastTaskEvent(*f.store, webTask, "report").at("data").at("report") == report,
+          "a revoked result review closed the task or lost its report");
     const auto memory = Memory(*f.store).memory(localOwner, "alpha", "read_memory", Json::object());
     check(completions == 2 && learnedNotices(f).empty() && memory.at("version") == 0 && memory.at("content") == "",
           "a task without current authority created a learning revision or notice");
@@ -4311,6 +4375,8 @@ int main(int argc, char** argv) {
         startTaskChoosesProjectBeforeTakingItsQueueSlot();
         projectDiscoveryRecoversIntoFirstDecision();
         conversationCanNameProjectsInStartAndChange();
+        ambiguousMoveKeepsTheOriginalRun();
+        savedProjectlessDelegateWaitsForAProject();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
         requestsOfOneKindShareAPromptCacheScope();
