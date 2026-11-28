@@ -191,7 +191,8 @@ VALUES
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN (''running'',''policy_waiting'',''done'')),
   reserved_attempt INTEGER,
-  reply_id INTEGER UNIQUE REFERENCES journal(id))'),
+  reply_id INTEGER UNIQUE REFERENCES journal(id),
+  silent INTEGER NOT NULL DEFAULT 0 CHECK(silent IN (0,1)))'),
     ('table', 'deleted_bots', 'deleted_bots', 'CREATE TABLE deleted_bots(bot TEXT PRIMARY KEY)'),
     ('table', 'events', 'events', 'CREATE TABLE events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -408,10 +409,8 @@ BEGIN
   DELETE FROM git_pr_watches WHERE task_id=new.id;
 END'),
     ('view', 'automation_before_dispatch', 'automation_before_dispatch', 'CREATE VIEW automation_before_dispatch AS
-SELECT task.id FROM tasks task
-WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_run IS NULL AND task.last_run IS NULL
-  AND NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
-  AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id AND phase IN (''started'',''accepted''))'),
+SELECT task.id FROM tasks task JOIN task_before_dispatch eligible ON eligible.id=task.id
+WHERE task.trigger_data IS NOT NULL'),
     ('view', 'channel_posts', 'channel_posts', 'CREATE VIEW channel_posts AS
       SELECT d.rowid AS sequence,d.reply_id,d.external_id,d.payload,c.scope_key,m.bot_id
       FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
@@ -442,8 +441,8 @@ WHERE task.project_id<>'''' AND task.trigger_data IS NOT NULL AND task.active_ru
     ('view', 'conversation_input_status', 'conversation_input_status', 'CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN ''policy_waiting'' THEN ''needs_you''
-                WHEN ''done'' THEN coalesce(
-                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),''access_revoked'')
+                WHEN ''done'' THEN CASE WHEN t.silent=1 THEN ''done'' ELSE coalesce(
+                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),''access_revoked'') END
   END AS status
 FROM conversation_turns t'),
     ('view', 'project_route_queue', 'project_route_queue', 'CREATE VIEW project_route_queue AS
@@ -454,9 +453,12 @@ WITH candidates AS (
     AND task.project_id<>''''
     AND task.state NOT IN (''completed'',''cancelled'',''external_waiting'')
     AND NOT (task.state=''waiting'' AND EXISTS (
-      SELECT 1 FROM automation_before_dispatch undispatched
+      SELECT 1 FROM task_before_dispatch undispatched
       JOIN waits wait ON wait.task_id=undispatched.id AND wait.resolution IS NULL
-      WHERE undispatched.id=task.id AND wait.reason=''bot_notes_unavailable''
+      WHERE undispatched.id=task.id AND (
+        (wait.reason=''user_question'' AND task.action_id='''') OR
+        (wait.reason=''bot_notes_unavailable'' AND task.trigger_data IS NOT NULL)
+      )
     ))
   UNION ALL
   SELECT task.id,CASE WHEN outbox.phase IN (''started'',''accepted'') THEN task.state ELSE ''queued'' END,
@@ -478,6 +480,11 @@ WITH queue AS (
 SELECT q.id,q.environment_id,q.project_id,q.action_id,
        CASE WHEN q.id<>q.head_id THEN q.head_id END AS blocker_id
 FROM queue q'),
+    ('view', 'task_before_dispatch', 'task_before_dispatch', 'CREATE VIEW task_before_dispatch AS
+SELECT task.id FROM tasks task
+WHERE task.project_id<>'''' AND task.active_run IS NULL AND task.last_run IS NULL
+  AND NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
+  AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id AND phase IN (''started'',''accepted''))'),
     ('view', 'task_project_slots', 'task_project_slots', 'CREATE VIEW task_project_slots AS
 SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS blocker_id
 FROM project_route_slots GROUP BY id');

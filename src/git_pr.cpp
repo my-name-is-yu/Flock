@@ -195,4 +195,44 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous') D
     transaction.commit();
     return scrub.record(result, SecretRedactor::Fields::external);
 }
+
+Json GitStorage::associateGitPr(GitHost& host, const GitContext& context, const GitPrTarget& target, Id number, std::string_view reason) {
+    if (context.run.threadId.empty()) throw Conflict("Select the task whose T3 Session created the PR");
+    const auto& base = target.base;
+    const auto& head = target.head;
+    Id cursor;
+    {
+        std::lock_guard lock(database.mutex);
+        cursor = latestGitWebhookId();
+    }
+    const auto pr = host.readPullRequest(context, base, number);
+    const auto url = "https://" + base.resource() + "/pull/" + std::to_string(number);
+    if (!pr || pr->number != number || pr->target != target || pr->url != url || pr->headSha.empty())
+        throw Conflict("The open PR does not match the selected repository and branches");
+
+    std::lock_guard lock(database.mutex);
+    Transaction transaction(database.db);
+    if (botLifecycle.botPaused(context.botId)) throw BotPaused{};
+    if (permissions.forbidden(context.botId, Action::repository_pr, base.resource()) ||
+        !permissions.allows(context.botId, Action::repository_read, base.resource()) ||
+        (head != base && !permissions.allows(context.botId, Action::repository_read, head.resource())))
+        throw Conflict("Repository access denied");
+    const auto task = taskRecords.load(context.taskId);
+    const auto& run = task.activeRun ? task.activeRun : task.lastRun;
+    if (task.botId != context.botId || !run || run->ref != context.run || run->assignment.revisionId != task.currentRevision)
+        throw Conflict("The task's Session changed before the PR could be associated");
+    if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("The task already ended");
+    if (gitPrWatchUnavailable(base, number, task.id)) throw Conflict("The PR already belongs to another task");
+
+    const auto scrub = secretStorage.sharedRedactor();
+    Json result{{"ok", true}, {"status", "associated"}, {"prNumber", number}, {"url", url}};
+    if (!database.query("SELECT 1 FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)", {base.host, base.repo, number}).next()) {
+        watchGitPr(task, runJson(context.run), cursor, base, number, url, pr->headSha);
+        auto entry = gitJournal(context, "git_open_pr", base, result);
+        entry["result"]["reason"] = reason;
+        database.writeJournal(task.id, JournalKind::git_mutation, scrub.record(std::move(entry)));
+    }
+    transaction.commit();
+    return scrub.record(result, SecretRedactor::Fields::external);
+}
 }

@@ -845,9 +845,28 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-void ConversationTurns::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
-                                   const conversation::QuestionAnchor* question) {
+bool ConversationTurns::allowsSilentFinish(const Message& message) const {
+    const auto wake = message.routing.find("sessionWake");
+    if (wake != message.routing.end()) return wake->contains("taskId") && field(*wake, "reason") == "finished";
+    if (!message.channelScope.empty() || message.routing.contains("sessionOrigin")) return false;
+    auto sends = database.query(R"SQL(
+SELECT count(*),count(*) FILTER (WHERE json_extract(result,'$[0].effect')='sent')
+FROM conversation_steps WHERE message_id=? AND json_extract(decision,'$[0].tool')='message_bot' AND result IS NOT NULL
+)SQL",
+                                {message.id});
+    sends.next();
+    return sends.number(0) == sends.number(1) && (sends.number(0) > 0 || message.routing.contains("botMessage"));
+}
+
+void ConversationTurns::finishTurn(const Message& message, std::optional<std::string> text, const Json& suggestions,
+                                   ConversationReplyRoute route, const conversation::QuestionAnchor* question) {
     using enum ConversationReplyRoute;
+    if (!text && !allowsSilentFinish(message)) throw ToolError("This turn requires a reply");
+    auto woken = wokenTask(message);
+    const auto reason = woken ? field(message.routing.at("sessionWake"), "reason") : std::string{};
+    const auto report = woken && route == reply && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
+    const bool completed = report && report->second.status == "completed";
+    if (!text && woken && !completed) throw ToolError("Reply to the user about the unsuccessful or missing Session result");
     const bool pendingReceipt = sessionSendReceipts.persistPending(message.id);
     if (route == session_access || route == access || route == channel_access || route == bot_paused) {
         auto pending = database.query(R"SQL(
@@ -865,10 +884,8 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                                        {"delivery", "not_accepted"},
                                                        {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
-    if (auto woken = wokenTask(message)) {
-        const auto reason = field(message.routing.at("sessionWake"), "reason");
-        const auto report = route == reply && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
-        if (report && report->second.status == "completed") {
+    if (woken) {
+        if (completed) {
             taskRecords.completeWithReport(*woken, report->second.evidence.report, "Nobody asked for more work after the Session finished");
         } else {
             const auto note = route != reply         ? "Flock could not finish reviewing this task."
@@ -879,6 +896,15 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
             taskRecords.save(*woken);
         }
     }
+    const auto close = [&](const Json& replyId) {
+        modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
+        database.exec("UPDATE conversation_turns SET status='done',reply_id=?,silent=? WHERE message_id=?",
+                      {replyId, int{replyId.is_null()}, message.id});
+        database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
+        turnResults.discardUnpersisted(message.id);
+        if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
+    };
+    if (!text) return close(nullptr);
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -895,7 +921,6 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
             if (!result.value("ok", false) || !result.contains("effect")) continue;
             Json action = {{"tool", calls.at(i).at("tool")}, {"effect", result.at("effect")}};
             if (action.at("tool") == "message_bot") {
-                // The answer arrives in a later turn, where history is the only record of what was asked.
                 const auto& sent = calls.at(i).at("args");
                 action["botId"] = sent.at("botId");
                 action["text"] = bounded(secretStorage.redactor(message.bot).text(sent.at("text").get<std::string>()), 2000);
@@ -909,11 +934,11 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     }
     if (route == error && !actions.empty()) {
         const bool ja = japanese(message.text);
-        text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
+        *text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
         for (const auto& action : actions) {
-            text += "\n- " + field(action, "effect") + ": ";
-            if (action.contains("taskId")) text += requestName(taskRecords.load(action.at("taskId")));
-            if (action.contains("botId")) text += field(action, "botId");
+            *text += "\n- " + field(action, "effect") + ": ";
+            if (action.contains("taskId")) *text += requestName(taskRecords.load(action.at("taskId")));
+            if (action.contains("botId")) *text += field(action, "botId");
         }
     }
     std::optional<Id> linked;
@@ -923,7 +948,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         linked = *touched.begin();
     const auto scrub = secretStorage.redactor(message.bot);
     const ConversationReplyEntry entry{.replyToMessageId = message.id,
-                                       .text = scrub.text(text),
+                                       .text = scrub.text(*text),
                                        .status = effectStatus(actions),
                                        .route = route,
                                        .taskQuestionMessageId = question ? std::optional{question->messageId} : std::nullopt,
@@ -934,11 +959,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     if (!message.channelScope.empty() && channelConnectors.messageAuthorized(message.id, message.bot))
         channelDeliveries.reply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
-    modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
-    database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
-    database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
-    turnResults.discardUnpersisted(message.id);
-    if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
+    close(replyId);
 }
 
 bool ConversationTurns::authorizeTurn(const Message& message) {
@@ -1027,6 +1048,7 @@ void TurnRunner::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, co
     const bool currentPr = shouldVerifyFollowup && gitStorage.gitPrReadyForFollowup(*gitHost, message);
     const auto available = [&] {
         auto offered = tools;
+        if (conversationTurns.allowsSilentFinish(message)) offered.emplace_back("no_reply");
         if (!notification && memoryStorage.canEditFrom(message)) {
             offered.push_back("write_memory");
             offered.push_back("revert_memory_edit");

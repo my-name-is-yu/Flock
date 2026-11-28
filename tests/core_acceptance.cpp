@@ -472,25 +472,69 @@ void approvedNewLaunchUsesCurrentProfileAfterDenial() {
     f.restart();
     PolicyRules(*f.store).setMode(localOwner, "supervised");
     const auto id = TaskIntake(*f.store).submit({"alpha", "Check the release", "e", "p"}, &localOwner);
-    const auto decide = [&](std::string_view operation) {
+    const auto decide = [&](Id task, std::string_view operation) {
         const auto item = Inbox(*f.store).inbox(localOwner).at(0);
-        check(item.at("itemKind") == "policy_approval" && item.at("taskId") == id, "The launch lost its approval");
+        check(item.at("itemKind") == "policy_approval" && item.at("taskId") == task, "The launch lost its approval");
         Inbox(*f.store).decideInbox(localOwner,
-                                    {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), id,
+                                    {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), task,
                                      item.at("targetRevision"), item.at("targetGeneration")},
                                     operation);
     };
     f.wait(id, "policy_approval");
-    decide("deny");
+    decide(id, "deny");
     const auto question = f.wait(id, "user_question");
+    const auto sibling = TaskIntake(*f.store).submit({"alpha", "Independent check", "e", "p"}, &localOwner);
+    f.wait(sibling, "policy_approval");
+    decide(sibling, "allow_once");
+    f.reach(sibling, "running");
+    f.t3.question("run-1");
+    const auto siblingQuestion = f.wait(sibling, "user_question");
     provider = "after-denial";
     TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, question), "answer",
                                   {{"text", "Continue using the current profile"}});
+    f.restart();
+    f.runtime->tick();
+    const auto queued = Tasks(*f.store).task(id);
+    check(queued.task.state == TaskState::queued && queued.blockedBy && queued.blockedBy->id == sibling && f.t3.launches == 1,
+          "The answered task interrupted the sibling Run while it held the Project slot");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(sibling).task, siblingQuestion), "answer",
+                                  {{"text", "main"}});
+    f.reach(sibling, "running");
+    f.t3.finish("run-1");
+    f.reach(sibling, "completed");
     f.wait(id, "policy_approval");
-    decide("allow_once");
+    decide(id, "allow_once");
     f.reach(id, "running");
-    check(f.t3.seen.size() == 1 && f.t3.seen.front().config.at("session").at("providerInstanceId") == provider,
-          "The newly approved launch used the Bot's old profile");
+    check(f.t3.launches == 2 && f.t3.replies == 1 && f.t3.seen.back().config.at("session").at("providerInstanceId") == provider &&
+              f.t3.seen.back().instruction.find("Continue using the current profile") != std::string::npos,
+          "The requeued launch did not send the answer and current profile exactly once");
+}
+
+void scheduledLaunchIncludesCoveredOccurrences() {
+    using namespace std::chrono;
+    constexpr auto first = duration_cast<seconds>(sys_days{year{2026} / January / 5}.time_since_epoch()).count();
+    for (const auto count : {1, 3}) {
+        Fixture f;
+        f.now = first - 1;
+        const Intake intake{"alpha", "Process scheduled occurrences", "e", "p"};
+        Automations automations(*f.store);
+        automations.createAutomation(localOwner, intake,
+                                     {{"kind", "schedule"}, {"cron", "* * * * *"}, {"timezone", "Asia/Tokyo"}, {"request", intake.request}},
+                                     f.now);
+        f.now = first + (count - 1) * 60;
+        automations.fireDueAutomations(f.now);
+        const auto id = TaskList(*f.store).tasks().front().task.id;
+        f.restart();
+        f.reach(id, "running");
+        const auto& prompt = f.t3.seen.front().instruction;
+        const auto last = count == 1 ? "2026-01-05T00:00:00Z" : "2026-01-05T00:02:00Z";
+        check(prompt.find(intake.request) != std::string::npos &&
+                  prompt.find("First covered occurrence (inclusive): 2026-01-05T00:00:00Z") != std::string::npos &&
+                  prompt.find(std::string("Last covered occurrence (inclusive): ") + last) != std::string::npos &&
+                  prompt.find("Occurrence count: " + std::to_string(count)) != std::string::npos &&
+                  prompt.find("Schedule time zone: Asia/Tokyo") != std::string::npos,
+              "The T3 launch prompt did not include the saved schedule coverage");
+    }
 }
 
 void disconnectBlocksSendingAndRetry() {
@@ -1279,6 +1323,7 @@ int main() {
              {"unconfirmed delivery across restart", unconfirmedDeliveryAcrossRestart},
              {"denied follow-up requires new person input", deniedFollowUpRequiresNewPersonInput},
              {"new launch uses the current Bot profile after denial", approvedNewLaunchUsesCurrentProfileAfterDenial},
+             {"scheduled launch includes saved coverage", scheduledLaunchIncludesCoveredOccurrences},
              {"busy follow-up waits for its own delivery", busyFollowUpWaitsForItsOwnDelivery},
              {"rejected answer keeps its Run", rejectedAnswerKeepsItsRun},
              {"launch receipt recovery", launchReceiptSurvivesRecovery},

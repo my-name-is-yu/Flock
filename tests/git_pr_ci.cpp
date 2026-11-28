@@ -56,6 +56,7 @@ public:
     Json results = Json::object();
     unsigned notifications = 0;
     bool openAfterSession = false;
+    bool associateExisting = false;
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
     std::function<void()> beforeTaskWait;
@@ -77,6 +78,10 @@ private:
             if (openAfterSession && steps.empty()) {
                 auto args = openArgs();
                 args["taskId"] = event.at("task").at("taskId");
+                if (associateExisting) {
+                    args.erase("title");
+                    args.update({{"associateExisting", true}, {"prNumber", 1}});
+                }
                 return {"git_open_pr", std::move(args), {}};
             }
             if (!steps.empty() && steps.back().at("tool") == "git_open_pr") {
@@ -192,7 +197,7 @@ SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE name IN ('pr_review_items',
     check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1, "Fresh DB has incorrect PR operation or journal storage");
 }
 
-void runner() {
+void runner(bool associateExisting = false) {
     TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
@@ -200,18 +205,42 @@ void runner() {
     Script script;
     script.openAfterSession = true;
     script.checkOriginatingSession = true;
+    script.associateExisting = associateExisting;
+    const auto prUrl = std::string("https://") + repositoryTarget + "/pull/1";
+    if (associateExisting) {
+        const GitRepository repo{hostName, repoName};
+        host->prs.push_back({{{repo, repo, "main", "change"}, 1, prUrl, "", sha}, "Opened in T3", FakeHost::State::open});
+    }
     Id task, other;
     {
         Store store(path);
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         task = startTask(store, runtime, script, "ship");
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting,
               "Session-to-PR flow did not wait: " + TaskHistory(store).history(task).dump());
+        check(host->createCalls == (associateExisting ? 0 : 1) && host->hostCalls == 0, "Unexpected write to the Git host");
         other = TaskIntake(store).submit(intake("other", "other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1, "task did not receive the PR number");
-        check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
-        check(recordedMutationReason(TaskHistory(store).history(task), "git_open_pr"), "PR creation lost its rationale in task history");
+        if (associateExisting) {
+            check(host->prReadCalls == 1 && watchedPrUrl(path) == prUrl, "The Session's existing PR was not registered");
+            auto args = openArgs();
+            args.erase("title");
+            args.update({{"taskId", task}, {"prNumber", 1}, {"associateExisting", true}, {"headRef", "wrong-branch"}});
+            check(!invoke(store, runtime, script, "associate-wrong-branch", "git_open_pr", args).at("ok").get<bool>() &&
+                      host->prReadCalls == 2,
+                  "The PR was accepted with a different branch");
+            host->upstreamPermitted = false;
+            args["headRef"] = "change";
+            check(!invoke(store, runtime, script, "associate-denied", "git_open_pr", args).at("ok").get<bool>() && host->prReadCalls == 2,
+                  "Git repository access denial did not stop the association");
+            host->upstreamPermitted = true;
+            check(historyCount(store, task, "git_mutation") == 1, "PR association was not recorded exactly once");
+        } else {
+            check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
+            check(recordedMutationReason(TaskHistory(store).history(task), "git_open_pr"),
+                  "PR creation lost its rationale in task history");
+        }
         check(historyCount(store, task, "report") == 1, "Session result missing");
         check(Inbox(store).inbox(localOwner, "owner").empty(), "Opening a PR appeared in Needs you");
         check(GitEvents(store).receiveGitWebhook(
@@ -923,6 +952,7 @@ int main() {
         freshPrSchema();
         schemas();
         runner();
+        runner(true);
         invalidWebhookMetadata();
         webhookHeadPeriods();
         pausedGitNotifications();

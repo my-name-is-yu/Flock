@@ -26,6 +26,7 @@ class TaskRecords;
 struct Decision;
 struct GitContext;
 struct GitOpenPr;
+struct GitPrTarget;
 struct GitRepository;
 struct GitWebhook;
 struct TaskData;
@@ -81,6 +82,7 @@ private:
     static Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent, std::optional<Id> prNumber,
                    std::string_view reason);
+    Json associateGitPr(GitHost&, const GitContext&, const GitPrTarget&, Id number, std::string_view reason);
     Id latestGitWebhookId() const;
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
     enum class GitWatchResult { attached, taskEnded, unavailable };

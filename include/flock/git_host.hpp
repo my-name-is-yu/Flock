@@ -64,6 +64,7 @@ public:
     }
     virtual std::pair<std::vector<GitRepository>, bool> repositories(const GitContext&, std::string_view, Id) { return {}; }
     virtual GitPullRequest createPullRequest(const GitContext&, const GitOpenPr&) = 0;
+    virtual std::optional<GitPullRequest> readPullRequest(const GitContext&, const GitRepository&, Id) { return std::nullopt; }
     virtual std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget&) = 0;
     virtual GitLog readCiLogs(const GitContext&, const GitRepository&, Id jobId, std::size_t maxBytes) = 0;
     virtual Json call(const GitContext&, const GitRepository&, const Decision&) = 0;

@@ -9,7 +9,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43;
-constexpr Id schemaVersion = 29;
+constexpr Id schemaVersion = 30;
 
 void applySchema(sqlite3* db) {
     constexpr auto schema = R"SQL(
@@ -149,13 +149,14 @@ CREATE TABLE conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN ('running','policy_waiting','done')),
   reserved_attempt INTEGER,
-  reply_id INTEGER UNIQUE REFERENCES journal(id));
+  reply_id INTEGER UNIQUE REFERENCES journal(id),
+  silent INTEGER NOT NULL DEFAULT 0 CHECK(silent IN (0,1)));
 CREATE INDEX conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
 CREATE VIEW conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN 'policy_waiting' THEN 'needs_you'
-                WHEN 'done' THEN coalesce(
-                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),'access_revoked')
+                WHEN 'done' THEN CASE WHEN t.silent=1 THEN 'done' ELSE coalesce(
+                  (SELECT conversation_status FROM journal WHERE id=t.reply_id),'access_revoked') END
   END AS status
 FROM conversation_turns t;
 CREATE TABLE conversation_retries(
@@ -371,11 +372,14 @@ CREATE TABLE inbox_decisions(
     UNIQUE(bot_id,item_kind,item_id,wait_id));
 CREATE INDEX inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 
-CREATE VIEW automation_before_dispatch AS
+CREATE VIEW task_before_dispatch AS
 SELECT task.id FROM tasks task
-WHERE task.project_id<>'' AND task.trigger_data IS NOT NULL AND task.active_run IS NULL AND task.last_run IS NULL
+WHERE task.project_id<>'' AND task.active_run IS NULL AND task.last_run IS NULL
   AND NOT EXISTS (SELECT 1 FROM task_run_destinations WHERE task_id=task.id)
   AND NOT EXISTS (SELECT 1 FROM outbox WHERE task_id=task.id AND phase IN ('started','accepted'));
+CREATE VIEW automation_before_dispatch AS
+SELECT task.id FROM tasks task JOIN task_before_dispatch eligible ON eligible.id=task.id
+WHERE task.trigger_data IS NOT NULL;
 CREATE VIEW project_route_queue AS
 WITH candidates AS (
   SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id
@@ -384,9 +388,12 @@ WITH candidates AS (
     AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled','external_waiting')
     AND NOT (task.state='waiting' AND EXISTS (
-      SELECT 1 FROM automation_before_dispatch undispatched
+      SELECT 1 FROM task_before_dispatch undispatched
       JOIN waits wait ON wait.task_id=undispatched.id AND wait.resolution IS NULL
-      WHERE undispatched.id=task.id AND wait.reason='bot_notes_unavailable'
+      WHERE undispatched.id=task.id AND (
+        (wait.reason='user_question' AND task.action_id='') OR
+        (wait.reason='bot_notes_unavailable' AND task.trigger_data IS NOT NULL)
+      )
     ))
   UNION ALL
   SELECT task.id,CASE WHEN outbox.phase IN ('started','accepted') THEN task.state ELSE 'queued' END,

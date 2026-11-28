@@ -407,6 +407,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (task.generation != generation) throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
+    bool requeue = false;
     if (operation == "answer" && reason == WaitReason::user_question) {
         const auto owner = task.question ? task.question->target : waitQuestionTarget(*wait);
         if (owner != questionTarget(task, waitId)) throw RequestChanged{};
@@ -422,12 +423,13 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         if (field(updated, "kind") == "policy_outcome") updated["policyReply"] = {{"anchor", answerId}, {"personId", actor.id}};
         taskEvents.consumeEvent(task);
         taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
+        requeue = taskRouting.questionYieldsProjectSlot(task);
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
     waitStorage.clearWait(task, operation);
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
-    task.state = TaskState::deciding;
+    task.state = requeue ? TaskState::queued : TaskState::deciding;
     taskRecords.save(task);
     if (kind) inboxDecisions.record(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }

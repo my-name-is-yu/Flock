@@ -250,7 +250,9 @@ void requireClaudeStdin(const std::string& cli) {
 }
 
 void addClaude(const std::string& cli, const Json& server) {
-    if (!runProvider({cli, "mcp", "add-json", "--scope", "user", "flock", "-"}, server.dump())) throw Conflict(claudeSetupError);
+    if (!runProvider({cli, "mcp", "add-json", "--scope", "user", "flock", "-"}, server.dump()))
+        throw Conflict("Claude Code could not register the Flock MCP server. If Flock is running inside Claude Code, "
+                       "start it from a separate terminal and try again.");
 }
 
 void removeClaude(const std::string& cli) {

@@ -81,7 +81,8 @@ public:
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
     // The task this wake reports on, while it waits for the conversation to decide what happens next.
     std::optional<TaskData> wokenTask(const conversation::Message&) const;
-    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
+    bool allowsSilentFinish(const conversation::Message&) const;
+    void finishTurn(const conversation::Message&, std::optional<std::string> text, const Json& suggestions, ConversationReplyRoute route,
                     const conversation::QuestionAnchor* question = nullptr);
     TaskData ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;

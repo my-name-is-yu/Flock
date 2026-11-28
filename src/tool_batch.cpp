@@ -66,7 +66,7 @@ bool callsConflict(const Decision& a, const Decision& b) {
 
 CallClass classify(const Decision& call) {
     const auto& tool = call.tool;
-    if (tool == "reply") return CallClass::terminal;
+    if (tool == "reply" || tool == "no_reply") return CallClass::terminal;
     if (gitOperation(call) == "read") return tool == "git_find_repos" ? CallClass::parallel_read : CallClass::gated_read;
     if (const auto* read = conversationReadSpec(tool)) return read->classification;
 
@@ -95,7 +95,7 @@ std::vector<StepCallIndexes> planSteps(std::span<const ModelCall> calls) {
     std::vector<StepCallIndexes> steps;
     for (std::size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
-        if (call.tool == "reply") {
+        if (classify(call) == CallClass::terminal) {
             replies.push_back(i);
         } else if (!batchRead(call)) {
             steps.push_back({i});
