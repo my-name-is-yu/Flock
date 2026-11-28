@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/json.hpp"
+#include "flock/task_attachment.hpp"
 #include "flock/types.hpp"
 
 #include <string_view>
@@ -8,8 +9,10 @@
 
 namespace flockv0 {
 class Database;
+class SecretRedactor;
 class Statement;
 struct ModelImage;
+namespace conversation { struct Message; }
 
 class AttachmentStorage {
 public:
@@ -19,6 +22,9 @@ public:
     Json attachmentViews(Id) const;
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     bool hasAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
+    std::vector<TaskAttachmentRef> selectForTask(const conversation::Message&, const Json& args) const;
+    std::vector<TaskAttachment> taskAttachments(std::string_view bot, const std::vector<TaskAttachmentRef>&,
+                                                const SecretRedactor&) const;
 private:
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     Database& db_;

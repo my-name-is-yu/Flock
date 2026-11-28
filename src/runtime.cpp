@@ -93,7 +93,7 @@ struct Runtime::Impl {
                    storage.policyApprovals, storage.sessionParticipations, storage.sessionReadStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.taskRunReports, storage.waitStorage, storage.outboxStorage, t3, policy,
                    updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, options.intake,
-                   workers.stopToken()),
+                   workers.stopToken(), storage.attachments),
           decisions(storage.conversationTurns, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates, dispatch),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, options.requireT3Connection, options.clock,
                         workers.stopToken()),

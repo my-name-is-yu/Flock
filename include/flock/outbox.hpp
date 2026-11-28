@@ -59,6 +59,7 @@ struct OutboxAction {
     std::optional<std::int64_t> revisionId;
     std::optional<std::string> instructionBase;
     std::vector<OutboxInstruction> instructions;
+    std::vector<TaskAttachmentRef> attachments{};
     OutboxContext contextIds;
     std::vector<OutboxSource> sourceResultRefs;
     bool destinationAction = false;

@@ -686,6 +686,7 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
 
     if (tool == "start_task") {
         const auto request = text(args, "request", maxBodyBytes, true);
+        auto files = attachments.selectForTask(message, args);
         const auto doneWhen = text(args, "doneWhen", limits::session_prompt::maxDecisionTextBytes, false);
         const bool resume = args.value("resume", false);
         auto [destination, targets, commit] = taskRouting.startDestinations(message, args, resume, selectedSession, linked);
@@ -693,14 +694,15 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = taskOperations.startConversationTask(routing, bot, request, destination, message.id, sourceRef(result), resume,
-                                                             selectedSession);
+                                                             selectedSession, !files.empty());
         if (args.contains("projectId")) taskRouting.rememberT3Project(bot, destination.environmentId, destination.projectId);
         if (const auto selected = args.find("environments"); selected != args.end())
             for (std::size_t i = 0; i < targets.size(); ++i)
                 if (selected->at(i).contains("projectId"))
                     taskRouting.rememberT3Project(bot, targets[i].route.environmentId, targets[i].route.projectId);
-        if (!doneWhen.empty() || !targets.empty()) {
+        if (!doneWhen.empty() || !targets.empty() || !files.empty()) {
             auto task = taskRecords.load(id);
+            task.initialAttachments = std::move(files);
             if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
             if (!targets.empty()) task.destinations = std::move(targets);
             if (!commit.empty()) task.requestedCommit = std::move(commit);
@@ -732,8 +734,9 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
                                           {"current", conversationTurns.taskState(task, message)}});
             change = taskRouting.taskChange(message, args, task, linked);
         }
-        const bool conflicting =
-            taskOperations.acceptInstruction(task, message.id, step, instruction, sourceRef(result), change ? &*change : nullptr);
+        auto files = tool == "send_to_task" ? attachments.selectForTask(message, args) : std::vector<TaskAttachmentRef>{};
+        const bool conflicting = taskOperations.acceptInstruction(task, message.id, step, instruction, sourceRef(result),
+                                                                  change ? &*change : nullptr, std::move(files));
         if (change && args.contains("projectId")) taskRouting.rememberT3Project(bot, change->route.environmentId, change->route.projectId);
         return {{"ok", true}, {"effect", conflicting ? "replanning" : "accepted"}, {"taskId", task.id}};
     }

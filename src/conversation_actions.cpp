@@ -9,6 +9,7 @@
 #include "session_read_storage.hpp"
 #include "session_participation_storage.hpp"
 #include "session_message_storage.hpp"
+#include "attachment_storage.hpp"
 #include "policy_approvals.hpp"
 #include "git_storage.hpp"
 #include "conversation_tools.hpp"
@@ -355,10 +356,12 @@ UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
     Json result;
     if (accepted) {
         result = {{"ok", true}, {"delivery", outcome.status == Queued ? "queued" : "started"}};
+        if (receipt.hasAttachments) result["attachmentDelivery"] = "accepted_by_t3";
         if (receipt.notify) result.update({{"environmentId", target.environmentId}, {"threadId", target.threadId}});
     } else {
         result = toolFailure(outcome.detail.empty() ? "Could not confirm delivery to T3" : outcome.detail);
         if (!settled) result["delivery"] = "unknown";
+        if (receipt.hasAttachments) result["attachmentDelivery"] = settled ? "unsent" : "unknown";
     }
     saveResult(receipt.bot, message, receipt.step, std::move(result));
 }
@@ -379,8 +382,10 @@ void SessionMessageStorage::reconcilePausedSessionSends(T3& t3, std::stop_token 
     {
         std::lock_guard lock(database.mutex);
         auto rows = database.query(R"SQL(
-SELECT s.message_id,m.bot_id,s.environment,s.thread,s.gateway_environment,s.action,s.instruction
+SELECT s.message_id,m.bot_id,s.environment,s.thread,s.gateway_environment,s.action,s.instruction,
+       coalesce(json_array_length(step.effect,'$.attachments'),0)
 FROM session_message_sends s JOIN messages m ON m.id=s.message_id
+LEFT JOIN conversation_steps step ON step.message_id=s.message_id AND step.step=s.step
 WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
 )SQL",
                                    {policyApprovals.now()});
@@ -394,6 +399,7 @@ WHERE s.interrupt_at<=? ORDER BY s.interrupt_at,s.rowid LIMIT 20
             command.target.gatewayEnvironmentId = command.gatewayEnvironmentId;
             command.actionId = rows.string(5);
             command.instruction = rows.string(6);
+            command.attachmentCount = rows.number(7);
             pending.emplace_back(rows.number(0), std::move(command));
         }
     }
@@ -490,6 +496,7 @@ struct SessionMessageStorage::SessionSend {
     Id savedTaskId = 0, savedGeneration = 0;
     std::string savedActionId;
     bool includesSavedContent = false;
+    std::vector<TaskAttachmentRef> attachmentRefs;
     std::string title, error;
 
     bool fixesPullRequest() const { return decision.tool == "fix_pull_request"; }
@@ -574,6 +581,7 @@ void SessionMessageStorage::addressSessionSend(SessionSend& send) {
     if (sessionParticipations.stopped(message.bot, send.target, message.id)) throw ToolError(participationStopped);
     if (permissions.forbidden(message.bot, send.resource.action, send.resource.target))
         throw ToolError(std::string(approvalError(ApprovalGate::denied)));
+    if (send.savedTaskTarget()) send.attachmentRefs = attachments.selectForTask(message, decision.args);
     if (send.namesSession() && !sessionReadStorage.connectedSessionAccess(message, send.target)) throw ToolError(sessionUnavailable);
 }
 
@@ -598,7 +606,8 @@ std::optional<CallOutcome> SessionMessageStorage::prepareSessionSend(SessionSend
             receipts.saveResult(message.bot, id, send.step,
                                 {{"ok", false},
                                  {"delivery", "unknown"},
-                                 {"error", "Flock restarted while sending this. Check the Session before sending again."}});
+                                 {"error", "Flock restarted while sending this. Check the Session before sending again."},
+                                 {"attachments", row.json(0).value("attachments", Json::array())}});
         }
         transaction.commit();
         receipts.pending.erase(id);
@@ -722,7 +731,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
     return std::nullopt;
 }
 
-std::optional<CallOutcome> SessionMessageStorage::startSessionSend(const SessionSend& send) {
+std::optional<CallOutcome> SessionMessageStorage::startSessionSend(SessionSend& send) {
     using enum CallOutcome;
     const auto& message = send.message;
     const auto& target = send.target;
@@ -753,6 +762,16 @@ std::optional<CallOutcome> SessionMessageStorage::startSessionSend(const Session
         }
         gitStorage.recordGitPrFollowup(message, *current);
     }
+    try {
+        if (!send.attachmentRefs.empty())
+            send.command.attachments = attachments.taskAttachments(message.bot, send.attachmentRefs, secretStorage.redactor(message.bot));
+        send.command.attachmentCount = send.attachmentRefs.size();
+    } catch (const Conflict& error) {
+        saveSessionSendStep(send, toolFailure(error.what()));
+        transaction.commit();
+        return advance;
+    }
+    if (!send.attachmentRefs.empty()) effect["attachments"] = attachmentRefsJson(send.attachmentRefs);
     effect["sendState"] = "sending";
     effect["requestId"] = send.command.actionId;
     database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? AND result IS NULL", {effect, id, send.step});
@@ -783,7 +802,8 @@ void SessionMessageStorage::deliverSessionSend(SessionSend& send) {
                                 .insert_or_assign(message.id, SessionSendReceipt{message.bot, send.target, std::move(send.title),
                                                                                  sessionSendOutcome(send.target, std::move(receipt)),
                                                                                  send.step, send.savedTaskId, send.savedActionId,
-                                                                                 send.command.actionId, !send.fixesPullRequest()})
+                                                                                 send.command.actionId, !send.fixesPullRequest(),
+                                                                                 !send.attachmentRefs.empty()})
                                 .first;
     Transaction transaction(database.db);
     receipts.persist(message.id, checkpoint->second);
@@ -1014,7 +1034,12 @@ void rememberSourceResult(TaskData& task, const OutboxSource& source) {
 
 Id TaskOperations::startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute& destination,
                                          Id messageId, const std::optional<OutboxSource>& reference, bool resume,
-                                         const WorkSession* selectedSession) {
+                                         const WorkSession* selectedSession, bool attachmentsSelected) {
+    const auto prior = resume ? std::optional{taskRecords.load(reference.value().taskId)} : std::nullopt;
+    if (prior && std::ranges::any_of(prior->cancelledInstructions, [](const auto& item) { return !item.attachments.empty(); }))
+        throw ToolError("The cancelled task has instructions with unresolved file delivery. Check the T3 Session and start a new task with the files you want to send.");
+    if (prior && !prior->initialAttachments.empty() && !attachmentsSelected)
+        throw ToolError("The cancelled task has files with unconfirmed delivery. Check the T3 Session and re-select the files to resume.");
     if (selectedSession) secretStorage.redactor(bot).requirePublic(selectedSession->target.threadId);
     const auto id = submit({std::string(bot), std::string(request), destination.environmentId, destination.projectId, routing.at("config")},
                            messageId, reference ? &*reference : nullptr);
@@ -1041,12 +1066,11 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = database.query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId, bot});
     task.sourceMessageCoversFullRequest = !reference && message.next() && message.string(0) == request;
-    if (resume) {
-        const auto priorId = reference.value().taskId;
-        const auto prior = taskRecords.load(priorId);
-        const auto criteria = effectiveDoneWhen(prior);
+    if (prior) {
+        const auto priorId = prior->id;
+        const auto criteria = effectiveDoneWhen(*prior);
         if (!criteria.empty()) task.criteriaProposal = TaskCriteriaProposal{criteria, std::nullopt};
-        const auto& pending = prior.cancelledInstructions;
+        const auto& pending = prior->cancelledInstructions;
         std::set<std::pair<Id, int>> pendingIds;
         for (const auto& item : pending) pendingIds.emplace(item.messageId, item.step);
 
@@ -1065,7 +1089,7 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
             delivered.push_back({item.messageId, item.step, std::move(text)});
         }
         std::reverse(delivered.begin(), delivered.end());
-        task.intent = prior.intent;
+        task.intent = prior->intent;
         task.restartContext = TaskRestart{priorId, std::move(delivered)};
         for (auto item : pending) {
             item.revisionId.reset();
@@ -1080,9 +1104,12 @@ WHERE t.id=? AND t.bot_id=? AND t.origin_environment_id IS NOT NULL AND channel.
 }
 
 bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction,
-                                       std::optional<OutboxSource> source, const TaskChange* change) {
+                                       std::optional<OutboxSource> source, const TaskChange* change,
+                                       std::vector<TaskAttachmentRef> attachments) {
     Id revision = task.currentRevision.value_or(0);
     bool conflicting = task.replanning;
+    if (!attachments.empty() && task.pendingDestination)
+        throw ToolError("The task is changing destinations. Wait for its next Session before sharing files.");
     if (change) {
         const auto oldIntent = task.intent;
         const auto oldDone = effectiveDoneWhen(task);
@@ -1101,6 +1128,9 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
              gateway != currentGateway);
         std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
+            if (!task.initialAttachments.empty() ||
+                std::ranges::any_of(task.pendingInstructions, [](const auto& item) { return !item.attachments.empty(); }))
+                throw ToolError("The task has files queued for its current destination. Start a separate task to share files with another destination.");
             auto project = change->route.projectId;
             const bool pinned = !project.empty();
             if (!pinned) project = taskRouting.rememberedT3Project(task.botId, environment);
@@ -1128,7 +1158,7 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
         }
     }
     if (source) rememberSourceResult(task, *source);
-    OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::move(source)};
+    OutboxInstruction pending{messageId, step, std::string(instruction), revision, conflicting, std::move(source), std::move(attachments)};
     if (conflicting) {
         task.replanning = true;
         if (taskRouting.isUndispatchedNotesWait(task)) {

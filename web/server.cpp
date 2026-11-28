@@ -70,7 +70,7 @@ using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t messagePayloadOverheadBytes = 132 * 1024;
-constexpr std::size_t maxMessagePayloadBytes = limits::messages::maxEncodedImagesBytes + messagePayloadOverheadBytes;
+constexpr std::size_t maxMessagePayloadBytes = limits::messages::maxEncodedFilesBytes + messagePayloadOverheadBytes;
 enum class Mutation { Message, Operation };
 
 std::size_t requestPayloadLimit(std::string_view path) {
@@ -776,7 +776,9 @@ private:
                 const auto request = requiredText(body, "text", limits::messages::maxBodyBytes);
                 const auto clientMessageId = requiredText(body, "clientMessageId", 256);
                 const auto replyTo = body.contains("replyToMessageId") ? bodyId(body, "replyToMessageId") : Id{};
-                const auto attachments = body.value("attachments", Json::array());
+                const auto files = body.find("attachments");
+                const auto empty = Json::array();
+                const auto& attachments = files == body.end() ? empty : *files;
                 const auto previous = WebConversationIntake(store_).receipt(actor, bot, clientMessageId, request, replyTo, attachments);
                 if (previous) return reply(res, 201, *previous);
                 const bool identityRequired = web::hasWebIdentities(callbacks_);
@@ -814,6 +816,8 @@ private:
             error(res, 409, "bot_paused", e.what());
         } catch (const RequestChanged&) {
             error(res, 409, "request_changed");
+        } catch (const InvalidAttachment& e) {
+            error(res, 409, "invalid_attachment", e.what());
         } catch (const Conflict&) {
             error(res, 409, mutation == Mutation::Message ? "message_conflict" : "operation_conflict");
         }

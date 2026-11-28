@@ -109,7 +109,8 @@ struct Store::Impl {
                                                 secretStorage,
                                                 sessionParticipations,
                                                 sessionReadStorage,
-                                                sessionSendReceipts};
+                                                sessionSendReceipts,
+                                                attachments};
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
     TaskOperations taskOperations{database,   botLifecycle, permissions, journalStorage, outboxStorage, secretStorage,
                                   taskEvents, taskRecords,  taskRouting, waitStorage,    inboxDecisions};

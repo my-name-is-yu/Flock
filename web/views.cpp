@@ -190,7 +190,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         copyFields(details, data, {"text", "messageId", "replyToMessageId", "taskId", "route", "status", "deliveredToT3"});
         details["textHtml"] = markdown::toHtml(field(data, "text"), sensitive);
         if (kind == "conversation_message") {
-            copyFields(details, data, {"imageAttachmentCount"});
+            copyFields(details, data, {"attachmentCount", "imageAttachmentCount"});
             if (const auto wake = data.find("sessionWake"); wake != data.end() && wake->is_object())
                 copyFields(details["sessionWake"] = Json::object(), *wake, {"threadId", "title", "reason", "sourceMessageId"});
             if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())

@@ -4,6 +4,7 @@
 #include "flock/web_conversation_intake.hpp"
 #include "internal.hpp"
 #include "flock/identity.hpp"
+#include "flock/base64.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
@@ -21,6 +22,7 @@
 #include "flock/runtime_options.hpp"
 #include "flock/session_read.hpp"
 #include "flock/session_ref.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -62,6 +64,89 @@ void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::functio
 
 namespace {
 using flockv0::test::check;
+
+void attachmentHandoff(T3& t3, T3& restarted, Command launch, const std::function<void(Json)>& fixture,
+                       const std::function<Json(std::string_view)>& effects, const std::function<Json()>& destination) {
+    fixture({{"lineageFixture", false}, {"attachmentTools", true}});
+    launch.actionId = "attachment-launch";
+    launch.authGeneration = t3.authGeneration(launch.environmentId, launch.config);
+    launch.attachments = {{"reference.webp", "image/webp", std::string("RIFF\x00\x00\x00\x00WEBP", 12)},
+                          {"report.bin", "application/octet-stream", std::string("\0\xff\r\n", 4)}};
+    launch.attachmentCount = launch.attachments.size();
+    auto denied = launch;
+    denied.actionId = "attachment-launch-denied";
+    const auto launchCount = effects("t3_thread_launch").size();
+    const auto uploadCount = effects("t3_attachment_prepare_upload").size();
+    bool checkedAfterStaging = false;
+    const auto refusal = t3.send(denied, [&] {
+        checkedAfterStaging = effects("t3_attachment_prepare_upload").size() > uploadCount;
+        return false;
+    });
+    check(refusal.kind == Delivery::Kind::Settings && refusal.definitelyUnsent && refusal.noAutomaticRetry && checkedAfterStaging &&
+              effects("t3_thread_launch").size() == launchCount,
+          "new-task delegation launched despite a post-staging authorization denial");
+    auto archived = launch;
+    archived.actionId = "attachment-launch-archived-project";
+    const auto pendingBeforeArchive = destination().at("pending");
+    fixture({{"archiveProjectOnUpload", true}});
+    const auto archivedRefusal = t3.send(archived, [] { return true; });
+    check(archivedRefusal.kind == Delivery::Kind::Settings && archivedRefusal.definitelyUnsent &&
+              archivedRefusal.noAutomaticRetry && effects("t3_thread_launch").size() == launchCount &&
+              destination().at("pending") == pendingBeforeArchive,
+          "new-task delegation launched or remained retryable after its Project was archived during staging");
+    fixture({{"archiveProjectOnUpload", false}, {"archiveProject", false}});
+    const auto accepted = t3.send(launch, [] { return true; });
+    check(accepted.kind == Delivery::Kind::Accepted, "T3 did not launch with the selected files: " + accepted.detail);
+    const auto compare = [](const Json& posted, const Command& command) {
+        check(posted.at("text") == sessionPrompt(command.actionId, command.instruction), "T3 received a different instruction");
+        check(posted.at("files").size() == command.attachments.size(), "T3 received a different number of files");
+        for (std::size_t i = 0; i < command.attachments.size(); ++i) {
+            const auto& remote = posted.at("files").at(i);
+            const auto& local = command.attachments[i];
+            check(remote.at("name") == local.name && remote.at("mimeType") == local.mimeType &&
+                      remote.at("bytes") == encodeBase64(local.bytes),
+                  "T3 received changed file metadata or bytes");
+        }
+    };
+    compare(destination().at("messages").at(0), launch);
+
+    auto follow = launch;
+    follow.tool = CommandTool::message_session;
+    follow.target.threadId = accepted.run.threadId;
+    follow.actionId = "attachment-images";
+    follow.attachments = {{"first.jpg", "image/jpeg", "\xff\xd8\xff" "first"},
+                          {"second.jpg", "image/jpeg", "\xff\xd8\xff" "second"},
+                          {"third.jpg", "image/jpeg", "\xff\xd8\xff" "third"}};
+    follow.attachmentCount = follow.attachments.size();
+    fixture({{"dropAttachmentReply", true}, {"hideAttachmentEvidence", true}});
+    check(t3.send(follow).kind == Delivery::Kind::Unknown, "Lost send reply was treated as success or refusal");
+    compare(destination().at("messages").at(1), follow);
+    auto recovery = follow;
+    recovery.attachments.clear();
+    check(restarted.reconcile(recovery).kind == Delivery::Kind::Unknown, "Text alone established attachment delivery");
+    fixture({{"hideAttachmentEvidence", false}, {"dropAttachmentReply", false}});
+    check(restarted.reconcile(recovery).kind == Delivery::Kind::Accepted && destination().at("messages").size() == 2,
+          "Reconciliation missed the attachment message or resent it");
+    follow.actionId = "attachment-mixed-followup";
+    follow.attachments = launch.attachments;
+    follow.attachmentCount = follow.attachments.size();
+    check(t3.send(follow).kind == Delivery::Kind::Accepted, "Mixed attachment follow-up was refused");
+    compare(destination().at("messages").at(2), follow);
+
+    auto unauthorized = launch;
+    unauthorized.environmentId = "peer-only";
+    unauthorized.gatewayEnvironmentId = launch.environmentId;
+    const auto pending = destination().at("pending");
+    const auto unsupported = t3.send(unauthorized, [] { return true; });
+    check(unsupported.definitelyUnsent && unsupported.detail.find("reference.webp") != std::string::npos &&
+              unsupported.detail.find("linked destination") != std::string::npos && destination().at("pending") == pending,
+          "Gateway-only destination was not rejected before upload");
+    fixture({{"rejectUpload", "report.bin"}});
+    const auto failed = t3.send(launch, [] { return true; });
+    check(failed.definitelyUnsent && failed.detail.find("report.bin") != std::string::npos && failed.detail.find("413") != std::string::npos &&
+              destination().at("pending") == pending && destination().at("messages").size() == 3,
+          "Upload failure sent partial work, left staged bytes behind, or failed to identify the rejected file");
+}
 
 void lineageFallback(T3& t3, Command launch, const std::function<void(Json)>& fixture, const std::function<Json(std::string_view)>& effects,
                      const std::function<Json()>& sessions) {
@@ -541,6 +626,22 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "follow" && effects("t3_thread_send").size() == 2,
               "a newer settled Run in an idle Session blocked the follow-up");
 
+        Command followWithFile = follow;
+        followWithFile.actionId = "flock-follow-up-attachment-denied";
+        followWithFile.attachments = {{"follow-up.txt", "text/plain", "Updated report"}};
+        followWithFile.attachmentCount = followWithFile.attachments.size();
+        fixture({{"scenario", "settled"}, {"attachmentTools", true}});
+        const auto followUploadCount = effects("t3_attachment_prepare_upload").size();
+        const auto followSendCount = effects("t3_thread_send_attachments").size();
+        bool checkedFollowAfterStaging = false;
+        const auto deniedFollow = adapter->send(followWithFile, [&] {
+            checkedFollowAfterStaging = effects("t3_attachment_prepare_upload").size() > followUploadCount;
+            return false;
+        });
+        check(deniedFollow.kind == Delivery::Kind::Settings && deniedFollow.noAutomaticRetry && checkedFollowAfterStaging &&
+                  effects("t3_thread_send_attachments").size() == followSendCount,
+              "follow-up attachments bypassed post-staging authorization");
+        fixture({{"scenario", "settled"}, {"attachmentTools", false}});
         Command selected = launch;
         selected.tool = CommandTool::start_in_session;
         selected.actionId = "flock-selected-idle";
@@ -609,7 +710,62 @@ int main(int argc, char** argv) {
         fixture({{"selectedArchived", false}, {"selectedProject", "another-project"}});
         check(adapter->send(selected).kind == Delivery::Kind::Settings && effects("t3_thread_send").size() == selectedSends,
               "a changed destination project rejected the request before sending");
-        fixture({{"scenario", "settled"}});
+
+        auto selectedWithFile = selected;
+        selectedWithFile.actionId = "flock-selected-project-moved-during-upload";
+        selectedWithFile.attachments = {{"report.txt", "text/plain", "Report"}};
+        selectedWithFile.attachmentCount = selectedWithFile.attachments.size();
+        fixture({{"scenario", "selected-session"},
+                 {"selectedBusy", false},
+                 {"selectedArchived", false},
+                 {"selectedProject", "project"},
+                 {"attachmentTools", true},
+                 {"moveThreadOnUpload", true}});
+        const auto uploadsBeforeMissingAuthorization = effects("t3_attachment_prepare_upload").size();
+        const auto sendsBeforeMissingAuthorization = effects("t3_thread_send_attachments").size();
+        const auto missingAuthorization = adapter->send(selectedWithFile);
+        check(missingAuthorization.kind == Delivery::Kind::Settings && missingAuthorization.definitelyUnsent &&
+                  missingAuthorization.noAutomaticRetry &&
+                  effects("t3_attachment_prepare_upload").size() == uploadsBeforeMissingAuthorization &&
+                  effects("t3_thread_send_attachments").size() == sendsBeforeMissingAuthorization,
+              "selected-Session attachments dispatched without a final authorization callback");
+        const auto uploadsBeforeMove = effects("t3_attachment_prepare_upload").size();
+        const auto sendsBeforeMove = effects("t3_thread_send_attachments").size();
+        const auto pendingUploads = [&] {
+            const auto response = http(origin + "/fixture/attachments", "GET");
+            check(response.status == 200, "Could not inspect staged files on the T3 fixture");
+            return Json::parse(response.body).at("pending");
+        };
+        const auto pendingBeforeMove = pendingUploads();
+        const auto readsBeforeMove = effects("t3_thread_read").size();
+        const auto movedDuringUpload = adapter->send(selectedWithFile, [] { return true; });
+        const auto readsAfterMove = effects("t3_thread_read").size();
+        const auto sendsAfterMove = effects("t3_thread_send_attachments").size();
+        const auto pendingAfterMove = pendingUploads();
+        check(movedDuringUpload.kind == Delivery::Kind::Settings && movedDuringUpload.definitelyUnsent &&
+                  movedDuringUpload.noAutomaticRetry &&
+                  effects("t3_attachment_prepare_upload").size() == uploadsBeforeMove + 1 &&
+                  sendsAfterMove == sendsBeforeMove && pendingAfterMove == pendingBeforeMove && readsAfterMove == readsBeforeMove + 2,
+              "a selected Session that moved projects during upload was sent files or left retryable");
+        fixture({{"moveThreadOnUpload", false}, {"selectedProject", "project"}});
+        const auto uploadsBeforeAuthorization = effects("t3_attachment_prepare_upload").size();
+        const auto sendsBeforeAuthorization = effects("t3_thread_send_attachments").size();
+        const auto pendingBeforeAuthorization = pendingUploads();
+        bool authorizedAfterStaging = false;
+        const auto deniedAfterStaging = adapter->send(selectedWithFile, [&] {
+            authorizedAfterStaging = effects("t3_attachment_prepare_upload").size() == uploadsBeforeAuthorization + 1;
+            return false;
+        });
+        check(deniedAfterStaging.kind == Delivery::Kind::Settings && deniedAfterStaging.definitelyUnsent &&
+                  deniedAfterStaging.noAutomaticRetry &&
+                  authorizedAfterStaging && effects("t3_thread_send_attachments").size() == sendsBeforeAuthorization &&
+                  pendingUploads() == pendingBeforeAuthorization,
+              "a selected Session sent staged files or remained retryable after final authorization was denied");
+        fixture({{"scenario", "settled"},
+                 {"selectedBusy", true},
+                 {"selectedArchived", false},
+                 {"selectedProject", "another-project"},
+                 {"attachmentTools", false}});
 
         ReadRequest read;
         read.environmentId = "env-1";
@@ -848,6 +1004,11 @@ int main(int argc, char** argv) {
             return Json::parse(response.body);
         });
         sessionOriginLaunch(*adapter, home.parent_path() / "session-origin-launch.db", fixture, effects);
+        attachmentHandoff(*adapter, *restarted, launch, fixture, effects, [&] {
+            const auto response = http(origin + "/fixture/attachments", "GET");
+            check(response.status == 200, "Could not inspect files on the T3 fixture");
+            return Json::parse(response.body);
+        });
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

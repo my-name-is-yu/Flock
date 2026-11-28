@@ -52,7 +52,8 @@ private:
     SessionContract sessionContract(const TaskData& task);
     std::vector<OutboxSource> appendSessionDirections(std::string& instruction, const TaskData& task,
                                                       std::span<const OutboxInstruction> pending, Id answersAfter);
-    WorkPrompt workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes, const SessionContract* contract);
+    WorkPrompt workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes, const SessionContract* contract,
+                          std::size_t attachmentCount = 0);
 
     Database& database;
     SecretStorage& secretStorage;

@@ -50,6 +50,9 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/fixture/attachments":
+            self.reply({"messages": self.server.state.get("attachmentMessages", []),
+                        "pending": len(self.server.state.get("uploads", {}))})
         elif self.path == "/fixture/routes":
             self.reply(self.server.state.get("multiRoutedTargets", []))
         elif self.path == "/.well-known/t3/environment":
@@ -88,6 +91,20 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         state = self.server.state
         raw = self.read_body()
+        if self.path.startswith("/api/attachments/upload/"):
+            assert self.headers.get("Authorization") is None
+            upload = state["uploads"][self.path.rsplit("/", 1)[-1]]
+            if upload["name"] == state.get("rejectUpload"):
+                self.reply(code=413)
+                return
+            assert len(raw) == upload["sizeBytes"]
+            upload["bytes"] = base64.b64encode(raw).decode()
+            if state.get("moveThreadOnUpload"):
+                state["selectedProject"] = "other-project"
+            if state.get("archiveProjectOnUpload"):
+                state["archiveProject"] = True
+            self.reply(code=201)
+            return
         if self.path == "/token":
             if state.get("oauthFailure") == "token":
                 self.reply({"error": "invalid_grant"}, code=400)
@@ -178,6 +195,18 @@ class Fixture(BaseHTTPRequestHandler):
             if args["method"] == "notifications/initialized":
                 self.reply(code=202)
                 return
+            if args["method"] == "tools/list":
+                tools = {"t3_thread_launch": ["environmentId", "attachments"]}
+                if state.get("attachmentTools"):
+                    tools.update({"t3_attachment_prepare_upload": ["upload"],
+                                  "t3_attachment_discard": ["attachmentId"],
+                                  "t3_thread_send_attachments": ["threadId", "message", "attachments"]})
+                envelope["result"] = {"tools": [
+                    {"name": name, "inputSchema": {"type": "object", "properties": dict.fromkeys(fields, {})}}
+                    for name, fields in tools.items()
+                ]}
+                self.reply(envelope)
+                return
             assert args["method"] == "tools/call"
             tool = args["params"]
             if tool["name"] == "t3_project_read" and state.get("projectError"):
@@ -198,6 +227,9 @@ class Fixture(BaseHTTPRequestHandler):
                         self.reply(envelope, event_stream=mode == "unknown-delegated-from")
                         return
             content = self.tool(tool["name"], tool["arguments"])
+            if tool["name"] == "t3_thread_send_attachments" and state.get("dropAttachmentReply"):
+                self.close_connection = True
+                return
             if (tool["name"] == "t3_queue" and tool["arguments"]["action"] == "cancel" and
                     tool["arguments"].get("queuedRunId") == state.get("stopDropReply") and "sequence" in content):
                 state.pop("stopDropReply")
@@ -230,6 +262,33 @@ class Fixture(BaseHTTPRequestHandler):
 
     def tool(self, name, args):
         state = self.server.state
+        if state.get("attachmentTools") and not self.server.stock_thread:
+            if name == "t3_attachment_prepare_upload":
+                assert set(args) == {"upload"}
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
+                uploads = state.setdefault("uploads", {})
+                attachment_id = f"file-{len(uploads) + 1}"
+                uploads[attachment_id] = args["upload"]
+                path = "/api/attachments/upload/" + attachment_id
+                return {"attachmentId": attachment_id, "relativeUrl": path, "uploadUrl": self.server.origin + path}
+            if name == "t3_attachment_discard":
+                state["uploads"].pop(args["attachmentId"])
+                return {}
+            if name == "t3_thread_send_attachments" or (name == "t3_thread_launch" and "attachments" in args):
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
+                thread = args.get("threadId", "thread")
+                assert thread == "thread"
+                assert "clientRequestId" not in args or name == "t3_thread_launch"
+                records = state.setdefault("attachmentMessages", [])
+                files = []
+                for ref in args["attachments"]:
+                    upload = state["uploads"][ref["id"]]
+                    assert {k: v for k, v in ref.items() if k != "id"} == {k: v for k, v in upload.items() if k != "bytes"}
+                    files.append({"id": ref["id"], "name": ref["name"], "mimeType": ref["mimeType"], "bytes": upload["bytes"]})
+                records.append({"text": args["message"], "files": files})
+                run = f"attachment-run-{len(records)}"
+                return {"threadId": thread, "projectId": "project", "runId": run, "status": "running",
+                        "messageId": f"attachment-message-{len(records)}"}
         scenario = state.get("scenario", "settled")
         questions = [
             {"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
@@ -265,7 +324,8 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["limit"] == 100
             if args["cursor"] == 0:
                 return {"projects": [
-                    {"id": "project", "title": "Release Pipeline", "archivedAt": None,
+                    {"id": "project", "title": "Release Pipeline",
+                     "archivedAt": "2026-01-01T00:00:00Z" if state.get("archiveProject") else None,
                      "workspaceRoot": "/fixture/release"},
                     {"id": "archived", "title": "Archived Release", "archivedAt": "2026-01-01T00:00:00Z",
                      "workspaceRoot": "/fixture/archive"},
@@ -589,6 +649,13 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 6, "later", "user_input_request", json.dumps(questions)))
         if "followup" in state:
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
+        if state.get("attachmentTools"):
+            rows = []
+            for i, message in enumerate(state.get("attachmentMessages", []), start=1):
+                item = self.item(thread_id, i - 1, f"attachment-run-{i}", "user_message", message["text"], source="mcp")
+                if not state.get("hideAttachmentEvidence"):
+                    item["attachments"] = [{k: v for k, v in file.items() if k != "bytes"} for file in message["files"]]
+                rows.append(item)
         if scenario == "sparse-session-search":
             if thread_id in state.get("missingSearchThreads", []):
                 return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found",
@@ -799,8 +866,33 @@ class Fixture(BaseHTTPRequestHandler):
 
     def stock_tool(self, name, args):
         state = self.server.state
+        if name == "t3_attachment_prepare_upload":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            uploads = state.setdefault("uploads", {})
+            attachment_id = f"stock-file-{len(uploads) + 1}"
+            uploads[attachment_id] = args["upload"]
+            path = "/api/attachments/upload/" + attachment_id
+            return {"attachmentId": attachment_id, "relativeUrl": path, "uploadUrl": self.server.origin + path}
+        if name == "t3_attachment_discard":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            state.setdefault("uploads", {}).pop(args["attachmentId"], None)
+            return {}
+        if name == "t3_thread_send_attachments":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            files = []
+            for ref in args["attachments"]:
+                upload = state["uploads"][ref["id"]]
+                assert {key: value for key, value in ref.items() if key != "id"} == {
+                    key: value for key, value in upload.items() if key != "bytes"}
+                files.append({"id": ref["id"], "name": ref["name"], "mimeType": ref["mimeType"],
+                              "bytes": upload["bytes"]})
+            state.setdefault("attachmentMessages", []).append({"text": args["message"], "files": files})
+            return {"threadId": args["threadId"], "projectId": "project", "runId": "next-run",
+                    "status": "started", "messageId": "sent-id"}
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
+        if name == "t3_project_list":
+            return {"projects": [{"id": "project", "archivedAt": None}], "nextCursor": None}
         if name == "t3_project_read":
             return {"id": "project", "workspaceRoot": state["stockRoot"]}
         if name == "t3_thread_launch":

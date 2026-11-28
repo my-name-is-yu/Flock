@@ -250,8 +250,11 @@ Json Client::rpc(std::string_view method, const Json& arguments) {
         if (frame.find_first_not_of('\n') == frame.npos) return Json();
         return parse(frame);
     });
-    if (auto* capture = recording::Capture::configured(recording::Provider::T3))
-        record(*capture, id, method, arguments, message, contentType, response.status);
+    const auto tool = field(arguments, "name");
+    if (!tool.starts_with("t3_attachment_") && tool != "t3_thread_send_attachments" &&
+        !(tool == "t3_thread_launch" && arguments.at("arguments").contains("attachments")))
+        if (auto* capture = recording::Capture::configured(recording::Provider::T3))
+            record(*capture, id, method, arguments, message, contentType, response.status);
     return rpcResult(std::move(message));
 }
 
@@ -289,10 +292,41 @@ static Failure toolFailure(const Json& payload) {
     return Failure(Failure::Kind::Tool, "T3 rejected the operation");
 }
 
+Json Client::toolInputs() {
+    Json result = Json::object(), params = Json::object();
+    for (int page = 0; page < 20; ++page) {
+        const auto response = rpc("tools/list", params);
+        for (const auto& tool : array(response, "tools"))
+            result[field(tool, "name")] = tool.value("inputSchema", Json::object()).value("properties", Json::object());
+        const auto next = field(response, "nextCursor");
+        if (next.empty()) return result;
+        params["cursor"] = next;
+    }
+    invalidResponse();
+}
+
+void Client::uploadAttachment(const Json& response, const std::string& bytes) {
+    const auto origin = checkedUrl(credential_.mcpUrl).origin;
+    const auto relative = field(response, "relativeUrl");
+    constexpr std::string_view prefix = "/api/attachments/upload/";
+    const auto token = relative.starts_with(prefix) ? std::string_view(relative).substr(prefix.size()) : std::string_view{};
+    const auto url = origin + relative;
+    const auto absolute = field(response, "uploadUrl");
+    if (token.empty() || token.size() > 4096 || token == "." || token == ".." ||
+        token.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != std::string_view::npos ||
+        (!absolute.empty() && absolute != url))
+        throw Failure(Failure::Kind::Settings, "T3 did not provide a signed upload URL on the connected server");
+    const auto uploaded = http(url, "POST", {{"Content-Type", "application/octet-stream"}}, bytes, 60000);
+    if (uploaded.status < 200 || uploaded.status >= 300)
+        throw Failure(Failure::Kind::Settings, "T3 rejected the uploaded bytes (HTTP " + std::to_string(uploaded.status) + ")");
+}
+
 Json Client::call(std::string_view tool, Json arguments) {
     const bool targetTool = tool == "t3_project_list" || tool == "t3_project_read" || tool == "t3_thread_launch" ||
                             tool == "t3_thread_send" || tool == "t3_thread_wait" || tool == "t3_thread_read" ||
-                            tool == "t3_thread_interrupt" || tool == "t3_thread_list" || tool == "t3_pending_request" || tool == "t3_queue";
+                            tool == "t3_thread_interrupt" || tool == "t3_thread_list" || tool == "t3_pending_request" || tool == "t3_queue" ||
+                            tool == "t3_attachment_prepare_upload" || tool == "t3_thread_send_attachments" ||
+                            tool == "t3_attachment_discard";
     if (!targetEnvironmentId_.empty() && targetTool) {
         if (!arguments.is_object()) invalidResponse();
         if (arguments.contains("environmentId") && arguments.at("environmentId") != targetEnvironmentId_) invalidResponse();

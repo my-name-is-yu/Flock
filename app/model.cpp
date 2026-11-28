@@ -437,6 +437,19 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
     } else {
         throw ModelError("Unknown Flock decision tool", false);
     }
+    if (name == "start_task" || name == "send_to_task") {
+        fields["attachments"] = {
+            {"type", "array"},
+            {"maxItems", limits::messages::maxAttachments},
+            {"description", "Original Flock Web files the person asked you to share with this task and destination. "
+                            "Select only those files, even if other attachments are visible. Omit for text-only work. "
+                            "An accepted instruction does not confirm the Session opened the files."},
+            {"items", {{"type", "object"},
+                       {"properties", {{"messageId", {{"type", "integer"}, {"minimum", 1}}},
+                                       {"attachmentId", textParameter("The attachmentId shown on that message.")}}},
+                       {"required", {"messageId", "attachmentId"}},
+                       {"additionalProperties", false}}}};
+    }
     Json parameters = {{"type", "object"}, {"properties", fields}, {"required", required}, {"additionalProperties", false}};
     return {{"type", "function"}, {"name", name}, {"description", description}, {"strict", false}, {"parameters", parameters}};
 }

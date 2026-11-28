@@ -57,10 +57,12 @@ struct SourceQuotes {
 };
 
 std::vector<OutboxInstruction> pendingBatch(std::span<const OutboxInstruction> pending, std::size_t promptBudgetBytes,
-                                            SourceQuotes quotes) {
+                                            SourceQuotes quotes, std::size_t attachmentCount) {
     std::vector<OutboxInstruction> batch;
     std::size_t serializedBytes = 0, promptBytes = 0;
     for (const auto& item : pending) {
+        if (!item.attachments.empty() && attachmentCount > 0) break;
+        attachmentCount += item.attachments.size();
         serializedBytes += instructionJson(item).dump().size();
         promptBytes += 2 + item.text.size();
         if (item.source) promptBytes += quotes.quote(*item.source).size();
@@ -139,7 +141,8 @@ ORDER BY j.id
 }
 
 runtime::SessionPrompts::WorkPrompt runtime::SessionPrompts::workPrompt(const TaskData& task, const Json& event, std::size_t actionIdBytes,
-                                                                        const SessionContract* contract) {
+                                                                        const SessionContract* contract,
+                                                                        std::size_t attachmentCount) {
     WorkPrompt prompt;
     auto& [instruction, pending, contextIds, resultReferences] = prompt;
     const auto scrub = secretStorage.redactor(task.botId);
@@ -201,17 +204,18 @@ runtime::SessionPrompts::WorkPrompt runtime::SessionPrompts::workPrompt(const Ta
         }
     }
     const bool resumedTask = task.restartContext && !task.lastRun;
-    if (contract && !resumedTask)
+    if (contract && !resumedTask && attachmentCount == 0 &&
+        std::ranges::none_of(task.pendingInstructions, [](const auto& item) { return !item.attachments.empty(); }))
         pending = task.pendingInstructions;
     else {
         constexpr auto maxPromptBytes = limits::session_prompt::maxBytes;
         const auto occupiedBytes = reservedBytes + instruction.size();
-        pending = pendingBatch(task.pendingInstructions, maxPromptBytes - std::min(maxPromptBytes, occupiedBytes), quotes);
+        pending = pendingBatch(task.pendingInstructions, maxPromptBytes - std::min(maxPromptBytes, occupiedBytes), quotes, attachmentCount);
     }
     if (contract) {
         const auto sources = appendSessionDirections(instruction, task, pending, contract->answersAfter);
-        if (resumedTask && pending.size() < task.pendingInstructions.size())
-            instruction += "\n\nFlock will send the remaining inherited instructions in follow-up Runs in this Session. "
+        if (pending.size() < task.pendingInstructions.size())
+            instruction += "\n\nFlock will send the remaining instructions in follow-up Runs in this Session. "
                            "Work only on the instructions included in this Run until the rest arrive.";
         for (const auto& source : sources) quoteSource(source);
     } else {
@@ -226,12 +230,14 @@ void runtime::SessionPrompts::prepareDelegation(const TaskData& task, Outbox& ac
     auto instruction = *action.instructionBase;
     const auto contract = sessionContract(task);
     const auto event = taskEvents.currentEvent(task);
-    auto prompt = workPrompt(task, event, action.command.actionId.size(), &contract);
+    auto prompt = workPrompt(task, event, action.command.actionId.size(), &contract, action.attachments.size());
     const auto scrub = secretStorage.redactor(task.botId);
     instruction += prompt.instruction;
     action.command.instruction = scrub.text(instruction);
     redactInstructions(prompt.pending, scrub);
     action.instructions = std::move(prompt.pending);
+    for (const auto& item : action.instructions)
+        action.attachments.insert(action.attachments.end(), item.attachments.begin(), item.attachments.end());
     action.contextIds = std::move(prompt.contextIds);
     action.sourceResultRefs = std::move(prompt.resultReferences);
     action.instructionBase.reset();

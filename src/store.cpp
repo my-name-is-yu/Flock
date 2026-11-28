@@ -514,6 +514,7 @@ SELECT page.id,page.task_id,page.time,page.kind,
             'replyToMessageId',coalesce(m.reply_to,0),'status',coalesce(input.status,'received'),
             'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
               WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
+            'attachmentCount',(SELECT count(*) FROM message_attachments a WHERE a.message_id=m.id),
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,instruction_step AS step

@@ -283,6 +283,8 @@ void decodeTaskFields(TaskData& task, const Json& data, const RecordDecoder& row
     task.cancellationDetail = row.optional<std::string>(data, "cancellationDetail");
     if (const auto found = row.find(data, "pendingInstructions"); found != data.end())
         task.pendingInstructions = taskInstructions(*found, task.id, "pendingInstructions");
+    if (const auto files = row.find(data, "initialAttachments"); files != data.end())
+        task.initialAttachments = decodeAttachmentRefs(*files, row.nested("initialAttachments"));
     if (const auto found = row.find(data, "cancelledInstructions"); found != data.end())
         task.cancelledInstructions = taskInstructions(*found, task.id, "cancelledInstructions");
     if (const auto found = row.find(data, "pendingRunReport"); found != data.end())
@@ -327,6 +329,7 @@ Json encodeTaskPayload(const TaskData& task) {
     if (task.replanningDetail) data["replanningDetail"] = *task.replanningDetail;
     if (task.cancellationDetail) data["cancellationDetail"] = *task.cancellationDetail;
     if (!task.pendingInstructions.empty()) data["pendingInstructions"] = instructionsJson(task.pendingInstructions);
+    if (!task.initialAttachments.empty()) data["initialAttachments"] = attachmentRefsJson(task.initialAttachments);
     if (!task.cancelledInstructions.empty()) data["cancelledInstructions"] = instructionsJson(task.cancelledInstructions);
     if (const auto& pending = task.pendingRunReport)
         data["pendingRunReport"] = {

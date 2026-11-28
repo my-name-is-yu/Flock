@@ -1,4 +1,4 @@
-import { stageScreenshots } from './composer-screenshots.mjs';
+import { stageAttachments } from './composer-screenshots.mjs';
 import { node } from './dom.js';
 import {
   assignComposition,
@@ -49,7 +49,7 @@ export async function addScreenshots(context, composer, reply, files) {
   draft.error = '';
   notices.delete(context.id);
   renderComposer();
-  try { await stageScreenshots(draft, files, context.data.limits.attachments, isCurrent); }
+  try { await stageAttachments(draft, files, context.data.limits.attachments, isCurrent); }
   finally {
     draft.loading = false;
     if (showingComposer(context.id)) renderComposer();
@@ -63,10 +63,14 @@ function renderScreenshots(draft, disabled) {
     renderedScreenshots = images;
     list.replaceChildren(...(images ?? []).map((image, index) => {
       const item = node('li', 'screenshot-preview');
-      const preview = node('img');
-      preview.alt = image.attachment.name;
+      const preview = node(image.preview ? 'img' : 'span');
       preview.dataset.tooltip = image.attachment.name;
-      preview.src = image.preview;
+      if (image.preview) {
+        preview.alt = image.attachment.name;
+        preview.src = image.preview;
+      } else {
+        preview.textContent = image.attachment.name;
+      }
       const remove = button('×', 'icon-button remove-screenshot', () => {
         const hadFocus = document.activeElement === remove;
         URL.revokeObjectURL(image.preview);
@@ -80,7 +84,6 @@ function renderScreenshots(draft, disabled) {
         }
       });
       remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
-      remove.dataset.tooltip = 'Remove image';
       remove.dataset.tooltip = `Remove ${image.attachment.name}`;
       item.append(preview, remove);
       return item;
@@ -218,7 +221,7 @@ export function renderComposer() {
     !body.trim() && (screenshots?.images?.length ?? 0) > 0 && !screenshots?.loading;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' :
-      screenshotError || notice?.text || (needsMessageForImages ? 'Add a message to send images.' : ''));
+      screenshotError || notice?.text || (needsMessageForImages ? 'Add a message to send files.' : ''));
   elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
   elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.fading);
   elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.quiet);

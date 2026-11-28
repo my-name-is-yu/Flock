@@ -26,6 +26,7 @@ class SecretStorage;
 class SessionParticipationRecords;
 class SessionReadStorage;
 class T3;
+class AttachmentStorage;
 enum class CallOutcome;
 struct ConversationCallContext;
 struct Decision;
@@ -40,11 +41,11 @@ public:
                           const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
                           OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                           SessionParticipationRecords& sessionParticipations, SessionReadStorage& sessionReadStorage,
-                          SessionSendReceipts& receipts)
+                          SessionSendReceipts& receipts, AttachmentStorage& attachments)
         : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           turnResults(turnResults), gitStorage(gitStorage), permissions(permissions), path(path), journalStorage(journalStorage),
           outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
-          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), receipts(receipts) {}
+          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), receipts(receipts), attachments(attachments) {}
 
     void reconcilePausedSessionSends(T3&, std::stop_token);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
@@ -61,7 +62,7 @@ private:
     std::optional<CallOutcome> prepareSessionSend(SessionSend&);
     void probeSessionSendTarget(SessionSend&);
     std::optional<CallOutcome> approveSessionSend(SessionSend&);
-    std::optional<CallOutcome> startSessionSend(const SessionSend&);
+    std::optional<CallOutcome> startSessionSend(SessionSend&);
     void deliverSessionSend(SessionSend&);
     Database& database;
     BotLifecycleStorage& botLifecycle;
@@ -78,5 +79,6 @@ private:
     SessionParticipationRecords& sessionParticipations;
     SessionReadStorage& sessionReadStorage;
     SessionSendReceipts& receipts;
+    AttachmentStorage& attachments;
 };
 }

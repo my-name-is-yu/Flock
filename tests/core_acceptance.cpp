@@ -142,6 +142,7 @@ struct SimulatedT3 : T3 {
     std::vector<ReadRequest> readRequests;
     std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
+    std::function<void()> beforeAttachmentAuthorization;
     std::function<RunEvidence(const RunRef&, std::string_view)> recoverEvidence;
     std::vector<RunRef> interruptedRuns;
     std::map<std::string, std::vector<T3Project>, std::less<>> projectsByEnvironment;
@@ -156,6 +157,16 @@ struct SimulatedT3 : T3 {
     std::optional<Delivery> preflight(const Command&) override {
         if (onPreflight) onPreflight();
         return std::nullopt;
+    }
+    Delivery send(const Command& cmd, const SendAuthorization& authorizeAfterStaging) override {
+        if (cmd.attachments.empty()) return send(cmd);
+        if (auto callback = std::exchange(beforeAttachmentAuthorization, {})) callback();
+        if (!authorizeAfterStaging())
+            return {.kind = Delivery::Kind::Settings,
+                    .detail = "Attachment authorization changed before delivery",
+                    .definitelyUnsent = true,
+                    .noAutomaticRetry = true};
+        return send(cmd);
     }
     Delivery send(const Command& cmd) override {
         seen.push_back(cmd);
@@ -345,7 +356,7 @@ void runtimeDatabaseLockIsExclusive() {
     f.restart();
 }
 
-Id seedSelectedTask(Fixture& fixture) {
+Id seedSelectedTask(Fixture& fixture, bool withAttachment = false) {
     T3Connections(*fixture.store).connect("e", localOwner.id, 4173);
     fixture.model.script = [](const ModelInput& input) -> Decision {
         if (input.event.at("kind") == "conversation_turn")
@@ -353,14 +364,21 @@ Id seedSelectedTask(Fixture& fixture) {
         if (input.event.at("kind") == "policy_outcome") return ask();
         return work();
     };
-    ConversationIntake(*fixture.store).receive(localOwner, {"alpha", "", "e", "p"}, "select-thread", "Continue in the selected Session");
+    const auto files = withAttachment
+                           ? Json::array({{{"name", "report.bin"}, {"mimeType", "application/octet-stream"}, {"dataBase64", "AEH/"}}})
+                           : Json::array();
+    const auto receipt = ConversationIntake(*fixture.store).receive(
+        localOwner, {"alpha", "", "e", "p"}, "select-thread", "Continue in the selected Session", 0, files);
     fixture.runtime->runConversations();
     const auto id = fixture.submit();
-    executeSql(fixture.directory / "state.db", R"SQL(
-UPDATE tasks SET source_message_id=(SELECT id FROM messages WHERE bot_id='alpha'),
-    selected_environment_id='e',selected_project_id='p',selected_thread_id='selected-thread'
-WHERE id=(SELECT max(id) FROM tasks);
-)SQL");
+    auto sql = "UPDATE tasks SET source_message_id=" + std::to_string(receipt.at("messageId").get<Id>()) +
+               ",selected_environment_id='e',selected_project_id='p',selected_thread_id='selected-thread'";
+    if (withAttachment) {
+        const auto refs = Json::array({{{"messageId", receipt.at("messageId")}, {"attachmentId", "1"}}});
+        sql += ",data=json_set(data,'$.initialAttachments',json('" + refs.dump() + "'))";
+    }
+    sql += " WHERE id=(SELECT max(id) FROM tasks)";
+    executeSql(fixture.directory / "state.db", sql.c_str());
     return id;
 }
 
@@ -391,6 +409,43 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
     check(f.task(task).at("state") == "cancelling", "A terminal Run with outstanding delegated work was marked cancelled after restart");
     f.t3.finish("run-1", "cancelled");
     f.reach(task, "cancelled");
+}
+
+void selectedSessionAuthorizationRefusalDoesNotRetry() {
+    Fixture f;
+    const auto task = seedSelectedTask(f, true);
+    f.t3.beforeAttachmentAuthorization = [&] { PolicyRules(*f.store).setMode(localOwner, "supervised"); };
+    f.reach(task, "sending");
+    f.runtime->tick();
+    f.wait(task, "settings");
+    const auto refused = Tasks(*f.store).task(task);
+    check(f.t3.seen.empty() && !refused.pendingAction && refused.task.state == TaskState::waiting,
+          "A selected-Session attachment was sent after policy changed during staging");
+
+    f.restart();
+    for (int i = 0; i < 12; ++i) {
+        f.now += 5;
+        f.runtime->tick();
+    }
+    const auto settled = Tasks(*f.store).task(task);
+    check(f.t3.seen.empty() && f.t3.reconciles == 0 && !settled.pendingAction && settled.task.state == TaskState::waiting,
+          "A terminally refused selected-Session send retried after restart");
+}
+
+void selectedSessionAttachmentPassesWhenAuthorizationIsCurrent() {
+    Fixture f;
+    const auto task = seedSelectedTask(f, true);
+    f.reach(task, "sending");
+    f.runtime->tick();
+    check(f.t3.selectedStarts == 1 && f.t3.seen.size() == 1 && f.t3.seen.front().attachments.size() == 1,
+          "A current selected-Session attachment authorization was refused");
+}
+
+void t3AdapterWithoutPostStageAuthorizationFailsClosed() {
+    SimulatedT3 t3;
+    const auto result = t3.T3::send(Command{}, [] { return true; });
+    check(result.kind == Delivery::Kind::Settings && result.definitelyUnsent && result.noAutomaticRetry && t3.seen.empty(),
+          "An adapter without a post-stage authorization boundary dispatched selected-session files");
 }
 
 void selectedWorkRechecksConnectionAfterApproval() {
@@ -1285,6 +1340,9 @@ int main() {
              {"retry unsent Session answer", unsentAnswerRecoversAutomatically},
              {"cancel during delivery", cancelDuringDelivery},
              {"selected work reconciles and cancels only its own queued Run", selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
+             {"selected-Session authorization refusal does not retry", selectedSessionAuthorizationRefusalDoesNotRetry},
+             {"selected-Session attachments pass with current authorization", selectedSessionAttachmentPassesWhenAuthorizationIsCurrent},
+             {"T3 adapter without a post-stage authorization boundary fails closed", t3AdapterWithoutPostStageAuthorizationFailsClosed},
              {"selected work rechecks its T3 connection after approval", selectedWorkRechecksConnectionAfterApproval},
              {"disconnect blocks new work and retries", disconnectBlocksSendingAndRetry},
              {"pause during preflight prevents a send", pauseDuringPreflightPreventsSend},

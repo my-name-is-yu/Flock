@@ -22,6 +22,7 @@ struct Observation;
 struct Wait;
 
 class BotLifecycleStorage;
+class AttachmentStorage;
 class ConversationMessages;
 class Database;
 class JournalStorage;
@@ -46,13 +47,13 @@ public:
                    TaskRecords& taskRecords, TaskRouting& taskRouting, TaskRunReports& taskRunReports, WaitStorage& waitStorage,
                    OutboxStorage& outboxStorage, T3& t3, const Policy& policy, TaskUpdates& updates, TaskQuestions& questions,
                    RunReports& reports, RunObserver& runs, SessionPrompts& prompts, const std::function<Seconds()>& clock,
-                   bool requireT3Connection, const IntakeResolver& intake, std::stop_token shutdown)
+                   bool requireT3Connection, const IntakeResolver& intake, std::stop_token shutdown, AttachmentStorage& attachments)
         : database(database), botLifecycle(botLifecycle), conversationMessages(conversationMessages), journalStorage(journalStorage),
           path(path), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations),
           sessionReadStorage(sessionReadStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
           taskRunReports(taskRunReports), waitStorage(waitStorage), outboxStorage(outboxStorage), t3(t3), policy(policy), updates(updates),
           questions(questions), reports(reports), runs(runs), prompts(prompts), clock(clock), requireT3Connection(requireT3Connection),
-          intake(intake), shutdown(shutdown) {}
+          intake(intake), shutdown(shutdown), attachments(attachments) {}
 
     void stop(TaskData task);
     bool step(TaskData& task, const Wait* wait);
@@ -103,5 +104,6 @@ private:
     bool requireT3Connection;
     const IntakeResolver& intake;
     std::stop_token shutdown;
+    AttachmentStorage& attachments;
 };
 }

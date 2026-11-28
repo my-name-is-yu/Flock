@@ -20,6 +20,9 @@ class SecretRedactor;
 class Statement;
 struct TaskData;
 
+Json attachmentRefsJson(const std::vector<TaskAttachmentRef>&);
+std::vector<TaskAttachmentRef> decodeAttachmentRefs(const Json&, const RecordDecoder&);
+
 class OutboxStorage {
 public:
     explicit OutboxStorage(Database& db) : db_(db) {}
