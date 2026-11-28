@@ -593,7 +593,7 @@ function eventCard(event, context, place, report) {
     bubble.append(text);
     text.classList.add('foldable-text');
     if (event.kind === 'conversation_message') {
-      const count = data.attachmentCount ?? data.imageAttachmentCount;
+      const count = data.attachmentCount;
       const noun = count === data.imageAttachmentCount ? 'image' : 'file';
       if (data.files?.length) bubble.append(messageAttachments(bot.id, data.messageId, data.files));
       else if (count > 0) bubble.append(node('p', 'message-attachments', `${count} ${noun}${count === 1 ? '' : 's'} attached`));
