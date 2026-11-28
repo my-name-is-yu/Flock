@@ -1,5 +1,5 @@
 #include "internal.hpp"
-#include "../src/commit_check.hpp"
+#include "flock/commit_check.hpp"
 #include "flock/command.hpp"
 #include "flock/json.hpp"
 #include "flock/limits.hpp"

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+import re
+import sys
+
+ALLOWED = {
+    "include": {"include"},
+    "src": {"src", "include"},
+    "t3": {"t3", "include"},
+    "web": {"web", "include"},
+    "app": {"app", "include"},
+}
+SOURCE_SUFFIXES = (".cpp", ".hpp")
+INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.MULTILINE)
+TEST_FILE = re.compile(r"(^|_)tests\.cpp$")
+
+
+def is_test(path):
+    return "tests" in path.parts[:-1] or TEST_FILE.search(path.name) is not None
+
+
+def layer_of(root, name, includer):
+    if name.startswith("flock/") and (root / "include" / name).is_file():
+        return "include"
+    relative = (includer.parent / name).resolve()
+    if relative.is_file() and relative.is_relative_to(root):
+        return relative.relative_to(root).parts[0]
+    for layer in ALLOWED:
+        if (root / layer / name).is_file():
+            return layer
+    return None
+
+
+def violations(root):
+    root = root.resolve()
+    found = []
+    for layer, allowed in ALLOWED.items():
+        for path in sorted((root / layer).rglob("*")):
+            relative = path.relative_to(root)
+            if path.suffix not in SOURCE_SUFFIXES or is_test(relative):
+                continue
+            for name in INCLUDE.findall(path.read_text(errors="surrogateescape")):
+                target = layer_of(root, name, path)
+                if layer == "include" and not name.startswith("flock/") and target is not None:
+                    found.append(f'{relative}: public headers include project headers as "flock/...", not "{name}"')
+                elif target is not None and target not in allowed:
+                    found.append(f'{relative}: {layer}/ may not include "{name}" from {target}/')
+    return found
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Check that each layer includes only its own headers and the public headers in include/flock."
+    )
+    parser.add_argument("source", type=Path)
+    args = parser.parse_args()
+    found = violations(args.source)
+    if found:
+        print("Layering check failed", file=sys.stderr)
+        for violation in found:
+            print(f"  {violation}", file=sys.stderr)
+        print(
+            "  Move what both layers need into include/flock, or keep the code in the layer that owns it.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

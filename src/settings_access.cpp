@@ -1,7 +1,7 @@
 #include "flock/policy_rules.hpp"
-#include "settings_access.hpp"
+#include "flock/settings_access.hpp"
 #include "flock/decision_errors.hpp"
-#include "../src/database.hpp"
+#include "database.hpp"
 #include "flock/identity.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
@@ -132,7 +132,7 @@ void keepAdministrator(const auto& db, std::string_view person, bool admin) {
 
 }
 
-SettingsAccess::SettingsAccess(Store& store, const std::filesystem::path&, const char* externalFile) : store_(store) {
+SettingsAccess::SettingsAccess(Store& store, const char* externalFile) : store_(store) {
     auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     if (externalFile) {

@@ -4,7 +4,6 @@
 #include "flock/json.hpp"
 #include "flock/person.hpp"
 
-#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string_view>
@@ -16,7 +15,7 @@ class Store;
 // privileges from the Store so queued work observes account changes too.
 class SettingsAccess {
 public:
-    SettingsAccess(Store&, const std::filesystem::path& home, const char* externalFile);
+    SettingsAccess(Store&, const char* externalFile);
     bool enabled() const;
     ConfiguredIdentities identities() const;
     bool canManageInstallation(const Person&) const;

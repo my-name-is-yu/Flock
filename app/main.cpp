@@ -11,7 +11,7 @@
 #include "chatgpt_web.hpp"
 #include "model.hpp"
 #include "git_github.hpp"
-#include "settings_access.hpp"
+#include "flock/settings_access.hpp"
 #include "settings_connections.hpp"
 #include "settings_system.hpp"
 #include "t3_connection_setup.hpp"
@@ -230,7 +230,7 @@ int externalMcpCommand(Arguments& args, const std::filesystem::path& home, const
             authorizedBots.emplace_back(bot);
         } while (!args.empty());
         auto store = openStore(home);
-        const SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+        const SettingsAccess access(store, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
         const auto credential = ExternalMcp(store).connect(person, authorizedBots);
         print({{"connectionId", credential.connectionId}, {"bearerToken", credential.bearerToken}});
     } else if (action == "disconnect") {
@@ -283,7 +283,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                  .botSetupCatalog = loadSetupModelCatalog});
     SettingsSystem system(home, port);
     SettingsConnections connections(home);
-    SettingsAccess access(store, home, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+    SettingsAccess access(store, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
     const auto identities = access.identities();
     const auto savedPort = T3Connections(store).port();
     if (savedPort && !web)

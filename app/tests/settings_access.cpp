@@ -1,4 +1,4 @@
-#include "../settings_access.hpp"
+#include "flock/settings_access.hpp"
 #include "flock/decision_errors.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
@@ -27,7 +27,7 @@ std::string authorization(const Json& password) {
 void accessLifecycle() {
     Sandbox home;
     Store store(home.path / "flock.sqlite3");
-    SettingsAccess access(store, home.path, nullptr);
+    SettingsAccess access(store, nullptr);
     auto identity = access.identities();
     check(!access.enabled() && identity.authenticate("") == localOwner, "Local setup does not require an account");
     check(access.view(localOwner).at("mode") == "local", "Local setup status");
@@ -41,7 +41,7 @@ void accessLifecycle() {
     check(access.view(localOwner).dump().find(firstPassword) == std::string::npos, "The setup status returned a password");
 
     Store otherStore(home.path / "flock.sqlite3");
-    SettingsAccess other(otherStore, home.path, nullptr);
+    SettingsAccess other(otherStore, nullptr);
     rejects<Conflict>([&] { other.change(localOwner, {{"operation", "activate"}, {"password", "not it"}}); },
                       "Incorrect bootstrap password unlocked the installation");
     other.change(localOwner, {{"operation", "activate"}, {"password", firstPassword}});
@@ -85,7 +85,7 @@ void accessLifecycle() {
                       "Reusing a revoked identity can inherit its existing Bot membership");
 
     Store reopened(home.path / "flock.sqlite3");
-    SettingsAccess afterRestart(reopened, home.path, nullptr);
+    SettingsAccess afterRestart(reopened, nullptr);
     check(afterRestart.identities().authenticate(firstHeader) == localOwner && afterRestart.identities().authenticate("").id.empty(),
           "Saved identity was lost on restart");
 }
@@ -100,7 +100,7 @@ void externalAccess() {
                                      .dump();
     std::filesystem::permissions(identities, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     Store store(home.path / "flock.sqlite3");
-    SettingsAccess access(store, home.path, identities.c_str());
+    SettingsAccess access(store, identities.c_str());
     const auto admin = access.identities().authenticate(header);
     check(access.identities().resolveRoot(admin.id) == false && access.canManageInstallation(admin) &&
               !access.canManageInstallation(access.identities().authenticate(memberHeader)),
@@ -113,7 +113,7 @@ void externalAccess() {
                       "The UI overwrote the authority of the identity file");
 
     Store reopened(home.path / "flock.sqlite3");
-    SettingsAccess missingFile(reopened, home.path, nullptr);
+    SettingsAccess missingFile(reopened, nullptr);
     check(missingFile.enabled() && missingFile.identities().authenticate("").id.empty(),
           "Removing the external settings fell back to local owner");
 }
