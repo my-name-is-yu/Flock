@@ -385,7 +385,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
         }
         if (reply && (outcome.kind == Delivery::Kind::QuestionGone || outcome.kind == Delivery::Kind::NotAccepted)) {
             const bool gone = outcome.kind == Delivery::Kind::QuestionGone;
-            if (gone && action.phase == OutboxPhase::started)
+            if (gone && (action.phase == OutboxPhase::started || !outcome.definitelyUnsent))
                 outboxStorage.recordUnconfirmedAnswer(task.id, *saved);
             else
                 outboxStorage.setOutboxPhase(key, OutboxPhase::closed);

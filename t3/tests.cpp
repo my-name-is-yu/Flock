@@ -461,9 +461,11 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "question"}});
         check(adapter->reconcile(answer).kind == Delivery::Kind::Unknown, "reconciliation reports the pending question");
         check(effects("t3_pending_request").empty(), "T3 receives no reply for an invalid option, ambiguous ownership or unknown delivery");
-        check(adapter->send(answer).kind == Delivery::Kind::Accepted && restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone &&
-                  restarted->send(answer).kind == Delivery::Kind::QuestionGone,
+        check(adapter->send(answer).kind == Delivery::Kind::Accepted && restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone,
               "answer uses original request once");
+        const auto expiredAnswer = restarted->send(answer);
+        check(expiredAnswer.kind == Delivery::Kind::QuestionGone && expiredAnswer.definitelyUnsent,
+              "an already closed question was treated as possibly sent");
         const auto replies = effects("t3_pending_request");
         check(replies.size() == 1, "T3 receives exactly one reply across restart and retry");
         check(replies.at(0).at("threadId") == "thread" && replies.at(0).at("requestId") == "request" &&
@@ -471,7 +473,10 @@ int main(int argc, char** argv) {
                       Json{{"color", Json::array({"green", "blue"})}, {"note", ""}, {"message", ""}, {"tag", ""}},
               "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
-        check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
+        const auto racingAnswer = adapter->send(answer);
+        check(racingAnswer.kind == Delivery::Kind::QuestionGone && !racingAnswer.definitelyUnsent &&
+                  effects("t3_pending_request").size() == replies.size() + 1,
+              "a question that closed during the answer request lost its ambiguous send outcome");
 
         const auto submittedAnswers = effects("t3_pending_request").size();
         fixture({{"scenario", "question"}, {"failAnswerRecheck", true}});

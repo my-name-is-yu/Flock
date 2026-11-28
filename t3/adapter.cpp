@@ -924,7 +924,7 @@ FollowUp followUpReadiness(Client& client, const Command& command, const auto& s
 
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
-    if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
+    if (!pending(client, thread).contains(command.questionId)) return {Outcome::QuestionGone, {}, {}, true};
     const auto watching = waitForRun(client, command.target);
     // Codex's Run projection can stay "running" while its input activity
     // is "waiting". Attribution below checks the actual owned question.
@@ -932,7 +932,7 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
         return result(Outcome::NotAccepted, "Use T3 to answer this question because the assigned Run is not waiting for input");
     auto attribution =
         attribute(client, {thread, watching.runId, command.target.link, command.target.gatewayEnvironmentId}, command.questionId);
-    if (attribution.kind == Attribution::Kind::Resolved) return result(Outcome::QuestionGone);
+    if (attribution.kind == Attribution::Kind::Resolved) return {Outcome::QuestionGone, {}, {}, true};
     if (attribution.kind != Attribution::Kind::Owned)
         return result(Outcome::NotAccepted, "Answer in T3 because the question could not be attributed to the assigned Run");
     Json answers;
@@ -950,7 +950,7 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
         position(member(responded, "sequence"));
         return result(Outcome::Accepted, {}, command.target);
     } catch (const Failure& error) {
-        if (error.reason == Failure::Reason::QuestionGone) return result(Outcome::QuestionGone);
+        if (error.reason == Failure::Reason::QuestionGone) return {Outcome::QuestionGone, {}, {}, !invoked};
         throw;
     }
 }
