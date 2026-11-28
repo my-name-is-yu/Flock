@@ -7,6 +7,7 @@
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
 #include "bots.hpp"
+#include "bot_skills.hpp"
 #include "demo.hpp"
 #include "chatgpt_web.hpp"
 #include "model.hpp"
@@ -43,6 +44,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -276,15 +278,21 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             return Json::array();
         }
     };
-    Store store(home / "flock.sqlite3",
-                {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
-                 .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
-                                     const Json& catalog) { bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog); },
-                 .botSetupCatalog = loadSetupModelCatalog});
+    std::atomic<bool> skillsChanged = false;
+    Store store(home / "flock.sqlite3", {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
+                                         .saveBotSetup =
+                                             [&](Store& target, std::string_view id, const BotSetupEdit& edit, const Json& catalog) {
+                                                 bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog);
+                                                 skillsChanged = true;
+                                             },
+                                         .botSetupCatalog = loadSetupModelCatalog});
     SettingsSystem system(home, port);
     SettingsConnections connections(home);
     SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
     const auto identities = access.identities();
+    const auto syncBotSkills = [&] {
+        if (web && !fixed) syncT3BotSkills(home, store, bots, identities.resolveRoot);
+    };
     const auto savedPort = T3Connections(store).port();
     if (savedPort && !web)
         std::cerr << "Warning: Flock Session tools cannot reach Flock in headless mode. Start 'flock run' with Web enabled.\n";
@@ -311,7 +319,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
     options.intake = intake;
     const SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
-    options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
+    options.applyBotChange = [&](const BotChange& change) {
+        bots.apply(change);
+        skillsChanged = true;
+    };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store, *model, *t3, soul, options);
     bots.syncSchedules(store, options.clock(), reportSchedule);
@@ -319,11 +330,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         [&] { return activeBotCards(store, bots.cards()); },
         intake,
         [&](const Person& creator, const Json& profile, const std::optional<AvatarImage>& image) {
-            return BotAccess{store}.createOwnedBot(creator, [&](const auto& publishOwned) {
+            auto created = BotAccess{store}.createOwnedBot(creator, [&](const auto& publishOwned) {
                 return bots.create(profile, image, publishOwned, [&](auto bot, auto environment, auto project) {
                     BotAccess{store}.rememberProjectAssignment(creator, bot, environment, project);
                 });
             });
+            syncBotSkills();
+            return created;
         },
         {},
         [&](std::string_view botId) { return bots.avatarImage(botId); },
@@ -336,6 +349,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     connections.configureChannels(store, callbacks);
     callbacks.sessionT3 = t3.get();
     callbacks.demoMode = fixed;
+    callbacks.botDeleted = syncBotSkills;
     if (chatgptWeb)
         chatgptWeb->configure(callbacks);
     else {
@@ -347,9 +361,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         const auto catalog = field(profile, "reasoningEffort").empty() ? Json::array() : loadSetupModelCatalog();
         if (profile.contains("sessionModel") || profile.contains("workspaceStrategy"))
             return bots.saveSetup(&store, botId, {profile, {}}, options.clock(), reportSchedule, catalog);
-        return botRunSettingCount(profile)
-                   ? bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor)
-                   : bots.updateProfile(botId, profile, image);
+        if (botRunSettingCount(profile))
+            return bots.updateRunSettings(store, botId, profile, options.clock(), reportSchedule, catalog, &editor);
+        auto saved = bots.updateProfile(botId, profile, image);
+        if (profile.contains("name")) syncBotSkills();
+        return saved;
     };
     callbacks.installationSettings = [&](const Person& actor) {
         auto availableConnections = connections.view();
@@ -396,6 +412,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             std::cerr << "Could not apply the saved Web port. Starting Flock on its previous port.\n";
             server = startWeb(store, *recovery, std::move(callbacks), onBound);
         }
+        syncBotSkills();
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
         if (const auto& address = system.remoteAddress()) {
             try {
@@ -413,6 +430,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
     while (!stopRequested) {
+        if (skillsChanged.exchange(false)) syncBotSkills();
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }

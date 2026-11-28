@@ -1,4 +1,5 @@
 #include "t3_setup.hpp"
+#include "bot_skills.hpp"
 #include "flock/environment.hpp"
 #include "flock/json.hpp"
 #include "flock/types.hpp"
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -52,6 +54,12 @@ fs::path userPath(const char* overrideName, std::string_view relative) {
     return fs::path(directory) / relative;
 }
 
+fs::path claudeSkillsRoot() {
+    const auto directory = setting("CLAUDE_CONFIG_DIR");
+    return directory.empty() ? userPath("FLOCK_CLAUDE_SKILLS_DIR", ".claude/skills")
+                             : fs::path(setting("FLOCK_CLAUDE_SKILLS_DIR", (fs::path(directory) / "skills").string()));
+}
+
 bool installed(const std::string& command) {
     if (command.find('/') != command.npos) return access(command.c_str(), X_OK) == 0;
     auto paths = setting("PATH");
@@ -64,6 +72,11 @@ bool installed(const std::string& command) {
         start = end + 1;
     }
     return false;
+}
+
+bool codexAvailable() {
+    if (const auto command = setting(environment::codexCli); !command.empty()) return installed(command);
+    return installed("codex") || fs::is_regular_file(userPath(environment::codexConfig, ".codex/config.toml"));
 }
 
 bool runProvider(std::vector<std::string> args, std::string_view input = {}, std::string* output = nullptr) {
@@ -294,7 +307,7 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
     std::optional<Json> replacementClaude;
     try {
         connect([&](std::string_view token) {
-            if (installed(setting(environment::codexCli, "codex"))) {
+            if (codexAvailable()) {
                 codex = editCodex(url, token, owns);
                 providers.emplace_back("codex");
             }
@@ -341,8 +354,16 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
 }
 
 bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
-    if (installed(setting(environment::codexCli, "codex")) && !editCodex({}, {}, owns).changed()) return true;
+    if (codexAvailable() && !editCodex({}, {}, owns).changed()) return true;
     return installed(setting(environment::claudeCli, "claude")) && !ownsClaudeServer(readClaudeServer(), owns);
+}
+
+template <typename Root> void removeProviderSkills(Root&& root, std::string_view provider) noexcept {
+    try {
+        exportBotSkills(root(), Json::array());
+    } catch (const std::exception& error) {
+        std::cerr << "Could not remove " << provider << " Bot skills: " << error.what() << '\n';
+    }
 }
 
 void removeT3Providers(const OwnsBearer& owns) {
@@ -350,12 +371,30 @@ void removeT3Providers(const OwnsBearer& owns) {
     const auto claude = setting(environment::claudeCli, "claude");
     // Without Claude Code there is no registration to remove, and its leftover file must not block Codex cleanup.
     const bool removeRegistration = installed(claude) && ownsClaudeServer(readClaudeServer(), owns);
+    const bool removeCodexSkills = codex.changed();
     codex.apply();
     try {
         if (removeRegistration) removeClaude(claude);
     } catch (...) {
         codex.restore();
         throw;
+    }
+    if (removeCodexSkills) removeProviderSkills([] { return userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"); }, "Codex");
+    if (removeRegistration) removeProviderSkills([] { return claudeSkillsRoot(); }, "Claude Code");
+}
+
+void syncT3ProviderSkills(const OwnsBearer& owns, const Json& bots) {
+    try {
+        if (editCodex({}, {}, owns).changed()) exportBotSkills(userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"), bots);
+    } catch (const std::exception& error) {
+        std::cerr << "Could not synchronize Codex Bot skills: " << error.what() << '\n';
+    }
+    try {
+        if (ownsClaudeServer(readClaudeServer(), owns)) {
+            exportBotSkills(claudeSkillsRoot(), bots);
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "Could not synchronize Claude Code Bot skills: " << error.what() << '\n';
     }
 }
 

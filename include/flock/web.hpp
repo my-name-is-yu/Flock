@@ -62,6 +62,7 @@ struct WebCallbacks {
     std::function<Json(std::string_view botId)> botChannels = {};
     std::function<Json(std::string_view botId, const Json&)> changeBotChannel = {};
     bool demoMode = false;
+    std::function<void()> botDeleted = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);
