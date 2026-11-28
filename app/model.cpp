@@ -1,5 +1,4 @@
 #include "model.hpp"
-#include "tool_batch.hpp"
 #include "flock/decision.hpp"
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"

@@ -1,7 +1,7 @@
 #include "session_dispatch_lock.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
-#include "commit_check.hpp"
+#include "flock/commit_check.hpp"
 #include "conversation_storage.hpp"
 #include "flock/bot_notes_error.hpp"
 #include "flock/limits.hpp"

@@ -22,7 +22,7 @@
 #include "journal_conversation.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
-#include "commit_check.hpp"
+#include "flock/commit_check.hpp"
 #include "outbox_storage.hpp"
 #include "record_decode.hpp"
 #include "task_storage.hpp"

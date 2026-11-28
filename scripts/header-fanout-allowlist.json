@@ -3,13 +3,13 @@
   "include/flock/command.hpp": 85,
   "include/flock/decision.hpp": 106,
   "include/flock/intake.hpp": 84,
-  "include/flock/json.hpp": 153,
+  "include/flock/json.hpp": 151,
   "include/flock/model.hpp": 48,
   "include/flock/outbox.hpp": 80,
   "include/flock/outbox_instruction.hpp": 82,
-  "include/flock/person.hpp": 83,
-  "include/flock/policy.hpp": 47,
-  "include/flock/policy_action.hpp": 64,
+  "include/flock/person.hpp": 81,
+  "include/flock/policy.hpp": 45,
+  "include/flock/policy_action.hpp": 62,
   "include/flock/run_ref.hpp": 101,
   "include/flock/run_report.hpp": 88,
   "include/flock/runtime.hpp": 34,
@@ -22,7 +22,7 @@
   "include/flock/task_context.hpp": 80,
   "include/flock/task_interaction.hpp": 88,
   "include/flock/tasks.hpp": 33,
-  "include/flock/types.hpp": 147,
+  "include/flock/types.hpp": 145,
   "include/flock/wait.hpp": 91,
-  "src/database.hpp": 62
+  "src/database.hpp": 60
 }

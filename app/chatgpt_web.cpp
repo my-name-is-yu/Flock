@@ -1,7 +1,7 @@
 #include "chatgpt_web.hpp"
 #include "flock/decision_errors.hpp"
 #include "model.hpp"
-#include "settings_access.hpp"
+#include "flock/settings_access.hpp"
 #include "flock/json.hpp"
 #include "flock/model_error.hpp"
 #include "flock/person.hpp"

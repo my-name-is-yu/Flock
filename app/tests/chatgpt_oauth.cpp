@@ -1,6 +1,6 @@
 #include "../chatgpt_web.hpp"
 #include "../model.hpp"
-#include "../settings_access.hpp"
+#include "flock/settings_access.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
 #include "flock/intake.hpp"
@@ -468,7 +468,7 @@ void switchAccountWithCurrentAdministrator() {
     };
 
     Store store(fixture.home / "flock.sqlite3");
-    SettingsAccess access(store, fixture.home, nullptr);
+    SettingsAccess access(store, nullptr);
     auto model = fixture.model();
     ChatGPTWeb modelWeb(model, access);
     WebCallbacks callbacks{
