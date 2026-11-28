@@ -30,6 +30,9 @@ SINGLE_OWNERS = (
     ),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
+# The conversation page's shared state imports none of the page's other parts, so it is always initialized first.
+STATE_SCRIPT = "web/assets/app-state.js"
+STATE_SCRIPT_IMPORT = re.compile(r"""from '\./(app|app-core|sidebar|activity|timeline|composer|bot-detail)\.js'""")
 SCRIPT_OWNERS = (
     (re.compile(r"\bfunction (node|element)\(tag\b"), "web/assets/dom.js", "create elements with node from dom.js"),
     (re.compile(r"""^import [^;]*'/""", re.MULTILINE), None, "import page scripts by relative path, as in './dom.js'"),
@@ -93,6 +96,8 @@ def violations(root):
     for path in sorted((root / "web" / "assets").glob("*.*js")):
         relative = path.relative_to(root)
         text = path.read_text(errors="surrogateescape")
+        if relative.as_posix() == STATE_SCRIPT and STATE_SCRIPT_IMPORT.search(text):
+            found.append(f"{relative}: keep the page state free of imports from the page's other scripts")
         for pattern, owner, advice in SCRIPT_OWNERS:
             if relative.as_posix() != owner and pattern.search(text):
                 found.append(f"{relative}: {advice}" + (f"; only {owner} does this directly" if owner else ""))

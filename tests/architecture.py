@@ -99,6 +99,12 @@ class ArchitectureTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("app/settings_file.cpp: check that a file is private with ownerOnly", result.stderr)
 
+    def test_page_state_imports_no_other_page_script(self):
+        self.assertEqual(self.check({"web/assets/app-state.js": "import { x } from './composer-drafts.mjs';\n"}).returncode, 0)
+        result = self.check({"web/assets/app-state.js": "import { render } from './app.js';\n"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("web/assets/app-state.js: keep the page state free of imports", result.stderr)
+
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"
         self.assertEqual(self.check({"tests/support.hpp": define}).returncode, 0)
