@@ -36,7 +36,8 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+jobs=$(getconf _NPROCESSORS_ONLN)
 cmake --preset dev -G 'Unix Makefiles' -S "$source_dir" -B "$build_dir"
-cmake --build "$build_dir" --config Debug
+cmake --build "$build_dir" --config Debug --parallel "$jobs"
 python3 "$source_dir/scripts/check-header-fanout.py" "$source_dir" "$build_dir" "$source_dir/scripts/header-fanout-allowlist.json"
-ctest --test-dir "$build_dir" --build-config Debug --output-on-failure --no-tests=error
+ctest --test-dir "$build_dir" --build-config Debug --output-on-failure --no-tests=error --parallel "$jobs"

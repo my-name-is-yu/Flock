@@ -70,43 +70,110 @@ function(flock_fetch_cmark)
 endfunction()
 flock_fetch_cmark()
 
-add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/journal.cpp src/task_storage.cpp src/task_context.cpp src/task_interaction.cpp src/wait.cpp src/outbox.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
-                       src/conversation_dispatch.cpp src/markdown.cpp src/t3_routing.cpp
-                       src/context_compaction.cpp src/session_read.cpp src/model_calls.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/runtime_maintenance.cpp src/runtime_task_scheduler.cpp src/runtime_lifecycle.cpp
-                       src/runtime_task_turn.cpp
-                       src/runtime_task_decisions.cpp
-                       src/runtime_outbox_dispatch.cpp src/runtime_outbox_destinations.cpp
-                       src/runtime_session_prompts.cpp
-                       src/runtime_run_observer.cpp
-                       src/runtime_run_reports.cpp
-                       src/runtime_task_questions.cpp
-                       src/runtime_task_updates.cpp
-                       src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
-                       src/bot_settings_tools.cpp src/bot_setup.cpp src/identity.cpp src/settings_access.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp
-                       src/board_inbox.cpp
-                       src/memory_store.cpp src/memory_learnings.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp src/digest.cpp src/percent_encoding.cpp
-                       src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
+option(FLOCK_WARNINGS_AS_ERRORS "Fail the build on a compiler warning in Flock code" OFF)
+set(flock_warnings -Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
+if(FLOCK_WARNINGS_AS_ERRORS)
+  list(APPEND flock_warnings -Werror)
+endif()
+
+add_library(flock_core STATIC
+  src/attachments.cpp
+  src/automation.cpp
+  src/base64.cpp
+  src/board_inbox.cpp
+  src/bot_lifecycle.cpp
+  src/bot_profile.cpp
+  src/bot_settings_tools.cpp
+  src/bot_setup.cpp
+  src/bot_tools_external.cpp
+  src/bot_workspace.cpp
+  src/channels.cpp
+  src/context_compaction.cpp
+  src/conversation.cpp
+  src/conversation_actions.cpp
+  src/conversation_agent.cpp
+  src/conversation_dispatch.cpp
+  src/conversation_projection.cpp
+  src/cron.cpp
+  src/database.cpp
+  src/digest.cpp
+  src/external_mcp.cpp
+  src/git_followup.cpp
+  src/git_host.cpp
+  src/git_pr.cpp
+  src/git_tools.cpp
+  src/git_webhooks.cpp
+  src/identity.cpp
+  src/image_headers.cpp
+  src/journal.cpp
+  src/journal_conversation.cpp
+  src/journal_git.cpp
+  src/journal_task.cpp
+  src/local_machine.cpp
+  src/markdown.cpp
+  src/memory_learnings.cpp
+  src/memory_store.cpp
+  src/model_calls.cpp
+  src/outbox.cpp
+  src/parallel_tools.cpp
+  src/participation.cpp
+  src/percent_encoding.cpp
+  src/policy.cpp
+  src/policy_approval.cpp
+  src/project_slots.cpp
+  src/run_reports.cpp
+  src/runtime.cpp
+  src/runtime_lifecycle.cpp
+  src/runtime_maintenance.cpp
+  src/runtime_outbox_destinations.cpp
+  src/runtime_outbox_dispatch.cpp
+  src/runtime_run_observer.cpp
+  src/runtime_run_reports.cpp
+  src/runtime_session_prompts.cpp
+  src/runtime_task_decisions.cpp
+  src/runtime_task_questions.cpp
+  src/runtime_task_scheduler.cpp
+  src/runtime_task_turn.cpp
+  src/runtime_task_updates.cpp
+  src/schema.cpp
+  src/secrets.cpp
+  src/session_question.cpp
+  src/session_read.cpp
+  src/session_settings.cpp
+  src/settings_access.cpp
+  src/store.cpp
+  src/t3.cpp
+  src/t3_routing.cpp
+  src/task_context.cpp
+  src/task_destinations.cpp
+  src/task_interaction.cpp
+  src/task_storage.cpp
+  src/tool_batch.cpp
+  src/traffic_recording.cpp
+  src/wait.cpp
+)
 target_include_directories(flock_core PUBLIC include)
-target_sources(flock_core PRIVATE src/bot_profile.cpp)
-target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_git.cpp src/journal_task.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
-target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp src/t3.cpp src/traffic_recording.cpp)
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl OpenSSL::Crypto cmark)
-target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(flock_core PRIVATE ${flock_warnings})
+
+function(flock_test_executable target)
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "SOURCES;LIBRARIES")
+  add_executable(${target} ${arg_SOURCES})
+  target_link_libraries(${target} PRIVATE ${arg_LIBRARIES})
+  target_compile_options(${target} PRIVATE ${flock_warnings})
+endfunction()
 
 option(FLOCK_LIVE_TESTS "Register live ChatGPT and T3 tests in CTest" OFF)
 if(BUILD_TESTING)
   add_library(flock_git_test_sessions STATIC tests/fake_git_sessions.cpp)
   target_link_libraries(flock_git_test_sessions PUBLIC flock_core)
 
-  add_executable(flock_traffic_recording tests/traffic_recording.cpp)
-  target_link_libraries(flock_traffic_recording PRIVATE flock_core)
+  flock_test_executable(flock_traffic_recording SOURCES tests/traffic_recording.cpp LIBRARIES flock_core)
   add_test(NAME flock_traffic_recording COMMAND flock_traffic_recording)
 
   function(flock_verify_model name skill)
@@ -143,68 +210,42 @@ if(BUILD_TESTING)
   flock_replay_model(automation_notes_edit_historical verify-automation-routing --historical=notes-edit
     "An edited automation stayed outside the queue after the project became idle")
 
-  add_executable(flock_conversation_context tests/conversation_context.cpp)
-  target_link_libraries(flock_conversation_context PRIVATE flock_core)
-  target_compile_options(flock_conversation_context PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_conversation_context SOURCES tests/conversation_context.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_context COMMAND flock_conversation_context)
-  add_executable(flock_memory_automation tests/memory_automation.cpp)
-  target_link_libraries(flock_memory_automation PRIVATE flock_core)
-  target_compile_options(flock_memory_automation PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_memory_automation SOURCES tests/memory_automation.cpp LIBRARIES flock_core)
   add_test(NAME flock_memory_automation COMMAND flock_memory_automation)
-  add_executable(flock_channels_local tests/channels_local.cpp)
-  target_link_libraries(flock_channels_local PRIVATE flock_core)
-  target_compile_options(flock_channels_local PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_channels_local SOURCES tests/channels_local.cpp LIBRARIES flock_core)
   add_test(NAME flock_channels_local COMMAND flock_channels_local)
-  add_executable(flock_board_inbox tests/board_inbox.cpp)
-  target_link_libraries(flock_board_inbox PRIVATE flock_core)
-  target_compile_options(flock_board_inbox PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_board_inbox SOURCES tests/board_inbox.cpp LIBRARIES flock_core)
   add_test(NAME flock_board_inbox COMMAND flock_board_inbox)
-  add_executable(flock_protected_input tests/protected_input.cpp)
-  target_link_libraries(flock_protected_input PRIVATE flock_core)
+  flock_test_executable(flock_protected_input SOURCES tests/protected_input.cpp LIBRARIES flock_core)
   add_test(NAME flock_protected_input COMMAND flock_protected_input)
-  add_executable(flock_supervised_policy tests/supervised_policy.cpp)
-  target_link_libraries(flock_supervised_policy PRIVATE flock_core)
+  flock_test_executable(flock_supervised_policy SOURCES tests/supervised_policy.cpp LIBRARIES flock_core)
   add_test(NAME flock_supervised_policy COMMAND flock_supervised_policy)
-  add_executable(flock_session_read tests/session_read.cpp)
-  target_link_libraries(flock_session_read PRIVATE flock_core)
-  target_compile_options(flock_session_read PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_session_read SOURCES tests/session_read.cpp LIBRARIES flock_core)
   add_test(NAME flock_session_read COMMAND flock_session_read)
-  add_executable(flock_core_tests tests/core.cpp)
-  target_link_libraries(flock_core_tests PRIVATE flock_core)
+  flock_test_executable(flock_core_tests SOURCES tests/core.cpp LIBRARIES flock_core)
   add_test(NAME flock_core COMMAND flock_core_tests)
-  add_executable(flock_wait_records tests/wait_records.cpp)
-  target_link_libraries(flock_wait_records PRIVATE flock_core)
+  flock_test_executable(flock_wait_records SOURCES tests/wait_records.cpp LIBRARIES flock_core)
   add_test(NAME flock_wait_records COMMAND flock_wait_records)
-  add_executable(flock_task_records tests/task_records.cpp)
-  target_link_libraries(flock_task_records PRIVATE flock_core)
+  flock_test_executable(flock_task_records SOURCES tests/task_records.cpp LIBRARIES flock_core)
   add_test(NAME flock_task_records COMMAND flock_task_records)
-  add_executable(flock_outbox_records tests/outbox.cpp)
-  target_link_libraries(flock_outbox_records PRIVATE flock_core)
+  flock_test_executable(flock_outbox_records SOURCES tests/outbox.cpp LIBRARIES flock_core)
   add_test(NAME flock_outbox_records COMMAND flock_outbox_records)
-  add_executable(flock_core_acceptance tests/core_acceptance.cpp)
-  target_link_libraries(flock_core_acceptance PRIVATE flock_core)
+  flock_test_executable(flock_core_acceptance SOURCES tests/core_acceptance.cpp LIBRARIES flock_core)
   add_test(NAME flock_core_acceptance COMMAND flock_core_acceptance)
-  add_executable(flock_conversation_store tests/conversation_store.cpp)
-  target_link_libraries(flock_conversation_store PRIVATE flock_core)
+  flock_test_executable(flock_conversation_store SOURCES tests/conversation_store.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_store COMMAND flock_conversation_store)
-  add_executable(flock_tool_batch tests/tool_batch.cpp)
-  target_link_libraries(flock_tool_batch PRIVATE flock_core)
-  target_compile_options(flock_tool_batch PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_tool_batch SOURCES tests/tool_batch.cpp LIBRARIES flock_core)
   add_test(NAME flock_tool_batch COMMAND flock_tool_batch)
-  add_executable(flock_conversation_batch tests/conversation_batch.cpp)
-  target_link_libraries(flock_conversation_batch PRIVATE flock_core)
-  target_compile_options(flock_conversation_batch PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_conversation_batch SOURCES tests/conversation_batch.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_batch COMMAND flock_conversation_batch)
   add_test(NAME flock_tool_batch_measure COMMAND flock_conversation_batch --measure)
-  add_executable(flock_markdown_tests tests/markdown.cpp)
-  target_link_libraries(flock_markdown_tests PRIVATE flock_core)
+  flock_test_executable(flock_markdown_tests SOURCES tests/markdown.cpp LIBRARIES flock_core)
   add_test(NAME flock_markdown COMMAND flock_markdown_tests)
-  add_executable(flock_image_headers tests/image_headers.cpp)
-  target_link_libraries(flock_image_headers PRIVATE flock_core)
-  target_compile_options(flock_image_headers PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_image_headers SOURCES tests/image_headers.cpp LIBRARIES flock_core)
   add_test(NAME flock_image_headers COMMAND flock_image_headers)
-  add_executable(flock_conversation_runtime tests/conversation_runtime.cpp)
-  target_link_libraries(flock_conversation_runtime PRIVATE flock_core)
+  flock_test_executable(flock_conversation_runtime SOURCES tests/conversation_runtime.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_runtime COMMAND flock_conversation_runtime)
 endif()
 
@@ -222,11 +263,9 @@ if(BUILD_TESTING)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
-  add_executable(flock_live_t3 tests/live_t3.cpp)
-  target_link_libraries(flock_live_t3 PRIVATE flock_t3)
-  add_executable(flock_live_conversation tests/live_conversation.cpp tests/live_conversation_judge.cpp)
+  flock_test_executable(flock_live_t3 SOURCES tests/live_t3.cpp LIBRARIES flock_t3)
+  flock_test_executable(flock_live_conversation SOURCES tests/live_conversation.cpp tests/live_conversation_judge.cpp LIBRARIES flock_app_support)
   target_include_directories(flock_live_conversation PRIVATE app)
-  target_link_libraries(flock_live_conversation PRIVATE flock_app_support)
   add_test(NAME flock_live_conversation_self_test COMMAND flock_live_conversation --self-test)
   add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
@@ -244,19 +283,13 @@ if(BUILD_TESTING)
     set_tests_properties(flock_live_t3 PROPERTIES TIMEOUT 360)
     set_tests_properties(flock_live_conversation PROPERTIES TIMEOUT 1500)
   endif()
-  add_executable(flock_git_pr_ci tests/git_pr_ci.cpp tests/git_pr_followup.cpp)
+  flock_test_executable(flock_git_pr_ci SOURCES tests/git_pr_ci.cpp tests/git_pr_followup.cpp LIBRARIES flock_app_support flock_git_test_sessions)
   target_include_directories(flock_git_pr_ci PRIVATE app)
-  target_link_libraries(flock_git_pr_ci PRIVATE flock_app_support flock_git_test_sessions)
-  target_compile_options(flock_git_pr_ci PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_git_pr_ci COMMAND flock_git_pr_ci)
-  add_executable(flock_git_bot_deletion tests/git_bot_deletion.cpp)
-  target_link_libraries(flock_git_bot_deletion PRIVATE flock_git_test_sessions)
-  target_compile_options(flock_git_bot_deletion PRIVATE -Wall -Wextra -Wpedantic)
+  flock_test_executable(flock_git_bot_deletion SOURCES tests/git_bot_deletion.cpp LIBRARIES flock_git_test_sessions)
   add_test(NAME flock_git_bot_deletion COMMAND flock_git_bot_deletion)
-  add_executable(flock_bot_tools tests/bot_tools.cpp)
+  flock_test_executable(flock_bot_tools SOURCES tests/bot_tools.cpp LIBRARIES flock_app_support)
   target_include_directories(flock_bot_tools PRIVATE app)
-  target_link_libraries(flock_bot_tools PRIVATE flock_app_support)
-  target_compile_options(flock_bot_tools PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_bot_tools COMMAND flock_bot_tools)
   add_test(NAME flock_tool_history_projection COMMAND flock_bot_tools --tool-history)
   add_test(NAME flock_bot_tools_mcp COMMAND "${Python3_EXECUTABLE}"

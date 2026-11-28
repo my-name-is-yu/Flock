@@ -16,7 +16,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTING": true,
-        "FLOCK_REQUIRE_ALL_TESTS": true
+        "FLOCK_REQUIRE_ALL_TESTS": true,
+        "FLOCK_WARNINGS_AS_ERRORS": true
       }
     }
   ],
