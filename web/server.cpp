@@ -29,6 +29,7 @@
 #include "flock/intake.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/policy.hpp"
 #include "flock/policy_rules.hpp"
 #include "flock/store.hpp"
@@ -255,7 +256,7 @@ public:
             .set_default_headers(
                 {{"Cache-Control", "no-store"},
                  {"Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                                             "img-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"},
+                                             "img-src 'self' blob:; media-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"},
                  {"Cross-Origin-Resource-Policy", "same-origin"},
                  {"Referrer-Policy", "no-referrer"},
                  {"X-Content-Type-Options", "nosniff"},
@@ -324,6 +325,22 @@ public:
             const auto image = callbacks_.botAvatar(id);
             if (!image) return error(res, 404, "avatar_not_found");
             res.set_content(image->bytes().data(), image->bytes().size(), std::string(image->format().contentType));
+        });
+        server_.Get("/api/conversation/attachment", [this](const Request& req, Response& res) {
+            const auto bot = req.get_param_value("bot");
+            if (req.get_param_value_count("bot") != 1 || !validBotId(bot)) return error(res, 400, "invalid_bot");
+            try {
+                auto file = Conversations(store_).attachment(web::person(callbacks_, req), bot,
+                                                             queryId(req, "messageId", false), queryId(req, "attachmentId", false));
+                if (!file) return error(res, 404, "attachment_not_found");
+                const bool download = req.has_param("download") || web::conversationMediaKind(file->mimeType).empty();
+                const std::string disposition = download ? "attachment" : "inline";
+                res.set_header("Content-Disposition", disposition + "; filename*=UTF-8''" + percentEncode(file->name));
+                res.set_header("Accept-Ranges", "bytes");
+                res.set_content(std::move(file->bytes), download ? "application/octet-stream" : file->mimeType);
+            } catch (const InputError& e) {
+                error(res, 400, e.what());
+            }
         });
         for (const auto path : {"/api/view", "/api/compactions", "/api/conversation", "/api/sessions"}) {
             server_.Get(path, [this](const Request& req, Response& res) {

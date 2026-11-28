@@ -178,7 +178,7 @@ Json ConversationIntake::receive(const Person& actor, const Intake& routing, std
 }
 
 Conversations::Conversations(Store& store)
-    : database_(Database::of(store)), context_(StoreAccess::get(store).conversationContextStorage),
+    : store_(store), database_(Database::of(store)), context_(StoreAccess::get(store).conversationContextStorage),
       memory_(StoreAccess::get(store).memoryStorage), channels_(StoreAccess::get(store).channelStorage) {}
 
 Memory::Memory(Store& store) : database_(Database::of(store)), memory_(StoreAccess::get(store).memoryStorage) {}
@@ -493,6 +493,12 @@ SELECT page.id,page.task_id,page.time,page.kind,
             'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
               WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'attachmentCount',(SELECT count(*) FROM message_attachments a WHERE a.message_id=m.id),
+            'files',CASE WHEN ?5<>'' AND m.person_id=?5 THEN (
+                SELECT json_group_array(json_object('id',CAST(a.attachment_id AS INTEGER),
+                    'name',json_extract(a.metadata,'$.name'),'mimeType',json_extract(a.metadata,'$.mimeType'),
+                    'sizeBytes',json_extract(a.metadata,'$.sizeBytes')))
+                FROM (SELECT attachment_id,metadata FROM message_attachments WHERE message_id=m.id ORDER BY attachment_id) a
+            ) END,
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,instruction_step AS step
@@ -511,7 +517,8 @@ LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=page.wait_id AND w.task_id=page.task_id
 LEFT JOIN channel_messages channel ON page.kind='conversation_message' AND channel.message_id=m.id
 ORDER BY page.id DESC)SQL",
-                                {bot, through, events == ConversationEvents::incoming ? 1 : 0, std::clamp(limit, 1u, 200u)});
+                                {bot, through, events == ConversationEvents::incoming ? 1 : 0, std::clamp(limit, 1u, 200u),
+                                 viewer ? std::string_view(viewer->id) : std::string_view{}});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);

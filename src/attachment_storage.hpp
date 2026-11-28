@@ -23,7 +23,7 @@ public:
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     bool hasAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     std::vector<TaskAttachmentRef> selectForTask(const conversation::Message&, const Json& args) const;
-    std::vector<TaskAttachment> taskAttachments(std::string_view bot, const std::vector<TaskAttachmentRef>&,
+    std::vector<AttachmentFile> taskAttachments(std::string_view bot, const std::vector<TaskAttachmentRef>&,
                                                 const SecretRedactor&) const;
 private:
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;

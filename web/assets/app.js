@@ -12,6 +12,7 @@ import { mountConversationFind } from './conversation-find.mjs';
 import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 import { refreshEventHistory } from './event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from './live-updates.js';
+import { closeConversationAttachments } from './message-attachments.js';
 import {
   assignBotDeletion,
   assignBotDraft,
@@ -189,6 +190,7 @@ function selectBot(botId, { updateHistory = true } = {}) {
   resetConversationJump(view);
   rememberReadingPosition();
   closeDetail();
+  closeConversationAttachments();
   const existing = view?.id === botId ? view : null;
   assignView(botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false } : null);

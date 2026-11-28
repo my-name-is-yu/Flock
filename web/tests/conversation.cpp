@@ -11,6 +11,7 @@
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/base64.hpp"
 #include "flock/conversations.hpp"
 #include "flock/web.hpp"
 
@@ -244,12 +245,15 @@ public:
         return checked(client.Post(path, headers(), data.dump(), "application/json"), status);
     }
     httplib::Headers headers() const { return {{"Origin", origin}, {"Sec-Fetch-Site", "same-origin"}, {"X-Flock-Action", "1"}}; }
-    static Json checked(const httplib::Result& response, int status) {
+    static const httplib::Response& checkedResponse(const httplib::Result& response, int status) {
         if (!response) throw std::runtime_error("HTTP request failed: " + httplib::to_string(response.error()));
         if (response->status != status)
             throw std::runtime_error("Unexpected HTTP " + std::to_string(response->status) + " from " + response->body.substr(0, 240));
         check(response->body.find(privateValue) == std::string::npos, "private connection value entered HTTP response");
-        return Json::parse(response->body);
+        return *response;
+    }
+    static Json checked(const httplib::Result& response, int status) {
+        return Json::parse(checkedResponse(response, status).body);
     }
     httplib::Client client;
     std::string origin;
@@ -374,7 +378,7 @@ void conversationSummaries(const std::filesystem::path& path) {
           "Task start was missing from the conversation reply");
 }
 
-void imageAttachmentCountInConversation(const std::filesystem::path& path) {
+void attachmentsInConversation(const std::filesystem::path& path) {
     Store store(path);
     auto config = callbacks();
     config.authenticate = [](std::string_view credential) {
@@ -426,7 +430,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
             check(data.at("attachmentCount") == files && data.at("imageAttachmentCount") == images,
                   "wrong saved file or image count in the conversation");
             check(data.at("textHtml").is_string(), "user message was not projected as safe Markdown HTML");
-            check(!data.contains("attachments") && !data.contains("dataBase64") &&
+            check(!data.contains("files") && !data.contains("attachments") && !data.contains("dataBase64") &&
                       data.dump().find("private-screenshot") == std::string::npos,
                   "Web conversation exposed private attachment details");
             remaining.erase(match);
@@ -436,6 +440,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     constexpr auto conversation = "/api/conversation?bot=release";
     browser.client.set_default_headers({});
     Browser::checked(browser.client.Get(conversation), 401);
+    Browser::checked(browser.client.Get("/api/conversation/attachment?bot=release&messageId=1&attachmentId=1"), 401);
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
     const auto view = browser.get("/api/view?bot=release");
     assertCounts(view.at("events"), {{single, {2, 1}}, {multiple, {2, 2}}, {textOnly, {0, 0}}, {markdownMessage, {0, 0}}});
@@ -453,6 +458,76 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     check(renderedUserMarkdown, "Web user-message projection changed canonical text or rendered unsafe Markdown");
     assertCounts(browser.get(std::string(conversation) + "&before=" + std::to_string(multiple)).at("events"), {{single, {2, 1}}});
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"), 403);
+
+    const auto fileUrl = [](Id message, Id attachment, std::string_view bot = "release") {
+        return "/api/conversation/attachment?bot=" + std::string(bot) + "&messageId=" + std::to_string(message) +
+               "&attachmentId=" + std::to_string(attachment);
+    };
+    Browser::checked(browser.client.Get(fileUrl(single, 1)), 404);
+    browser.client.set_default_headers({{"Authorization", "Bearer owner"}});
+    const auto png = Browser::checkedResponse(browser.client.Get(fileUrl(single, 1)), 200);
+    check(png.body == decodeBase64(image.at("dataBase64").get<std::string>(), 1024) &&
+              png.get_header_value("Content-Type") == "image/png" && png.get_header_value("Content-Disposition").starts_with("inline;") &&
+              png.get_header_value("Cache-Control") == "no-store", "Photo preview response changed original bytes or response headers");
+    const auto mp3 = Browser::checkedResponse(browser.client.Get(fileUrl(single, 2)), 200);
+    check(mp3.get_header_value("Content-Type") == "audio/mpeg", "Audio was not served as playable media");
+
+    const std::string clipBytes{"\x00\x01\x02\xff", 4};
+    const auto mixed = submit("mixed", Json::array({
+        {{"name", "clip.webm"}, {"mimeType", "video/webm"}, {"dataBase64", encodeBase64(clipBytes)}},
+        {{"name", "reader's 日本語.html"}, {"mimeType", "text/html"}, {"dataBase64", encodeBase64("<p>Original file</p>")}},
+        image
+    }), "Latest files");
+    const auto ranged = Browser::checkedResponse(browser.client.Get(fileUrl(mixed, 1), httplib::Headers{{"Range", "bytes=1-2"}}), 206);
+    check(ranged.body == clipBytes.substr(1, 2) && ranged.get_header_value("Content-Type") == "video/webm" &&
+              ranged.get_header_value("Content-Range") == "bytes 1-2/4", "Video seek did not serve the requested original bytes");
+    const auto head = Browser::checkedResponse(browser.client.Head(fileUrl(mixed, 1)), 200);
+    check(head.body.empty() && head.get_header_value("Content-Length") == "4", "Media length was not advertised");
+
+    const auto download = Browser::checkedResponse(browser.client.Get(fileUrl(mixed, 2)), 200);
+    check(download.body == "<p>Original file</p>" && download.get_header_value("Content-Type") == "application/octet-stream" &&
+              download.get_header_value("X-Content-Type-Options") == "nosniff" &&
+              download.get_header_value("Content-Disposition") == "attachment; filename*=UTF-8''reader%27s%20%E6%97%A5%E6%9C%AC%E8%AA%9E.html",
+          "A general file must be served as an exact-byte download with its encoded original filename");
+    const auto original = Browser::checkedResponse(browser.client.Get(fileUrl(single, 1) + "&download=1"), 200);
+    check(original.body == png.body && original.get_header_value("Content-Disposition").starts_with("attachment;"),
+          "Save photo must download the original");
+    Browser::checked(browser.client.Get(fileUrl(mixed, 1, "triage")), 404);
+    Browser::checked(browser.client.Get(fileUrl(mixed, 4)), 404);
+
+    const auto checkFileList = [&](const Json& page, Id message, const Json& expected) {
+        for (const auto& event : page.at("events")) {
+            if (event.at("id") != message) continue;
+            const auto& data = event.at("data");
+            check(data.at("files") == expected && data.dump().find("dataBase64") == std::string::npos,
+                  "The sender's conversation lost attachment metadata, changed file order, or exposed inline bytes");
+            return;
+        }
+        throw std::runtime_error("The message with files was missing from the conversation");
+    };
+    const Json mixedFiles = Json::array({
+        {{"id", 1}, {"name", "clip.webm"}, {"sizeBytes", 4}, {"preview", "video"}},
+        {{"id", 2}, {"name", "reader's 日本語.html"}, {"sizeBytes", 20}},
+        {{"id", 3}, {"name", image.at("name")}, {"sizeBytes", png.body.size()}, {"preview", "image"}}
+    });
+    checkFileList(browser.get("/api/view?bot=release"), mixed, mixedFiles);
+    checkFileList(browser.get(conversation), mixed, mixedFiles);
+
+    const std::string protectedValue = "attachment-fixture-token";
+    SecretRequests secrets{store};
+    secrets.submitSecret({"owner", true}, "release", secrets.requestSecret("release", {"attachment-test"}), protectedValue);
+    const auto protectedMessage = submit("protected", Json::array({
+        {{"name", protectedValue + ".txt"}, {"mimeType", "text/plain"}, {"dataBase64", "YQ=="}},
+        {{"name", "content.txt"}, {"mimeType", "text/plain"}, {"dataBase64", encodeBase64(protectedValue)}}
+    }), "Do not display " + protectedValue);
+    const auto visible = browser.get(conversation).dump();
+    check(visible.find(protectedValue) == std::string::npos && visible.find("[redacted].txt") != std::string::npos,
+          "Protected attachment filename and original message text were not redacted");
+    for (const Id file : {1, 2}) {
+        const auto refused = Browser::checkedResponse(browser.client.Get(fileUrl(protectedMessage, file) + "&download=1"), 404);
+        check(refused.body.find(protectedValue) == std::string::npos && !refused.has_header("Content-Disposition"),
+              "A protected attachment was disclosed in the download response");
+    }
 }
 
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
@@ -1916,7 +1991,7 @@ int main(int argc, char** argv) {
         conversationBotSetup(directory.path / "full-mode-profiles");
         botPauseEndpoints(directory.path / "bot-pause.sqlite");
         conversationSummaries(directory.path / "conversation-summaries.db");
-        imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
+        attachmentsInConversation(directory.path / "conversation-attachments.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");

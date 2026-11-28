@@ -4,6 +4,7 @@ import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide } from '.
 import { closedLabels, pendingActionLabels, stateLabels } from './conversation-copy.mjs';
 import { node } from './dom.js';
 import { timelineMessages } from './event-history.mjs';
+import { messageAttachments } from './message-attachments.js';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton } from './question-choices.js';
 import { replyArrivalId } from './reply-arrival.mjs';
 import { createTimelineRows } from './timeline-rows.js';
@@ -594,7 +595,8 @@ function eventCard(event, context, place, report) {
     if (event.kind === 'conversation_message') {
       const count = data.attachmentCount ?? data.imageAttachmentCount;
       const noun = count === data.imageAttachmentCount ? 'image' : 'file';
-      if (count > 0) bubble.append(node('p', 'message-attachments', `${count} ${noun}${count === 1 ? '' : 's'} attached`));
+      if (data.files?.length) bubble.append(messageAttachments(bot.id, data.messageId, data.files));
+      else if (count > 0) bubble.append(node('p', 'message-attachments', `${count} ${noun}${count === 1 ? '' : 's'} attached`));
     }
     if (event.kind === 'user_answer') {
       const question = data.question;
