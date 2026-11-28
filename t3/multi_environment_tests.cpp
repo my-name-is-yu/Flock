@@ -754,15 +754,7 @@ void commitEvidence(Scenario& fixture) {
     fixture.local.configure({{"multiEvidence", "rechecked-mismatch"}, {"multiActualCommit", wrongCommit}});
     check(fixture.adapter->observe(fixture.local.id(), config, run).checkedCommit == wrongCommit,
           "a later matching check must not overwrite an attributed mismatch");
-    auto legacy = config;
-    legacy["commitVerification"]["markedChecks"] = false;
-    fixture.local.configure({{"multiEvidence", "unmarked"}, {"multiActualCommit", fixture.model.commit}});
-    check(fixture.adapter->observe(fixture.local.id(), legacy, run).checkedCommit == fixture.model.commit,
-          "a saved unmarked prompt still needs two distinct Git commands");
-    fixture.local.configure({{"multiEvidence", "unmarked-missing-post"}});
-    check(fixture.adapter->observe(fixture.local.id(), legacy, run).checkedCommit.empty(),
-          "legacy recovery must require the final command");
-    fixture.local.configure({{"multiEvidence", "truncated-report"}});
+    fixture.local.configure({{"multiEvidence", "truncated-report"}, {"multiActualCommit", fixture.model.commit}});
     const auto longReport = fixture.adapter->observe(fixture.local.id(), config, run);
     check(longReport.truncated && longReport.checkedCommit == fixture.model.commit && !longReport.commitEvidenceUnavailable,
           "truncating the written report must preserve separately verified commit evidence");

@@ -788,12 +788,10 @@ std::string commitCheckOutput(const Json& item, std::string_view command) {
 }
 
 std::string readCheckedCommit(Client& client, const RunRef& assigned, const RunRef& effective, const RunRef& result,
-                              const RunEvidence& report, std::string_view expected, bool marked) try {
+                              const RunEvidence& report, std::string_view expected) try {
     if (!gitCommit(expected) || report.itemId.empty()) return {};
     Scan scan;
     std::string before, after, mismatch;
-    const auto preCommand = marked ? commit_check::before : commit_check::legacy;
-    const auto postCommand = marked ? commit_check::after : commit_check::legacy;
     bool sawCommand = false, finalReport = false;
     walkThreadHistoryForward(client, scan, assigned.threadId, "activity", 512, -1, [&](const Json& item) {
         const bool fromResult = fromRun(item, result);
@@ -802,8 +800,8 @@ std::string readCheckedCommit(Client& client, const RunRef& assigned, const RunR
         const auto type = field(item, "type");
         if (type == "command_execution") {
             const bool first = !std::exchange(sawCommand, true);
-            auto initial = fromWork ? commitCheckOutput(item, preCommand) : std::string{};
-            after = fromResult && (marked || !first) ? commitCheckOutput(item, postCommand) : std::string{};
+            auto initial = fromWork ? commitCheckOutput(item, commit_check::before) : std::string{};
+            after = fromResult ? commitCheckOutput(item, commit_check::after) : std::string{};
             for (const auto* sha : {&initial, &after}) {
                 if (!sha->empty() && *sha != expected) {
                     mismatch = *sha;
@@ -1213,9 +1211,8 @@ public:
                 if (problem) observed.status = "failed";
                 auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client, source, observed.status);
                 if (verification != config.end()) {
-                    observed.checkedCommit =
-                        readCheckedCommit(client, run, {run.threadId, effective, run.link, run.gatewayEnvironmentId}, source, evidence,
-                                          field(*verification, "expectedCommit"), verification->value("markedChecks", true));
+                    observed.checkedCommit = readCheckedCommit(client, run, {run.threadId, effective, run.link, run.gatewayEnvironmentId},
+                                                               source, evidence, field(*verification, "expectedCommit"));
                     observed.commitEvidenceUnavailable = observed.status == "completed" && observed.checkedCommit.empty();
                 }
                 observed.evidence = evidence.availability;

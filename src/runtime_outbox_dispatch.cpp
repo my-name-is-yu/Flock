@@ -142,8 +142,7 @@ Command runtime::OutboxDispatch::command(const TaskData& task, const Outbox& act
     if (action.commit) {
         const auto& commit = action.commit->expected;
         c.config["session"]["workspaceStrategy"] = {{"type", "worktree"}, {"baseRef", commit}, {"startFromOrigin", false}};
-        c.config["commitVerification"] = {
-            {"expectedCommit", commit}, {"projectId", c.projectId}, {"markedChecks", action.commit->markedChecks}};
+        c.config["commitVerification"] = {{"expectedCommit", commit}, {"projectId", c.projectId}};
     }
     if (c.gatewayEnvironmentId.empty()) c.gatewayEnvironmentId = c.target.gatewayEnvironmentId;
     if (c.gatewayEnvironmentId.empty() && !action.destinationAction)
@@ -734,7 +733,7 @@ void runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
     action.destinationAction = destination != nullptr;
     if (tool == CommandTool::delegate || tool == CommandTool::start_in_session) {
         if (destination && task.requestedCommit) {
-            action.commit = OutboxCommit{*task.requestedCommit, true};
+            action.commit = OutboxCommit{*task.requestedCommit};
             instruction = commit_check::instructions(instruction, action.commit->expected);
         }
         action.instructionBase = policy.secretRedactor(task.botId).text(instruction);

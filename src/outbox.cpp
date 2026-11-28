@@ -277,10 +277,7 @@ Json outboxPayload(const OutboxAction& outbox) {
                  {"sourceResultRefs", Json::array()}};
     if (!command.gatewayEnvironmentId.empty()) data["gatewayEnvironmentId"] = command.gatewayEnvironmentId;
     if (outbox.destinationAction) data["destinationAction"] = true;
-    if (outbox.commit) {
-        data["expectedCommit"] = outbox.commit->expected;
-        data["markedCommitChecks"] = outbox.commit->markedChecks;
-    }
+    if (outbox.commit) data["expectedCommit"] = outbox.commit->expected;
     if (command.receipt) data["receipt"] = runJson(*command.receipt);
     if (outbox.stop) writeStopPayload(data, *outbox.stop);
     for (const auto& item : outbox.instructions) data["instructions"].push_back(instructionJson(item));
@@ -357,8 +354,7 @@ Outbox decodeOutboxRow(const Statement& columns) {
     outbox.contextIds = readContext(row.require(data, "contextIds"), row.nested("contextIds"));
     outbox.sourceResultRefs = readArray(row.require(data, "sourceResultRefs"), row.nested("sourceResultRefs"), readSource);
     outbox.destinationAction = row.optional<bool>(data, "destinationAction").value_or(false);
-    if (data.contains("expectedCommit") || data.contains("markedCommitChecks"))
-        outbox.commit = OutboxCommit{row.get<std::string>(data, "expectedCommit"), row.get<bool>(data, "markedCommitChecks")};
+    if (data.contains("expectedCommit")) outbox.commit = OutboxCommit{row.get<std::string>(data, "expectedCommit")};
     if (!columns.null(7)) outbox.sessionParticipationId = columns.number(7);
     if (!columns.null(11)) {
         const auto excerptBytes = columns.number(13);
