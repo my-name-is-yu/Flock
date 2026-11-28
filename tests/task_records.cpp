@@ -72,16 +72,15 @@ Json stored() {
             {"config", {{"model", "example"}, {"custom", Json::array({"one", "two"})}}},
             {"eventId", 0},
             {"createdAt", 1700000000},
-            {"feedback", "Run is ready"},
             {"question", nullptr}};
 }
 
 void roundTrips() {
     using enum TaskState;
     constexpr std::array states{
-        std::pair{queued, "queued"sv},         std::pair{deciding, "deciding"sv},   std::pair{sending, "sending"sv},
-        std::pair{running, "running"sv},       std::pair{waiting, "waiting"sv},     std::pair{peer_waiting, "peer_waiting"sv},
-        std::pair{cancelling, "cancelling"sv}, std::pair{completed, "completed"sv}, std::pair{cancelled, "cancelled"sv},
+        std::pair{queued, "queued"sv},       std::pair{deciding, "deciding"sv},   std::pair{sending, "sending"sv},
+        std::pair{running, "running"sv},     std::pair{waiting, "waiting"sv},     std::pair{cancelling, "cancelling"sv},
+        std::pair{completed, "completed"sv}, std::pair{cancelled, "cancelled"sv},
     };
     SavedTask saved;
     const auto intake = saved.load();
@@ -378,18 +377,6 @@ void completionAndFeedbackRoundTrips() {
     check(std::get<FanoutCompletion>(runs.details).outcome == RunOutcome::partial_failure && encodeCompletion(runs) == fanout,
           "Fan-out completion changed its outcome or requested commit");
 
-    const Json dependency{{"taskId", 70},    {"exchangeId", "exchange"}, {"messageId", "result"},
-                          {"botId", "peer"}, {"requestKind", "work"},    {"status", "completed"}};
-    const Json evidence{
-        {"environmentId", "env"}, {"threadId", "thread"}, {"runId", "run"}, {"kind", "peer_report"}, {"messageId", "result"}};
-    Json peer{{"text", "Done"},
-              {"revisionId", nullptr},
-              {"doneWhen", "Compare results"},
-              {"reason", "Peer verified"},
-              {"dependency", dependency},
-              {"evidenceRefs", Json::array({evidence})}};
-    check(encodeCompletion(decodeCompletion(id, peer)) == peer, "Peer completion changed its dependencies or evidence");
-
     Json failure{{"eventId", 38}, {"tool", "follow_up"}, {"args", nullptr}, {"result", {{"ok", false}, {"error", "Unavailable"}}}};
     check(encodeToolError(decodeToolError(id, failure)) == failure, "Feedback lost null tool arguments");
     failure.erase("args");
@@ -406,26 +393,9 @@ void completionAndFeedbackRoundTrips() {
                         {"evidence", Json::array()},
                         {"usage", {{"total_tokens", 19}}}};
     check(encodeJournalDecision(decodeJournalDecision(id, decision)) == decision, "Decision changed its recorded usage or arguments");
-
-    peer["evidenceRefs"][0].erase("messageId");
-    try {
-        (void)decodeCompletion(id, peer);
-    } catch (const RecordDecodeError& error) {
-        check(std::string_view(error.what()).find("evidenceRefs.0.messageId") != std::string_view::npos,
-              "Malformed peer evidence did not identify its missing message anchor");
-        return;
-    }
-    throw std::runtime_error("Peer report completion accepted evidence with no message anchor");
 }
 
-void questionAndCheckpointRoundTrip() {
-    const Json decision{{"generation", generation},
-                        {"eventId", 15},
-                        {"revisionId", nullptr},
-                        {"tool", "answer_session_question"},
-                        {"args", {{"answers", {{"branch", "main"}}}}},
-                        {"usage", {{"total_tokens", 19}}},
-                        {"attemptId", 25}};
+void questionRoundTrip() {
     auto data = stored();
     data["question"] = {
         {"requestId", "request"},
@@ -437,21 +407,16 @@ void questionAndCheckpointRoundTrip() {
                                  {"freeform", false},
                                  {"options", Json::array({{{"label", "Main"}, {"value", "main"}, {"description", "Default"}}})}}})},
         {"target", {{"eventId", 15}, {"requestId", "request"}, {"run", nullptr}, {"waitId", 20}}},
-        {"suspendedWaitId", 20},
-        {"suspendedDecision", decision}};
-    data["pendingDecision"] = decision;
+        {"suspendedWaitId", 20}};
     data["blockerReason"] = "Waiting for a branch";
     data["blockerWaitId"] = 20;
     const auto task = decodeTaskPayload(TaskData{.id = id, .generation = generation, .state = TaskState::waiting}, data.dump());
     check(task.question && task.question->fields.at(0).options.at(0).value == "main" && task.question->target.waitId == 20 &&
-              task.question->suspendedWaitId == 20 && task.question->suspendedDecision &&
-              task.question->suspendedDecision->decision.attemptId == 25 && task.pendingDecision && !task.pendingDecision->revisionId &&
-              task.pendingDecision->decision.tool == "answer_session_question" && task.blocker && task.blocker->waitId == 20 &&
-              encodeTaskPayload(task) == data,
-          "Question, suspended checkpoint, and blocker changed on round-trip");
+              task.question->suspendedWaitId == 20 && task.blocker && task.blocker->waitId == 20 && encodeTaskPayload(task) == data,
+          "Question and blocker changed on round-trip");
 
-    data["question"]["suspendedDecision"]["attempt"] = 25;
-    rejects(data.dump(), "question.suspendedDecision.attempt", "unknown key");
+    data["question"]["suspendedDecision"] = Json::object();
+    rejects(data.dump(), "question.suspendedDecision", "unknown key");
 }
 }
 
@@ -465,7 +430,7 @@ int main() {
         journalRunReportRoundTrips();
         acceptedInstructionRoundTrips();
         completionAndFeedbackRoundTrips();
-        questionAndCheckpointRoundTrip();
+        questionRoundTrip();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

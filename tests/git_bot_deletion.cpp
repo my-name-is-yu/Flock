@@ -45,13 +45,20 @@ public:
             std::lock_guard lock(mutex);
             tools.emplace(message, Script{std::move(tool), std::move(beforeTool), nullptr});
         }
-        ConversationIntake(store).receive(localOwner, intake(std::string(bot)), message, message);
+        const auto project = bot == "owner" ? std::string("project") : std::string(bot) + "-project";
+        ConversationIntake(store).receive(localOwner, intake(std::string(bot), project), message, message);
     }
 
     Json result(std::string_view message) {
         std::lock_guard lock(mutex);
         return tools.find(message)->second.result;
     }
+
+    Id startTask(Store& store, Runtime& runtime, std::string_view bot, std::string_view message) {
+        return runTool(store, runtime, bot, message, {"start_task", {{"request", "Ship the change"}}, {}}).at("taskId").get<Id>();
+    }
+
+    Id prTask = 0;
 
     Json runTool(Store& store, Runtime& runtime, std::string_view bot, std::string_view message, Decision tool) {
         queueTool(store, bot, message, std::move(tool));
@@ -75,11 +82,16 @@ private:
 
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
-        if (event.at("kind") == "intake") return {"delegate", {{"instruction", "Ship the change"}, {"doneWhen", "Report the result"}}, {}};
-        if (event.at("kind") == "result") {
-            if (input.task.at("botId") == "owner" && event.value("gitResults", Json::array()).empty())
-                return {"git_open_pr", openArgs(), {}};
-            return {"wait_for_event", {{"note", "Waiting for review"}, {"checkAgainAfterMinutes", 5}}, {}};
+        if (event.contains("sessionWake")) {
+            const auto& steps = event.at("turn");
+            if (steps.empty() && event.at("task").at("taskId") == prTask) {
+                auto args = openArgs();
+                args["taskId"] = prTask;
+                return {"git_open_pr", std::move(args), {}};
+            }
+            if (steps.empty() || steps.back().at("tool") == "git_open_pr")
+                return {"wait_for_event", {{"note", "Waiting for review"}, {"checkAgainAfterMinutes", 5}}, {}};
+            return {"reply", {{"text", "Waiting for review."}}, {}};
         }
         if (!event.contains("gitEvent")) {
             const auto& steps = event.at("turn");
@@ -150,7 +162,7 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
     {
         Store store(path);
         Runtime runtime(store, model, sessions, soul, options(host));
-        retired = TaskIntake(store).submit(intake());
+        retired = model.prTask = model.startTask(store, runtime, "owner", "start-retired");
         for (int i = 0; i < 8 && Tasks(store).task(retired).task.state != TaskState::external_waiting; ++i) runtime.tick();
         check(Tasks(store).task(retired).task.state == TaskState::external_waiting && host->createCalls == 1,
               "The original PR task did not wait");
@@ -162,12 +174,12 @@ void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyn
         }
         check(busy && !BotLifecycle(store).botDeleted("owner"), "An open PR task did not block Bot deletion");
 
-        sibling = TaskIntake(store).submit(intake("sibling", "sibling-project"));
+        sibling = model.startTask(store, runtime, "sibling", "start-sibling");
         auto siblingArgs = openArgs("sibling-change");
         siblingArgs["taskId"] = sibling;
         check(model.runTool(store, runtime, "sibling", "watch-sibling", {"git_open_pr", siblingArgs, {}}).at("prNumber") == 2,
               "The sibling did not start watching another PR at the same commit");
-        replacement = TaskIntake(store).submit(intake("replacement", "replacement-project"));
+        replacement = model.startTask(store, runtime, "replacement", "start-replacement");
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(Tasks(store).task(sibling).task.state == TaskState::external_waiting &&
                   Tasks(store).task(replacement).task.state == TaskState::external_waiting,

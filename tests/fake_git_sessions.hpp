@@ -17,12 +17,14 @@ public:
     std::vector<CommandPayload> sessionSends;
     std::optional<SessionTarget> askOrigin;
     std::function<void()> afterSessionSend;
+    bool holdRuns = false;
 
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override;
     Delivery send(const Command&) override;
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef&) override {
         Observation result;
+        if (holdRuns) return result;
         result.kind = Observation::Kind::Finished;
         result.status = "completed";
         result.report = "Pushed branch change with tests";

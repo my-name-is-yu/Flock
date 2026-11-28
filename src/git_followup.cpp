@@ -1,7 +1,7 @@
+#include "journal_git.hpp"
 #include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
-#include "journal_peer.hpp"
 #include "journal.hpp"
 #include "journal_task.hpp"
 #include "flock/git_host.hpp"
@@ -177,17 +177,7 @@ Json GitStorage::applyGitTaskDecision(const conversation::Message& message, cons
         if (!gitNotificationCanComplete(message)) throw ToolError("This notification does not confirm a pull request closed or merged");
         if (args.size() != 1) throw ToolError("Provide a report");
         if (!task.pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
-        auto report = text(args, "report", limits::session_prompt::maxDecisionTextBytes, true);
-        CompletionProvenance source;
-        if (task.lastRun) {
-            auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
-            if (row.next()) {
-                const auto lastReport = decodeRunReport(row.number(0), row.json(1));
-                if (lastReport.matches(*task.lastRun)) source = reportSourceRun(lastReport);
-            }
-        }
-        taskRecords.complete(task,
-                             {std::move(report), task.currentRevision, TaskCompletion{decision.reason, task.doneWhen, std::move(source)}});
+        taskRecords.completeWithReport(task, text(args, "report", limits::session_prompt::maxDecisionTextBytes, true), decision.reason);
     }
     if (replacesCheck) TaskEvents(database).consumeEvent(task);
     return {{"ok", true}, {"taskId", task.id}, {"effect", taskStateName(task.state)}};

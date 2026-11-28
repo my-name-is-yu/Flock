@@ -33,7 +33,6 @@ class JournalStorage;
 class LocalMachineStorage;
 class MemoryStorage;
 class ModelCalls;
-class PeerStorage;
 class PolicyApprovals;
 class SecretStorage;
 class SessionMessageStorage;
@@ -53,6 +52,8 @@ enum class ConversationReplyRoute;
 enum class SessionExit;
 struct BotTools;
 struct ConversationCallContext;
+struct ConversationBotMessageEntry;
+struct ConversationWakeEntry;
 struct ConversationInvitationEntry;
 struct Decision;
 struct TaskDestinations;
@@ -78,15 +79,15 @@ public:
                         BotSetupStorage& botSetup, ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
                         ConversationTools& conversationTools, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
                         LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
-                        PeerStorage& peerStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
-                        SessionMessageStorage& sessionMessageStorage, SessionParticipationStorage& sessionParticipationStorage,
-                        SessionReadStorage& sessionReadStorage, TaskOperations& taskOperations, TaskRecords& taskRecords,
-                        TaskRouting& taskRouting, WaitStorage& waitStorage, WebIdentityState& webIdentity)
+                        PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionMessageStorage& sessionMessageStorage,
+                        SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
+                        TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
+                        WebIdentityState& webIdentity)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
           permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
-          modelCalls(modelCalls), peerStorage(peerStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          modelCalls(modelCalls), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
           waitStorage(waitStorage), webIdentity(webIdentity) {}
@@ -94,7 +95,12 @@ public:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
     Id enqueueConversation(const Person&, const Intake&, conversation::PrincipalSource, std::string_view clientId, std::string_view text,
-                           Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr);
+                           Id replyTo = 0, const SessionOrigin* origin = nullptr, const ConversationInvitationEntry* invitation = nullptr,
+                           const ConversationBotMessageEntry* botMessage = nullptr);
+    // Starts a turn for the Bot that sent `source`, in the same conversation and with the same authority.
+    Id enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry&, std::string_view clientId);
+    // Wakes the conversation that started a task, with the authority of the message that started it.
+    Id enqueueTaskWake(Id sourceMessage, ConversationWakeEntry, std::string_view clientId);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
@@ -108,6 +114,15 @@ public:
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
+    // The task this wake reports on, while it waits for the conversation to decide what happens next.
+    std::optional<TaskData> wokenTask(const conversation::Message&) const;
+    Json applyWokenTaskDecision(const conversation::Message&, const Decision&, Seconds now);
+    struct WorkLearningSource {
+        Id report;
+        std::string runId;
+    };
+    // The finished Run whose report the Bot may learn from when it completes the woken task.
+    std::optional<WorkLearningSource> wokenLearningSource(const TaskData&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
                     const conversation::QuestionAnchor* question = nullptr);
     TaskData ownTask(Id taskId, const conversation::Message&) const;
@@ -121,6 +136,7 @@ private:
                                 const ConversationCallContext&, const Decision* reply = nullptr);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&, std::string_view key,
                                              const ConversationCallContext&);
+    CallOutcome executeMessageBot(const conversation::Message&, int step, const Decision&, const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
                                          const std::function<Seconds()>&, const Json* setup = nullptr);
     CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
@@ -150,7 +166,6 @@ private:
     LocalMachineStorage& localMachineStorage;
     MemoryStorage& memoryStorage;
     ModelCalls& modelCalls;
-    PeerStorage& peerStorage;
     PolicyApprovals& policyApprovals;
     SecretStorage& secretStorage;
     SessionMessageStorage& sessionMessageStorage;

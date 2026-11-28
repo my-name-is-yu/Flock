@@ -16,7 +16,6 @@ class BotLifecycleStorage;
 class InboxStorage;
 class JournalStorage;
 class OutboxStorage;
-class PeerStorage;
 class SecretStorage;
 class TaskEvents;
 class TaskRecords;
@@ -31,16 +30,14 @@ struct TaskRoute;
 struct WorkSession;
 enum class InboxKind;
 
-enum class TaskSource { request, handoff, consultation };
-
 class TaskOperations {
 public:
     TaskOperations(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, JournalStorage& journalStorage,
-                   OutboxStorage& outboxStorage, PeerStorage& peerStorage, SecretStorage& secretStorage, TaskEvents& taskEvents,
-                   TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage, InboxStorage& inboxStorage)
+                   OutboxStorage& outboxStorage, SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
+                   TaskRouting& taskRouting, WaitStorage& waitStorage, InboxStorage& inboxStorage)
         : database(database), botLifecycle(botLifecycle), permissions(permissions), journalStorage(journalStorage),
-          outboxStorage(outboxStorage), peerStorage(peerStorage), secretStorage(secretStorage), taskEvents(taskEvents),
-          taskRecords(taskRecords), taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {}
+          outboxStorage(outboxStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords),
+          taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {}
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
@@ -49,8 +46,8 @@ public:
     bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
                            const TaskChange* change);
     Id submitRequest(const Intake&, const Person* requester);
-    Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, TaskSource sourceKind = TaskSource::request,
-              std::optional<TaskTrigger> trigger = {}, std::optional<std::string> requester = {});
+    Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, std::optional<TaskTrigger> trigger = {},
+              std::optional<std::string> requester = {});
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&, Id sourceMessage = 0, std::optional<InboxKind> = {});
     void requestCancellation(TaskData&, SessionStop stop = {});
 private:
@@ -59,7 +56,6 @@ private:
     const Policy& permissions;
     JournalStorage& journalStorage;
     OutboxStorage& outboxStorage;
-    PeerStorage& peerStorage;
     SecretStorage& secretStorage;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;

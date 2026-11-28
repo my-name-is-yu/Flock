@@ -47,10 +47,8 @@ public:
           webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns), policyApprovals(policyApprovals),
           sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
 
-    Json gitTool(GitHost&, std::string_view bot, Id task, std::string_view environment, std::string_view project, const Decision&,
-                 std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
-    void projectTaskGitReads(GitHost&, const TaskData&, Json& event);
-    void projectExternalCheck(GitHost*, const TaskData&, Json& event);
+    Json gitTool(GitHost&, std::string_view bot, std::string_view environment, std::string_view project, const Decision&,
+                 std::string_view invocation, Id turn);
     Json gitConversationTool(GitHost*, const conversation::Message&, const Decision&, std::string_view key);
     bool gitEffectStarted(std::string_view invocation, Id taskId = 0) const;
     void deliverGitWebhooks();
@@ -81,7 +79,6 @@ private:
     class GitPrMutationClaim;
 
     static Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
-    Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent, std::optional<Id> prNumber,
                    std::string_view reason);
     Id latestGitWebhookId() const;

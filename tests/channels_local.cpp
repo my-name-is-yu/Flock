@@ -563,14 +563,13 @@ void taskUpdates(const std::filesystem::path& database) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
         observed.question.requestId = "release-question";
+        observed.question.fields = {{.id = "target",
+                                     .prompt = "Which private target?",
+                                     .freeform = false,
+                                     .options = {{"Preview", "preview"}, {"Production", "production"}}}};
         return observed;
     };
-    model.decideNext = [](const ModelInput& input) -> Decision {
-        if (input.event.at("kind") == "question")
-            return {
-                "ask_user", {{"question", "Which private target?"}, {"choices", {"Preview", "Production"}}}, "The release needs a target"};
-        return reply("Unexpected turn");
-    };
+    model.decideNext = [](const ModelInput&) -> Decision { return reply("Unexpected turn"); };
     const auto target = channelPolicyTarget({channel, "workspace", "", ""});
     policyRules.setMode(root, "supervised");
     policyRules.changeRule(root, RuleKind::ask, Action::channel_post, target, true);
@@ -603,8 +602,7 @@ void taskUpdates(const std::filesystem::path& database) {
     check(Tasks(store).task(taskId).task.state == TaskState::waiting, "Another thread cancelled a private task");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        if (input.event.at("kind") == "result")
-            return {"complete", {{"report", "Private release completed."}}, "The Session confirmed the release"};
+        if (input.event.contains("sessionWake")) return reply("Private release completed.");
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return answerQuestion(taskJson(Tasks(store).task(taskId)), "Preview");
         check(steps.at(0).at("result").at("ok") == true, "Originating thread could not answer its question");
@@ -616,14 +614,17 @@ void taskUpdates(const std::filesystem::path& database) {
     check(Inbox(store).decisionHistory(root).at(0).at("decidedBy") == owner.id, "Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    check(Tasks(store).task(taskId).task.state == TaskState::completed && transport->effects.size() == 8 &&
+    runtime.runConversations();
+    check(Tasks(store).task(taskId).task.state == TaskState::completed && transport->effects.size() == 9 &&
+              transport->effects.at(7).at("origin").at("threadRef") == "private-origin" &&
+              transport->effects.at(7).at("payload").at("text") == "Session report" &&
               transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
               transport->effects.back().at("payload").at("text") == "Private release completed.",
-          "Task completion was not delivered to the originating thread");
+          "Task completion or the Bot's follow-up was not delivered to the originating thread");
     check(Channels(store).receiveChannel(channel, "fixture-auth", original, intake) == receipt, "Task-start event changed on replay");
     Channels(store).receiveChannel(channel, "fixture-auth", answer, intake);
     runtime.runConversations();
-    check(transport->effects.size() == 8, "Task replay repeated a channel update");
+    check(transport->effects.size() == 9, "Task replay repeated a channel update");
 }
 
 void compactedContextIsWebScoped(const std::filesystem::path& database) {
@@ -770,11 +771,12 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
         observed.question.requestId = "question-" + run.runId;
+        observed.question.fields = {
+            {.id = "continue", .prompt = "Continue?", .freeform = false, .options = {{"Yes", "yes"}, {"No", "no"}}}};
         return observed;
     };
     model.decideNext = [](const ModelInput& input) -> Decision {
-        if (input.event.at("kind") == "question")
-            return {"ask_user", {{"question", "Continue?"}, {"choices", {"Yes", "No"}}}, "The Session needs approval to continue"};
+        if (input.event.contains("sessionWake")) return reply("Noted.");
         if (input.event.at("turn").empty()) return {"start_task", {{"request", input.event.at("text")}}, {}};
         return reply("Task started.");
     };
@@ -853,6 +855,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     SessionAdapter t3;
     Runtime runtime(store, model, t3, [](auto) { return std::string{}; });
     int project = 0;
+    std::map<std::string, Id, std::less<>> sessionTasks;
     const auto session = [&](auto bot) {
         auto route = intake(bot, "Prepare");
         route.projectId += std::to_string(++project);
@@ -860,6 +863,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         for (int i = 0; i < 3; ++i) runtime.tick();
         auto run = Tasks(store).task(task).task.activeRun;
         check(run.has_value(), "Fixture Session did not start");
+        sessionTasks[run->ref.threadId] = task;
         return std::move(run->ref);
     };
     auto a = session("release");
@@ -895,10 +899,18 @@ void local(const std::filesystem::path& database, const std::string& path) {
     rejects([&] { LocalMachines(store).decideLocalConnection(root, id, true); });
     rejects([&] { operation(a, "read_file", path); });
     const auto originalRun = a;
-    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
-    model.decideNext = [](const ModelInput&) {
-        return Decision{"follow_up", {{"instruction", "Continue in this Session"}}, "The work needs one more Run"};
+    const auto sessionA = sessionTasks.at(originalRun.threadId);
+    model.decideNext = [&](const ModelInput& input) {
+        if (!input.event.at("turn").empty()) return reply("Queued");
+        return Decision{"send_to_task",
+                        {{"taskId", sessionA},
+                         {"generation", Tasks(store).task(sessionA).task.generation},
+                         {"instruction", "Continue in this Session"}},
+                        {}};
     };
+    ConversationIntake(store).receive(localOwner, intake("release", ""), std::to_string(++count), "Continue in this Session");
+    runtime.runConversations();
+    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRun.runId ? finished() : Observation{}; };
     for (int i = 0; i < 5; ++i) runtime.tick();
     for (const auto& row : TaskList(store).activeTasks("release")) {
         const auto& active = row.task.activeRun;

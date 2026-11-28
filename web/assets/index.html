@@ -87,21 +87,6 @@
             </h1>
           </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <div id="peer-identity" class="peer-identity header-identity" hidden>
-            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
-            <h1 id="peer-heading" class="peer-title peer-breadcrumb" aria-describedby="peer-description" tabindex="-1">
-              <span class="peer-names">
-                <button id="peer-parent-link" class="peer-parent-link" type="button"><bdi id="peer-name-first"></bdi></button>
-                <span class="peer-sep" aria-hidden="true">›</span>
-                <bdi id="peer-name-second" class="peer-thread-label"></bdi>
-              </span>
-            </h1>
-            <span id="peer-description" hidden>Read-only conversation between Bots</span>
-          </div>
-          <button id="peer-back" class="icon-button peer-back" type="button" data-tooltip="Back to conversation" data-shortcut="Esc" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
-            <span id="peer-back-label" class="sr-only"></span>
-          </button>
           <div id="profile-toolbar" class="profile-toolbar" role="group" aria-label="Conversation controls" hidden>
             <details id="conversation-actions" class="conversation-actions">
               <summary class="icon-button" aria-label="Conversation actions" data-tooltip="Conversation actions">
@@ -119,10 +104,6 @@
                 <button id="conversation-bot-settings" class="conversation-action" type="button" aria-haspopup="dialog" hidden>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
                   <span>Bot settings</span>
-                </button>
-                <button id="peer-picker" class="conversation-action" type="button" aria-haspopup="dialog" hidden>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
-                  <span>Talks with other Bots</span>
                 </button>
               </div>
             </details>
@@ -151,7 +132,6 @@
           <p id="conversation-source-error" class="conversation-source-error" role="alert"></p>
           <div class="conversation-inner">
             <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
-            <p id="peer-status" class="peer-status" role="status" hidden></p>
             <div id="timeline" class="timeline"></div>
           </div>
         </section>

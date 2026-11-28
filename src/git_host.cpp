@@ -37,8 +37,6 @@
 namespace flockv0 {
 namespace {
 constexpr std::size_t gitResultTextLimit = 2000;
-constexpr std::size_t gitReadResultLimit = 24576;
-constexpr Id retainedGitReads = 64;
 constexpr std::string_view slugChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.";
 bool slug(std::string_view value) {
     return !value.empty() && value.size() <= 100 && value != "." && value != ".." && value.find_first_not_of(slugChars) == value.npos;
@@ -66,8 +64,8 @@ Id positiveId(const Json& value) {
     return value.get<Id>();
 }
 
-std::string_view validate(const Decision& decision, bool conversation) {
-    const auto schema = gitToolSchema(decision.tool, conversation).at("parameters");
+std::string_view validate(const Decision& decision) {
+    const auto schema = gitToolSchema(decision.tool).at("parameters");
     const auto& args = decision.args;
     const auto& properties = schema.at("properties");
     if (!args.is_object() || args.dump().size() > 20000) throw Conflict("Invalid Git tool arguments");
@@ -155,50 +153,6 @@ GitContext taskGitContext(const TaskData& task) {
     const auto& run = task.activeRun ? task.activeRun : task.lastRun;
     return {task.id, task.botId, task.environmentId, task.projectId, run ? run->ref : RunRef{}};
 }
-
-Json readTarget(const Decision& decision, std::string_view host, std::string_view repo = {}) {
-    auto target = decision.args;
-    target["host"] = host;
-    if (!repo.empty()) target["repo"] = repo;
-    if (target.contains("sha")) target["sha"] = lower(field(target, "sha"));
-    if (decision.tool == "git_find_repos") target["query"] = lower(field(target, "query"));
-    if (decision.tool == "git_read_ci_logs") target["maxBytes"] = target.value("maxBytes", Id{8192});
-    if (decision.tool == "git_manage_issue") {
-        if (target.at("action") == "list") target["state"] = target.value("state", "open");
-        if (target.at("action") != "read") target["page"] = target.value("page", Id{1});
-    }
-    return target;
-}
-
-Json boundedReadResult(std::string_view tool, const Json& result) {
-    const auto encoded = result.dump(-1, ' ', false, Json::error_handler_t::replace);
-    if (encoded.size() <= gitReadResultLimit) return Json::parse(encoded);
-    if (tool == "git_read_ci_logs")
-        return {{"ok", true}, {"data", {{"text", bounded(field(result.at("data"), "text"), 4000)}, {"truncated", true}}}};
-    if (tool == "git_manage_issue" && result.contains("data")) {
-        const auto& source = result.at("data");
-        const auto items = source.find("items");
-        const auto next = source.find("nextPage");
-        if (items != source.end() && items->is_array() && items->size() <= 30 && next != source.end() &&
-            (next->is_number_integer() || next->is_null())) {
-            auto page = Json::array();
-            for (const auto& item : *items) {
-                const auto number = item.find("number"), id = item.find("id");
-                if (number != item.end() && number->is_number_integer())
-                    page.push_back({{"number", *number}, {"title", bounded(field(item, "title"), 96)}});
-                else if (id != item.end() && id->is_number_integer()) {
-                    auto author = bounded(field(item, "author"), 64);
-                    const auto bodyLimit = std::min<std::size_t>(96, 120 - author.size());
-                    page.push_back({{"id", *id}, {"author", std::move(author)}, {"body", bounded(field(item, "body"), bodyLimit)}});
-                }
-            }
-            if (page.size() == items->size())
-                return {{"ok", true}, {"truncated", true}, {"data", {{"items", std::move(page)}, {"nextPage", *next}}}};
-        }
-    }
-    return {{"ok", result.at("ok")}, {"truncated", true}, {"data", {{"excerpt", bounded(encoded, 4096)}}}};
-}
-
 }
 
 Json GitStorage::gitJournal(const GitContext& context, std::string_view tool, const GitRepository& repo, Json result) {
@@ -215,164 +169,6 @@ GitRepository GitRepository::parse(std::string_view host, std::string_view repo)
     if (slash == repo.npos || !slug(repo.substr(0, slash)) || !slug(repo.substr(slash + 1)))
         throw Conflict("Expected a Git repository in owner/repo form");
     return {hostName(host), lower(repo)};
-}
-
-Json GitStorage::saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result) {
-    std::lock_guard lock(database.mutex);
-    Transaction tx(database.db);
-    const auto scrub = secretStorage.sharedRedactor();
-    scrub.requirePublic(target);
-    database.exec("INSERT INTO git_task_reads(task_id,invocation,tool,target,result) VALUES(?,?,?,?,?)"
-                  " ON CONFLICT(task_id,invocation) DO NOTHING",
-                  {task, invocation, tool, target, boundedReadResult(tool, scrub.payload(result))});
-    auto row = database.query("SELECT id FROM git_task_reads WHERE task_id=? AND invocation=?", {task, invocation});
-    if (!row.next()) throw Conflict("The saved Git read is missing");
-    const auto id = row.number(0);
-    database.exec("DELETE FROM git_task_reads WHERE task_id=? AND id < (SELECT id FROM git_task_reads WHERE task_id=?"
-                  " ORDER BY id DESC LIMIT 1 OFFSET ?)",
-                  {task, task, retainedGitReads - 1});
-    tx.commit();
-    return {{"readId", id}};
-}
-
-void GitStorage::projectTaskGitReads(GitHost& host, const TaskData& task, Json& event) {
-    const auto context = taskGitContext(task);
-    auto refs = Json::array();
-    std::map<Id, std::pair<Decision, Json>> requested;
-    {
-        std::lock_guard lock(database.mutex);
-        auto rows = database.query("SELECT id FROM git_task_reads WHERE task_id=? ORDER BY id", {context.taskId});
-        while (rows.next()) refs.push_back(rows.number(0));
-        if (event.contains("gitResults")) {
-            for (const auto& entry : event.at("gitResults")) {
-                if (!entry.contains("readId")) continue;
-                const auto id = entry.at("readId").get<Id>();
-                if (requested.contains(id)) continue;
-                auto read = database.query("SELECT tool,target,result FROM git_task_reads WHERE task_id=? AND id=?", {context.taskId, id});
-                if (read.next()) requested.emplace(id, std::pair{Decision{read.string(0), read.json(1), {}}, read.json(2)});
-            }
-        }
-    }
-    if (!refs.empty()) event["gitReadRefs"] = std::move(refs);
-    if (!event.contains("gitResults")) return;
-
-    const auto scrub = secretStorage.sharedRedactor();
-    const Policy policy = permissions;
-    std::set<Id> authorized;
-    for (const auto& [id, read] : requested) {
-        const auto& [source, result] = read;
-        if (field(source.args, "host") != host.name()) continue;
-        try {
-            if (source.tool == "git_find_repos") {
-                if (!std::ranges::all_of(result.at("repos"), [&](const Json& repo) {
-                        return repositoryAccess(policy, host, context, {std::string(host.name()), repo.get<std::string>()}, "read",
-                                                &source);
-                    }))
-                    continue;
-            } else {
-                const auto repo = GitRepository::parse(host.name(), field(source.args, "repo"));
-                if (!repositoryAccess(policy, host, context, repo, "read", &source)) continue;
-            }
-            authorized.insert(id);
-        } catch (const StorageError&) {
-            throw;
-        } catch (const std::exception&) {
-            continue;
-        }
-    }
-    std::lock_guard lock(database.mutex);
-    Transaction projection(database.db, Transaction::Mode::read);
-    const auto localReadAllowed = [&](std::string_view repo) {
-        return policy.allows(context.botId, Action::repository_read, GitRepository::parse(host.name(), repo).resource());
-    };
-    for (auto& entry : event.at("gitResults")) {
-        if (!entry.contains("readId")) continue;
-        const auto id = entry.at("readId").get<Id>();
-        if (authorized.contains(id)) {
-            const auto& [source, result] = requested.at(id);
-            const bool localAllowed =
-                source.tool == "git_find_repos"
-                    ? std::ranges::all_of(result.at("repos"),
-                                          [&](const Json& repo) { return localReadAllowed(repo.get_ref<const std::string&>()); })
-                    : [&] {
-                          const auto target = GitRepository::parse(host.name(), field(source.args, "repo")).resource();
-                          if (policy.forbidden(context.botId, Action::repository_read, target)) return false;
-                          return localReadAllowed(field(source.args, "repo")) || database
-                                                                                     .query(R"SQL(
-SELECT 1 FROM git_task_reads r JOIN policy_approvals a
- ON a.operation='git/' || r.task_id || '/' || r.invocation
-WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
- AND a.action='repository.read' AND a.target=? AND a.status='used'
-)SQL",
-                                                                                            {context.taskId, id, context.botId, target})
-                                                                                     .next();
-                      }();
-            if (localAllowed) {
-                entry.update({{"sourceTool", source.tool}, {"target", scrub.payload(source.args)}, {"result", scrub.payload(result)}});
-                continue;
-            }
-        }
-        entry["result"] = {{"ok", false}, {"error", "Saved Git read is unavailable or access was denied"}};
-    }
-    projection.commit();
-}
-
-void GitStorage::projectExternalCheck(GitHost* host, const TaskData& task, Json& event) {
-    const auto context = taskGitContext(task);
-    const auto mayRead = [&](const GitRepository& repo) {
-        return permissions.allows(task.botId, Action::repository_read, repo.resource());
-    };
-    if (!event.contains("watchedPullRequests")) {
-        std::vector<std::pair<GitRepository, Id>> watches;
-        {
-            std::lock_guard lock(database.mutex);
-            auto rows =
-                database.query("SELECT host,repo,pr_number FROM git_pr_watches WHERE task_id=? ORDER BY host,repo,pr_number", {task.id});
-            while (rows.next()) watches.emplace_back(GitRepository{rows.string(0), rows.string(1)}, rows.number(2));
-        }
-        auto statuses = Json::array();
-        const auto scrub = secretStorage.sharedRedactor();
-        for (const auto& [repo, number] : watches) {
-            auto& entry = statuses.emplace_back(Json{{"host", repo.host},
-                                                     {"repo", repo.repo},
-                                                     {"prNumber", number},
-                                                     {"status", "unavailable"},
-                                                     {"checks", {{"status", "unavailable"}}}});
-            if (!host || host->name() != repo.host) continue;
-            const auto read = [&](const Decision& request) -> Json {
-                if (!mayRead(repo)) return nullptr;
-                try {
-                    if (repositoryAccess(permissions, *host, context, repo, "read"))
-                        return scrub.payload(host->call(context, repo, request), false, gitResultTextLimit);
-                } catch (const StorageError&) {
-                    throw;
-                } catch (const std::exception&) {
-                }
-                return nullptr;
-            };
-            auto pr = read({"git_pr_status", {{"host", repo.host}, {"repo", repo.repo}, {"prNumber", number}}, {}});
-            if (pr.is_null()) continue;
-            const auto sha = field(pr, "headSha");
-            if (fullCommitSha(sha)) {
-                auto checks = read({"git_commit_status", {{"host", repo.host}, {"repo", repo.repo}, {"sha", sha}}, {}});
-                if (!checks.is_null()) entry["checks"] = {{"status", "available"}, {"data", std::move(checks)}};
-            }
-            entry["status"] = "available";
-            entry["data"] = std::move(pr);
-        }
-        {
-            std::lock_guard lock(database.mutex);
-            database.exec("UPDATE events SET data=json_set(data,'$.watchedPullRequests',json(?)) WHERE id=? AND task_id=? AND consumed=0",
-                          {statuses, event.at("id"), task.id});
-        }
-        event["watchedPullRequests"] = std::move(statuses);
-    }
-    for (auto& entry : event.at("watchedPullRequests")) {
-        if (mayRead({field(entry, "host"), field(entry, "repo")})) continue;
-        entry.erase("data");
-        entry["status"] = "unavailable";
-        entry["checks"] = {{"status", "unavailable"}};
-    }
 }
 
 class GitStorage::GitPrMutationClaim {
@@ -397,14 +193,14 @@ private:
     std::optional<std::multiset<GitPrKey>::iterator> claim_;
 };
 
-Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::string_view environment, std::string_view project,
-                         const Decision& decision, std::string_view invocation, std::optional<Id> generation, Id turn) {
-    if (decision.tool == "git_read_result" && !generation) throw Conflict("Saved Git reads are available within their task");
-    const auto op = validate(decision, !generation.has_value());
+Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view environment, std::string_view project,
+                         const Decision& decision, std::string_view invocation, Id turn) {
+    Id taskId = 0;
+    const auto op = validate(decision);
     const auto& args = decision.args;
     const auto hostId = hostName(field(args, "host"));
     if (hostId != host.name()) throw Conflict("Git host is not connected");
-    if (!taskId && args.contains("taskId")) taskId = positiveId(args.at("taskId"));
+    if (args.contains("taskId")) taskId = positiveId(args.at("taskId"));
     if (op != "read" && !taskId) throw Conflict("Select an owned task for the Git mutation");
     GitContext context{taskId, std::string(bot), std::string(environment), std::string(project), {}};
     {
@@ -413,17 +209,11 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
         if (taskId) {
             const auto task = taskRecords.load(taskId);
             if (task.botId != bot) throw Conflict("No task with this ID");
-            if (generation && task.generation != *generation) throw RequestChanged{};
             if (op != "read" && (task.state == TaskState::cancelled || task.state == TaskState::cancelling))
                 throw Conflict("The task is cancelled");
             context = taskGitContext(task);
         }
         secretStorage.sharedRedactor().requirePublic(args);
-        if (decision.tool == "git_read_result") return {{"readId", args.at("readId")}};
-        if (generation && op == "read") {
-            auto previous = database.query("SELECT id FROM git_task_reads WHERE task_id=? AND invocation=?", {taskId, invocation});
-            if (previous.next()) return {{"readId", previous.number(0)}};
-        }
     }
     const Policy policy = permissions;
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
@@ -449,7 +239,6 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
              {"truncated", truncated},
              {"nextPage", more && page < std::numeric_limits<Id>::max() ? Json(page + 1) : Json(nullptr)}},
             SecretRedactor::Fields::external);
-        if (generation) return saveTaskGitRead(taskId, invocation, decision.tool, readTarget(decision, hostId), result);
         return result;
     }
     const auto repo = GitRepository::parse(hostId, field(args, "repo"));
@@ -458,34 +247,20 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
     if (!selectingPr) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        PolicyOrigin origin;
-        if (turn) origin = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(turn));
+        auto origin = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(turn));
         if (taskId) {
             const auto task = taskRecords.load(taskId);
-            if (generation && task.generation != *generation) throw RequestChanged{};
-            if (!turn)
-                origin = policyApprovals.taskPolicyOrigin(task);
-            else {
-                origin.task = taskId;
-                origin.revision = task.currentRevision.value_or(0);
-                origin.generation = task.generation;
-            }
+            origin.task = taskId;
+            origin.revision = task.currentRevision.value_or(0);
+            origin.generation = task.generation;
         }
-        if (turn || origin.task) {
-            const auto action = *parseAction("repository." + std::string(op));
-            const auto key = turn ? std::string(invocation) : "git/" + std::to_string(taskId) + "/" + std::string(invocation);
-            const auto payload = Json::array({decision.tool, decision.args});
-            const auto gate = policyApprovals.approveAction(origin, {action, repo.resource()}, key, payload, policyApprovals.now());
-            if (gate == ApprovalGate::waiting && !turn) {
-                Json resume{{"tool", decision.tool}, {"args", decision.args}, {"invocation", invocation}};
-                if (op != "read") resume["reason"] = secretStorage.sharedRedactor().text(decision.reason);
-                database.exec("UPDATE policy_approvals SET resume=? WHERE operation=?", {resume, key});
-            }
-            transaction.commit();
-            if (gate == ApprovalGate::waiting) return {{"policyWaiting", true}};
-            if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
-        } else
-            transaction.commit();
+        const auto action = *parseAction("repository." + std::string(op));
+        const auto payload = Json::array({decision.tool, decision.args});
+        const auto gate =
+            policyApprovals.approveAction(origin, {action, repo.resource()}, std::string(invocation), payload, policyApprovals.now());
+        transaction.commit();
+        if (gate == ApprovalGate::waiting) return {{"policyWaiting", true}};
+        if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
     }
     if (decision.tool == "git_open_pr") {
         const auto head = args.contains("headRepo") ? GitRepository::parse(hostId, field(args, "headRepo")) : repo;
@@ -524,8 +299,6 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, Id taskId, std::st
         } catch (const std::exception& error) {
             result = {{"ok", false}, {"error", bounded(secretStorage.sharedRedactor().text(error.what()), gitResultTextLimit)}};
         }
-        if (generation && result.at("ok") == true)
-            return saveTaskGitRead(taskId, invocation, decision.tool, readTarget(decision, repo.host, repo.repo), result);
         return result;
     }
 
@@ -623,7 +396,7 @@ Json GitStorage::gitConversationTool(GitHost* host, const conversation::Message&
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }
-        return gitTool(*host, message.bot, 0, field(message.routing, "environmentId"), field(message.routing, "projectId"), call, key, {},
+        return gitTool(*host, message.bot, field(message.routing, "environmentId"), field(message.routing, "projectId"), call, key,
                        message.id);
     } catch (const StorageError&) {
         throw;

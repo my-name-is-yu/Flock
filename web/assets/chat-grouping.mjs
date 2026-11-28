@@ -9,9 +9,8 @@ export function isSystemNotice(event) {
 }
 
 export function messageSide(event) {
-  if (event.kind === 'cancelled' || isSystemNotice(event) || event.data.sessionWake || event.data.sessionInvitation)
+  if (event.kind === 'cancelled' || isSystemNotice(event) || event.data.sessionWake || event.data.sessionInvitation || event.data.botMessage)
     return 'system';
-  if (event.kind === 'bot_message') return 'peer';
   if (event.kind === 'conversation_message' && event.data.channel?.channelKind)
     return event.data.channel.fromViewer === true ? 'user' : 'external';
   return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
@@ -32,7 +31,7 @@ function timeBreak(previous, event) {
 }
 
 function joinsGroup(first, second, side) {
-  return side !== 'system' && side !== 'peer' && nearby(first, second) && first.taskId === second.taskId &&
+  return side !== 'system' && nearby(first, second) && first.taskId === second.taskId &&
     messageSide(first) === side && messageSide(second) === side;
 }
 
@@ -45,17 +44,5 @@ export function messagePlacement(previous, event, next) {
     timeBreak: side !== 'system' && timeBreak(previous, event),
     taskStart: previous?.taskId !== event.taskId,
     afterQuestion: previous?.kind === 'waiting' && previous.data.id === event.data.waitId,
-  };
-}
-
-function joinsPeerGroup(first, second) {
-  return nearby(first, second) && first.data.fromBotId === second.data.fromBotId;
-}
-
-export function peerMessagePlacement(previous, event, next) {
-  return {
-    groupStart: !joinsPeerGroup(previous, event),
-    groupEnd: !joinsPeerGroup(event, next),
-    timeBreak: timeBreak(previous, event),
   };
 }

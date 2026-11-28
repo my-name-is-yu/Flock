@@ -92,24 +92,13 @@ struct SessionService : T3 {
 struct Bot : Model {
     Decision action;
     Json history, result;
-    std::function<Decision(const ModelInput&)> conversation, work;
+    std::function<Decision(const ModelInput&)> conversation;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
-        if (input.event.at("kind") == "question")
-            return {"answer_session_question", {{"requestId", "q"}, {"answers", {{"choice", "yes"}}}}, "Answer the Session"};
-        if (input.event.at("kind") != "conversation_turn") {
-            if (work) return work(input);
-            if (input.event.at("kind") == "intake") {
-                Json args{{"instruction", "Handle the requested work"}};
-                if (input.needsDoneWhen) args["doneWhen"] = "Return a report";
-                return {"delegate", std::move(args), "Start the task"};
-            }
-            if (input.event.at("kind") == "result")
-                return {"complete", {{"report", input.event.at("report")}}, "The Session returned its report"};
-            throw std::runtime_error("Unexpected task decision: " + input.event.dump());
-        }
+        if (input.event.at("kind") != "conversation_turn") throw std::runtime_error("Unexpected task decision: " + input.event.dump());
         history = input.history;
         if (conversation) return conversation(input);
+        if (input.event.contains("sessionWake")) return {"reply", {{"text", "The work finished"}}, "Tell the person"};
         if (!action.tool.empty())
             require(std::ranges::find(input.tools, action.tool) != input.tools.end(), "tool missing from conversation runtime");
         if (input.event.at("turn").empty() && !action.tool.empty()) return action;
@@ -305,35 +294,26 @@ void freshStandaloneSessionIncludesEarlierEvidence() {
     const auto history = TaskHistory(*f.store).history(sourceTask);
     const auto report = std::ranges::find_if(history, [](const Json& item) { return item.at("kind") == "report"; });
     require(report != history.end(), "fixture did not save the source report");
-    f.bot.work = [](const ModelInput& input) -> Decision {
-        return {input.event.at("kind") == "intake" ? "delegate" : "follow_up", {{"instruction", "Continue implementing"}}, "Work remains"};
-    };
     const Id task =
         f.call("start_task",
                {{"request", "Implement the chosen option"}, {"doneWhen", "Tests pass"}, {"sourceResultMessageId", report->at("id")}})
             .at("taskId");
-    f.ticks(3);
-    f.t3.finish("run-2", "Earlier Run identified a timeout");
-    f.ticks(3);
-    f.t3.finish("run-3", "Second Run found a duplicate entry");
-    f.ticks(3);
+    for (int i = 0; i < 12 && !Tasks(*f.store).task(task).task.activeRun; ++i) f.ticks(1);
     const auto before = Tasks(*f.store).task(task).task;
     const auto earlierHistory = TaskHistory(*f.store).history(task);
     f.call("continue_fresh_session", {{"taskId", task}, {"instruction", "Repeat checks with fresh context"}});
     f.ticks(3);
-    require(f.t3.commands.size() == 4 && f.t3.interrupts.contains("run-4"), "fresh handoff bypassed settlement");
-    f.t3.finish("run-4", "Latest report: " + std::string(9000, 'z'), "interrupted");
+    require(f.t3.commands.size() == 2 && f.t3.interrupts.contains("run-2"), "fresh handoff bypassed settlement");
+    f.t3.finish("run-2", "Latest report: " + std::string(9000, 'z'), "interrupted");
     f.ticks(5);
     const auto& next = f.t3.commands.back();
     const auto after = Tasks(*f.store).task(task).task;
-    require(f.t3.commands.size() == 5 && next.tool == CommandTool::delegate &&
+    require(f.t3.commands.size() == 3 && next.tool == CommandTool::delegate &&
                 next.instruction.find("Option B must preserve the retry window") != std::string::npos &&
-                next.instruction.find("Latest report:") != std::string::npos &&
-                next.instruction.find("Second Run found a duplicate entry") != std::string::npos &&
-                next.instruction.find("Earlier Run identified a timeout") != std::string::npos,
-            "fresh Session lost the linked result or reports from earlier Runs");
+                next.instruction.find("Latest report:") != std::string::npos,
+            "fresh Session lost the linked result or the interrupted Run's report");
     require(after.doneWhen == before.doneWhen && after.currentRevision == before.currentRevision &&
-                after.activeRun.value().ref.threadId == "thread-5" &&
+                after.activeRun.value().ref.threadId == "thread-3" &&
                 TaskHistory(*f.store).history(task, 0, static_cast<unsigned>(earlierHistory.size())) == earlierHistory,
             "fresh continuation lost the task's criteria, revision, or history");
 }
@@ -393,27 +373,33 @@ void settledWhileReadingInstruction() {
             "fresh Session lost its settled report or original intent");
     f.t3.finish("run-2", "The input rows were preserved");
     f.ticks(2);
+    f.runtime->runConversations();
     require(Tasks(*f.store).task(task).task.state == TaskState::completed, "the fresh Session's result did not finish the task");
 }
 
-void observeAfterUnsentAnswer() {
+void sessionQuestionReachesThePerson() {
     Fixture f;
     const auto task = f.start("Ask for the output format");
+    std::vector<std::string> reasons;
+    f.bot.conversation = [&](const ModelInput& input) -> Decision {
+        if (input.event.contains("sessionWake")) reasons.push_back(input.event.at("sessionWake").at("reason"));
+        return {"reply", {{"text", "Noted"}}, "Tell the person"};
+    };
     f.ticks(3);
     auto& run = f.t3.observations["run-1"];
     run.kind = Observation::Kind::Question;
-    run.question = {"q", {{.id = "choice"}}};
+    run.question = {"q", {{.id = "choice", .prompt = "Which format?"}}};
     f.ticks(3);
-    const auto pending = Tasks(*f.store).task(task);
-    require(pending.wait && pending.wait->reason() == WaitReason::settings && pending.pendingAction &&
-                pending.pendingAction->phase == OutboxPhase::ready,
-            "unsent answer fixture did not reach its safe retry point");
-    f.restart();
+    const auto asked = Tasks(*f.store).task(task);
+    require(asked.wait && asked.wait->reason() == WaitReason::user_question && asked.wait->text == "Which format?" &&
+                f.t3.commands.size() == 1 && reasons.empty(),
+            "a Session question did not reach the person as the Session asked it");
     f.t3.finish("run-1", "Used the default format");
     f.ticks(3);
-    const auto finished = Tasks(*f.store).task(task);
-    require(f.t3.commands.size() == 1 && finished.task.state == TaskState::completed && !finished.pendingAction,
-            "unsent answer prevented observation of a completed Run");
+    f.runtime->runConversations();
+    require(reasons == std::vector<std::string>{"finished"} && Tasks(*f.store).task(task).task.state == TaskState::completed &&
+                f.t3.commands.size() == 1,
+            "the finished Run did not wake the conversation and close the task");
 }
 
 void stopBeforeFirstSend() {
@@ -549,7 +535,7 @@ int main() {
         taskRequestKeepsEmbeddedNul();
         cancelledTaskNotificationsDistinguishFailures();
         settledWhileReadingInstruction();
-        observeAfterUnsentAnswer();
+        sessionQuestionReachesThePerson();
         stopBeforeFirstSend();
         scopedCompactionPages();
         historyKeepsLargestFittingPrefix();

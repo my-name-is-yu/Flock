@@ -1,7 +1,6 @@
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
 #include "views.hpp"
-#include "flock/peer_conversations.hpp"
 #include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
@@ -155,16 +154,11 @@ Json waitView(const Wait& wait) {
     return view;
 }
 
-bool containsProtectedText(const Policy& policy, std::string_view bot, std::string_view text) {
-    const Json probe = {{"text", std::string(text)}};
-    return policy.redactSecrets(bot, probe).at("text") != probe.at("text");
-}
-
 Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     auto view = Json::object();
     const auto kind = field(event, "kind");
     copyFields(view, event, {"id", "time", "kind"});
-    if (kind != "bot_message") copyFields(view, event, {"taskId"});
+    copyFields(view, event, {"taskId"});
     const auto& data = event.at("data");
     Json details = Json::object();
     const auto renderMarkdown = [&](const char* key) {
@@ -205,17 +199,6 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 details["run"] = std::move(run);
             }
         }
-    } else if (kind == "bot_message") {
-        copyFields(details, data, {"exchangeId", "messageId", "fromBotId", "toBotId", "messageType", "requestKind", "text", "replyTo"});
-        renderMarkdown("text");
-        if (const auto forwarded = data.find("forwardedMessage"); forwarded != data.end() && forwarded->is_object()) {
-            const auto text = field(*forwarded, "text");
-            const auto time = forwarded->find("time");
-            if (!text.empty() && time != forwarded->end() && time->is_number_integer()) {
-                details["forwardedMessage"] = {{"text", text}, {"time", *time}};
-                if (event.value("forwardedFromViewer", false)) details["forwardedMessage"]["fromViewer"] = true;
-            }
-        }
     } else if (kind == "report") {
         copyFields(details, data,
                    {"report", "status", "resultRunId", "truncated", "itemId", "revisionId", "destination", "commit", "requestedCommit"});
@@ -232,6 +215,8 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 copyFields(details["sessionWake"] = Json::object(), *wake, {"threadId", "title", "reason", "sourceMessageId"});
             if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())
                 copyFields(details["sessionInvitation"] = Json::object(), *invitation, {"threadId", "title", "inviterName", "note"});
+            if (const auto bot = data.find("botMessage"); bot != data.end() && bot->is_object())
+                copyFields(details["botMessage"] = Json::object(), *bot, {"fromBotId", "fromName"});
         }
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(), *channel, {"channelKind", "fromViewer"});
@@ -270,7 +255,6 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
         const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
                               (wait && wait->reason() != WaitReason::policy_approval && wait->reason() != WaitReason::t3_input);
         auto text = wait ? wait->text : field(data, kind == "report" ? "report" : "text");
-        if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage")) text = field(data.at("forwardedMessage"), "text");
         if (incoming) {
             if (!latestIncoming) latestIncoming = event->at("id").get<Id>();
             if (!text.empty()) {
@@ -278,7 +262,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
                 break;
             }
         }
-        if (request.empty() && (kind == "request" || kind == "conversation_message" || kind == "bot_message")) request = bounded(text, 240);
+        if (request.empty() && (kind == "request" || kind == "conversation_message")) request = bounded(text, 240);
     }
     // A burst of outgoing messages can push an unread reply outside the preview page.
     if (!latestIncoming && events.size() == previewSize) {
@@ -368,7 +352,7 @@ Json sessionGroup(const TaskView& view) {
 }
 
 std::string_view botPresence(const auto& states) {
-    constexpr std::string_view priority[] = {"idle", "queued", "peer_waiting", "waiting", "thinking", "working", "stopping"};
+    constexpr std::string_view priority[] = {"idle", "queued", "waiting", "thinking", "working", "stopping"};
     std::size_t highest = 0;
     for (auto presence : states) {
         if (presence == "running")
@@ -390,9 +374,8 @@ Json activity(const std::vector<TaskList::ActiveTask>& activeTasks, std::string_
                    {"parallelTasks", Json::array()}};
     for (const auto& [task, wait, blocker] : activeTasks) {
         const bool waiting = task.state == TaskState::waiting && wait.has_value();
-        const bool needsAttention =
-            waiting && (wait->reason() == WaitReason::model_failure || wait->reason() == WaitReason::bot_notes_unavailable ||
-                        wait->reason() == WaitReason::auth || wait->reason() == WaitReason::settings);
+        const bool needsAttention = waiting && (wait->reason() == WaitReason::bot_notes_unavailable || wait->reason() == WaitReason::auth ||
+                                                wait->reason() == WaitReason::settings);
         if (waiting) result["waits"].push_back(currentWait(task, *wait));
         if (!waiting || needsAttention) {
             auto request = taskSummary(task);
@@ -495,29 +478,6 @@ Json conversation(Store& store, std::string_view bot, Id before, const Person* v
     auto& page = result["events"];
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event) page.push_back(eventView(*event, sensitive));
     if (more) result["olderBefore"] = page.front().at("id");
-    return result;
-}
-
-Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor, std::string_view viewer) {
-    const Policy policy{store};
-    const markdown::SensitiveText sensitive = [&](std::string_view text) {
-        return containsProtectedText(policy, bot, text) || containsProtectedText(policy, peer, text);
-    };
-    const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
-    auto events = PeerConversations(store).peerConversation(bot, peer, anchor ? anchor : before, olderSize + 1, 0, viewer);
-    events = policy.redactSecrets(bot, events);
-    events = policy.redactSecrets(peer, events);
-    const bool more = events.size() > olderSize;
-    Json result = {{"messages", Json::array()}, {"hasOlder", more}};
-    auto& page = result["messages"];
-    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event) page.push_back(eventView(*event, sensitive));
-    if (anchor) {
-        result["anchorId"] = anchor;
-        auto newer = PeerConversations(store).peerConversation(bot, peer, 0, conversationSize - olderSize, anchor, viewer);
-        newer = policy.redactSecrets(bot, newer);
-        newer = policy.redactSecrets(peer, newer);
-        for (const auto& event : newer) page.push_back(eventView(event, sensitive));
-    }
     return result;
 }
 

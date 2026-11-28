@@ -76,12 +76,7 @@ struct FixtureModel : Model {
     bool retry = false;
     Json outcome, channelContext;
     ModelTurn decide(const ModelInput& in) override {
-        if (in.event.at("kind") != "conversation_turn") {
-            if (in.event.at("kind") == "intake")
-                return {{{"delegate", {{"instruction", "Build the release"}, {"doneWhen", "Release built"}}, "Delegate"}}};
-            outcome = in.event;
-            return {{{"ask_user", {{"question", "The launch did not run. How should I proceed?"}}, "Report the outcome"}}};
-        }
+        if (in.event.at("kind") != "conversation_turn") throw std::runtime_error("a task without a conversation called the model");
         channelContext = in.event.value("channel", Json::object());
         const auto& steps = in.event.at("turn");
         if (steps.empty() || (retry && steps.size() == 1)) return {{action}};
@@ -399,7 +394,7 @@ void scheduled(const std::filesystem::path& path) {
     check(adapter.sends == 0 &&
               std::ranges::none_of(Inbox(store).inbox(requester),
                                    [](const auto& item) { return item.at("itemKind") == "policy_approval"; }) &&
-              model.outcome.dump().find("denied by policy") != std::string::npos,
+              taskJson(Tasks(store).task(anonymous)).at("wait").at("text").get<std::string>().find("denied by policy") != std::string::npos,
           "unanswerable task received a card or was silently denied");
     TaskControl(store).operate(requester, TaskTarget::from(Tasks(store).task(anonymous).task, 0), "cancel");
     pump();
@@ -414,7 +409,7 @@ void scheduled(const std::filesystem::path& path) {
     const auto staleTask = TaskIntake(store).submit({"release", "Cancel a pending launch", "env", "stale-project"}, &requester);
     pump();
     const auto staleItem = Inbox(store).inbox(requester).at(0);
-    check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Build the release") != std::string::npos,
+    check(staleItem.at("taskId") == staleTask && staleItem.at("prompt").dump().find("Cancel a pending launch") != std::string::npos,
           "pending launch card did not bind the task and its prepared instruction");
     auto stale = target(staleItem);
     check(taskJson(Tasks(store).task(staleTask)).at("wait").at("reason") == "policy_approval", "task never entered its durable wait");
@@ -443,7 +438,9 @@ void scheduled(const std::filesystem::path& path) {
           "the administrator could not act on the expired approval");
     Inbox(store).decideInbox(localOwner, target(expired), "allow_next_time");
     pump();
-    check(adapter.sends == 0 && model.outcome.dump().find("expired") != std::string::npos, "expired action ran or the Bot was never told");
+    const auto expiredTask = taskJson(Tasks(store).task(item.at("taskId")));
+    check(adapter.sends == 0 && expiredTask.at("wait").at("text").get<std::string>().find("expired") != std::string::npos,
+          "expired action ran or the person was never told");
     TaskControl(store).operate(requester, TaskTarget::from(Tasks(store).task(item.at("taskId")).task, 0), "cancel");
     pump();
     schedule();

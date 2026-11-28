@@ -3,7 +3,6 @@
 #include "task_records.hpp"
 #include "wait_storage.hpp"
 #include "run_ref_storage.hpp"
-#include "peer_storage.hpp"
 #include "journal_storage.hpp"
 #include "database.hpp"
 #include "record_decode.hpp"
@@ -29,17 +28,11 @@ namespace flockv0 {
 namespace {
 constexpr std::array reasons{
     std::pair{WaitReason::user_question, std::string_view{"user_question"}},
-    std::pair{WaitReason::model_failure, std::string_view{"model_failure"}},
     std::pair{WaitReason::bot_notes_unavailable, std::string_view{"bot_notes_unavailable"}},
     std::pair{WaitReason::t3_input, std::string_view{"t3_input"}},
     std::pair{WaitReason::auth, std::string_view{"auth"}},
     std::pair{WaitReason::settings, std::string_view{"settings"}},
     std::pair{WaitReason::policy_approval, std::string_view{"policy_approval"}},
-};
-
-constexpr std::array modelFailures{
-    std::pair{WaitFailureCode::unsupported_reasoning_effort, std::string_view{"unsupported_reasoning_effort"}},
-    std::pair{WaitFailureCode::authentication_required, std::string_view{"authentication_required"}},
 };
 
 }
@@ -63,7 +56,6 @@ WaitReason Wait::reason() const {
         []<typename T>(const T& value) {
             if constexpr (std::is_same_v<T, SimpleWaitReason>) return waitReason(value);
             if constexpr (std::is_same_v<T, ModelQuestionWait>) return WaitReason::user_question;
-            if constexpr (std::is_same_v<T, ModelFailureWait>) return WaitReason::model_failure;
             if constexpr (std::is_same_v<T, PolicyApprovalWait>) return WaitReason::policy_approval;
         },
         details);
@@ -97,8 +89,6 @@ Json encodeWaitData(const Wait& wait) {
                 data["choices"] = value.choices;
                 data["decisionReason"] = value.decisionReason;
                 data["questionId"] = value.questionId;
-            } else if constexpr (std::is_same_v<T, ModelFailureWait>) {
-                if (value.code) data["failureCode"] = enumName(modelFailures, *value.code);
             } else if constexpr (std::is_same_v<T, PolicyApprovalWait>) {
                 data["approvalId"] = value.approvalId;
             }
@@ -125,13 +115,6 @@ WaitDetails readWaitDetails(const RecordDecoder& decoder, const Json& data, Wait
     case WaitReason::user_question:
         return ModelQuestionWait{decoder.get<std::vector<std::string>>(data, "choices"), decoder.get<std::string>(data, "decisionReason"),
                                  decoder.get<std::string>(data, "questionId")};
-    case WaitReason::model_failure:
-        if (const auto code = decoder.optional<std::string>(data, "failureCode")) {
-            const auto value = enumValue(modelFailures, *code);
-            if (!value) decoder.fail("failureCode", "unknown model failure code");
-            return ModelFailureWait{*value};
-        }
-        return ModelFailureWait{};
     case WaitReason::policy_approval: return PolicyApprovalWait{decoder.get<Id>(data, "approvalId")};
     case WaitReason::bot_notes_unavailable: return SimpleWaitReason::bot_notes_unavailable;
     case WaitReason::t3_input: return SimpleWaitReason::t3_input;
@@ -200,7 +183,7 @@ Id WaitStorage::waitAnchor(Id task, Id wait) const {
 }
 
 bool WaitStorage::waitIsActionable(const TaskData& task) const {
-    return !peers.replanReady(task);
+    return !task.replanning;
 }
 
 std::optional<Wait> WaitStorage::currentWait(Id task) const {

@@ -38,7 +38,6 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
-    std::optional<PlannerModel> plannerModel(std::string_view id) const;
     std::string soul(std::string_view id) const;
     std::string initialMemory(std::string_view id) const;
     std::vector<PeerBot> peers(Store&, std::string_view id) const;

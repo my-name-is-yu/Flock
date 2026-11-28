@@ -32,7 +32,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     Runtime runtime(store, model, t3, {});
     tick(runtime, 3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
-    t3.observations["thread-release"].question = {"scope-question", {{.id = "scope"}}};
+    t3.observations["thread-release"].question = scopeQuestion();
     tick(runtime, 2);
     const auto before = taskJson(Tasks(store).task(release));
     const auto history = TaskHistory(store).history(release);

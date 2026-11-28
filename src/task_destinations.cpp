@@ -1,6 +1,5 @@
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
-#include "peer_storage.hpp"
 #include "flock/types.hpp"
 #include "flock/t3.hpp"
 #include "flock/task.hpp"
@@ -71,8 +70,6 @@ Json projectChoices(const std::vector<T3Project>& projects, const SecretRedactor
 }
 
 void TaskRouting::assignProject(TaskData& task, std::string_view project) {
-    if (peerStorage.recipientRouteWouldCycle(task.id, task.environmentId, project))
-        throw Conflict("This project would make project queues wait for one another. Choose another project.");
     task.projectId = project;
     rememberT3Project(task.botId, task.environmentId, project);
 }
@@ -98,26 +95,10 @@ void TaskRouting::applyProjectCatalog(TaskData& task, const ProjectCatalog& cata
         showSettings("Add or unarchive a project in this T3 environment.");
         return;
     }
-    const auto peer = peerStorage.peerExchange(task.id);
-    const auto usable = [&](const T3Project& project) {
-        return !peer || peer->recipient != task.id || peer->kind != "work" ||
-               !peerStorage.peerWorkRouteWouldCycle(peer->sender, environment, project.id);
-    };
-    const auto preferred = [&](std::string_view id) {
-        const auto match = std::ranges::find(projects, id, &T3Project::id);
-        return match != projects.end() && usable(*match) ? match : projects.end();
-    };
+    const auto preferred = [&](std::string_view id) { return std::ranges::find(projects, id, &T3Project::id); };
     auto selected = pending ? preferred(pending->route.projectId) : projects.end();
     if (selected == projects.end()) selected = preferred(remembered);
-    if (selected == projects.end()) {
-        selected = std::ranges::find_if(projects, usable);
-        if (selected == projects.end()) {
-            showSettings("Each project in this environment would make project queues wait for one another. "
-                         "This request can continue after the related work finishes or after moving to another environment.");
-            return;
-        }
-        if (std::find_if(std::next(selected), projects.end(), usable) != projects.end()) selected = projects.end();
-    }
+    if (selected == projects.end() && projects.size() == 1) selected = projects.begin();
     waitStorage.clearWait(task, "connection_restored");
     task.state = TaskState::queued;
     if (selected != projects.end()) assignProject(task, selected->id);

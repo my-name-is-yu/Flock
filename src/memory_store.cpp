@@ -372,13 +372,12 @@ ORDER BY r.id DESC LIMIT 21
 }
 
 bool MemoryStorage::canEditFrom(const conversation::Message& message) {
+    if (message.routing.contains("botMessage")) return false;
     return permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
 }
 
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
     if (!permissions.allows(task.botId, Action::private_memory_write, task.botId)) return false;
-    const bool automationSetUpByBotManager = task.trigger.has_value();
-    if (automationSetUpByBotManager) return true;
     if (!task.sourceMessageId) return false;
     const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
     return message.bot == task.botId && canEditFrom(message);

@@ -24,6 +24,7 @@
 #include "flock/store.hpp"
 #include "flock/store_options.hpp"
 #include "flock/t3.hpp"
+#include "flock/t3_command.hpp"
 #include "flock/task.hpp"
 #include "flock/types.hpp"
 
@@ -753,20 +754,24 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
     check(!containsMetadata(TaskHistory(store).history(taskId)) && !containsMetadata(Conversations(store).conversation(alpha.botId)),
           "Webhook request or provenance leaked into a journal");
 
-    Adapter adapter;
+    struct LaunchAdapter : Adapter {
+        std::vector<Command> launches;
+        Delivery send(const Command& command) override {
+            launches.push_back(command);
+            return {Delivery::Kind::Accepted, {"thread-webhook", "run-webhook", {}}, {}};
+        }
+    } adapter;
     Script model;
     RuntimeOptions options;
     options.clock = [&] { return now; };
     Runtime runtime(store, model, adapter, [](auto) { return std::string{}; }, options);
-    runtime.tick();
-    runtime.tick();
-    check(model.inputs.size() == 1 && model.inputs.front().task.at("trigger") == task.at("trigger") &&
-              !containsMetadata(model.inputs.front().task) && !containsMetadata(model.inputs.front().event),
-          "The task model lost webhook provenance or received protected metadata");
-    const auto& input = model.inputs.front();
-    check(input.task.at("trigger").at("event").at("text") == payloadText &&
-              std::ranges::find(input.tools, "write_memory") == input.tools.end() &&
-              Memory(store).memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions").empty(),
+    for (int i = 0; i < 6 && adapter.launches.empty(); ++i) runtime.tick();
+    check(model.inputs.empty() && adapter.launches.size() == 1, "The webhook task did not launch without a model call");
+    const auto& prompt = adapter.launches.front().instruction;
+    check(prompt.find(payloadText) != prompt.npos && prompt.find("not instructions") != prompt.npos && prompt.find(source) == prompt.npos &&
+              prompt.find(token) == prompt.npos,
+          "The Session lost the webhook payload or received protected metadata");
+    check(Memory(store).memory(owner, alpha.botId, "memory_history", Json::object()).at("revisions").empty(),
           "A webhook payload can be used as a preference source");
 
     const auto replay = Automations(store).receiveWebhook(owner, source, "evt-1", Json::object(), now);

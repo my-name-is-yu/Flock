@@ -3,7 +3,6 @@
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/task_list.hpp"
-#include "flock/peer_conversations.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
@@ -322,7 +321,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
     check(page.at("olderBefore").get<Id>() > 0, "conversation did not offer older history");
     const std::map<std::string, std::pair<std::string, std::string>> expectedResults{
         {"report", {"report", "T3 finished while the browser was closed"}},
-        {"completed", {"text", "Draft complete"}},
+        {"completed", {"text", "T3 finished while the browser was closed"}},
     };
     std::set<std::string> foundResults;
     std::set<Id> cursors;
@@ -458,269 +457,6 @@ void failedCompletion(const std::filesystem::path& path) {
     check(hasEvent(events, "completed", "runStatus", "failed"), "the final Bot message lost its failed Session outcome");
 }
 
-struct PeerModel final : Model {
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-    Decision choose(const ModelInput& input) {
-        if (input.event["kind"] == "intake")
-            return {
-                "send_bot_message", {{"botId", "triage"}, {"kind", "consult"}, {"text", "判定基準を教えて"}}, "Triage owns the criteria"};
-        if (input.event["kind"] == "bot_request")
-            return {
-                "reply_to_bot", {{"kind", "result"}, {"text", "再現条件を確認してください"}}, "The requested criteria are already known"};
-        check(input.event["kind"] == "bot_result", "unexpected peer history fixture event");
-        return {"complete", {{"report", "判定基準を確認しました"}}, "Triage answered the request"};
-    }
-};
-
-std::vector<PeerBot> fixturePeers(std::string_view sender) {
-    if (sender != "release") return {};
-    return {{"Triage", {"triage", "", "local-env", "release"}}};
-}
-
-void seedPeerHistory(Store& store, Browser& browser, Runtime& runtime, const FixedT3& t3) {
-    TaskIntake(store).submit({"release", "判定基準の確認", "local-env", "release"});
-    Json waiting;
-    for (unsigned attempt = 0; attempt < 8; ++attempt) {
-        runtime.tick();
-        waiting = browser.get("/api/view?bot=release");
-        if (waiting.at("presence") == "peer_waiting") break;
-    }
-    check(waiting.at("waits").empty() && waiting.at("presence") == "peer_waiting", "waiting on a peer was presented as a user action");
-    const auto recipient = browser.get("/api/view?bot=triage");
-    const auto recipientTask = recipient.at("activeTasks").at(0).at("id").get<Id>();
-    for (unsigned attempt = 0; attempt < 8 && !terminal(Tasks(store).task(recipientTask).task); ++attempt) runtime.tick();
-    const auto refreshed = browser.get("/api/view?bot=triage&sessionsAfter=" + recipient.at("sessionCursor").dump());
-    check(refreshed.at("sessionCursor") > recipient.at("sessionCursor") && refreshed.at("activeTasks").empty() &&
-              refreshed.at("sessionTasks").size() == 1 && refreshed.at("sessionTasks").front().at("id") == recipientTask &&
-              refreshed.at("sessionTasks").front().at("state") == "completed",
-          "the recipient's completed consultation did not move from active work to history on refresh");
-    tick(runtime, 8);
-    const auto finished = browser.get("/api/view?bot=release");
-    check(hasEvent(finished.at("events"), "completed", "text", "判定基準を確認しました") && t3.launches.empty(),
-          "consultation did not show the result without starting a T3 Session");
-}
-
-void peerHistory(const std::filesystem::path& path) {
-    Store store(path);
-    PeerModel model;
-    FixedT3 t3;
-    RuntimeOptions options;
-    options.peers = fixturePeers;
-    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
-    const auto server = startWeb(store, 0, callbacks());
-    Browser browser(*server);
-    seedPeerHistory(store, browser, runtime, t3);
-
-    for (int i = 0; i < 2001; ++i) TaskIntake(store).submit({"release", "Newer request " + std::to_string(i), "local-env", "release"});
-    const auto newest = browser.get("/api/view?bot=release");
-    auto cursor = newest.at("olderBefore").get<Id>();
-    check(cursor > 0, "missing older peer history cursor");
-    check(newest.at("queued").size() == 2000, "overview lost its pending queue");
-    const auto blocker = newest.at("queued").front().at("blockedBy").at("id");
-    check(std::all_of(newest.at("queued").begin(), newest.at("queued").end(),
-                      [&](const Json& row) { return row.at("blockedBy").at("id") == blocker; }),
-          "overview reported a different head for the same project");
-    const auto recipient = browser.get("/api/view?bot=triage");
-    const auto peerMessages = [](const Json& page) {
-        Json messages = Json::array();
-        for (const auto& event : page.at("events"))
-            if (event.at("kind") == "bot_message") {
-                const auto& data = event.at("data");
-                check(data.contains("textHtml") == !data.value("text", std::string{}).empty(),
-                      "a Bot message's text was not rendered as Markdown");
-                messages.push_back(data);
-            }
-        return messages;
-    };
-    auto senderExchange = peerMessages(newest);
-    while (cursor > 0) {
-        const auto older = browser.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
-        const auto messages = peerMessages(older);
-        senderExchange.insert(senderExchange.begin(), messages.begin(), messages.end());
-        const auto next = older.at("olderBefore").get<Id>();
-        check(0 <= next && next < cursor, "older peer history cursor did not advance");
-        cursor = next;
-    }
-    const auto recipientExchange = peerMessages(recipient);
-    const auto checkExchange = [](const Json& exchange) {
-        check(exchange.size() == 2, "peer history must show one request and one reply");
-        const auto& request = exchange.at(0);
-        const auto& reply = exchange.at(1);
-        check(request.at("messageType") == "request" && request.at("requestKind") == "consult" && request.at("fromBotId") == "release" &&
-                  request.at("toBotId") == "triage" && request.at("text") == "判定基準を教えて",
-              "peer history lost the consultation request");
-        check(reply.at("messageType") == "result" && reply.at("fromBotId") == "triage" && reply.at("toBotId") == "release" &&
-                  reply.at("text") == "再現条件を確認してください",
-              "peer history lost the consultation reply");
-        check(!request.at("exchangeId").get<std::string>().empty() && !request.at("messageId").get<std::string>().empty() &&
-                  request.at("messageId") != reply.at("messageId") && request.at("exchangeId") == reply.at("exchangeId") &&
-                  reply.at("replyTo") == request.at("messageId"),
-              "peer history lost its message or thread identity");
-    };
-    checkExchange(senderExchange);
-    checkExchange(recipientExchange);
-    check(senderExchange.at(0).at("exchangeId") == recipientExchange.at(0).at("exchangeId") &&
-              senderExchange.at(0).at("messageId") == recipientExchange.at(0).at("messageId") &&
-              senderExchange.at(1).at("messageId") == recipientExchange.at(1).at("messageId"),
-          "sender and recipient see different message identities");
-    check(peerMessages(browser.get("/api/view?bot=settings")).empty(), "peer history appeared in a third Bot's conversation");
-}
-
-void peerConversation(const std::filesystem::path& path) {
-    constexpr auto primary = "/api/peer-conversation?bot=release&peer=triage";
-    constexpr auto reverse = "/api/peer-conversation?bot=triage&peer=release";
-    constexpr auto separate = "/api/peer-conversation?bot=release&peer=settings";
-    std::atomic_bool allowed = true, configured = true;
-    RuntimeOptions options;
-    options.peers = [&](std::string_view sender) -> std::vector<PeerBot> {
-        if (sender != "release") return {};
-        auto peers = allowed ? fixturePeers(sender) : std::vector<PeerBot>{};
-        peers.push_back({"Settings", {"settings", "", "local-env", "settings"}});
-        return peers;
-    };
-    auto web = callbacks();
-    web.bots = [all = web.bots, &configured] {
-        auto bots = all();
-        if (!configured) {
-            const auto archived = std::ranges::find_if(bots, [](const Json& bot) { return bot.at("id") == "triage"; });
-            bots.erase(archived);
-        }
-        return bots;
-    };
-    web.peers = options.peers;
-    PeerModel model;
-    FixedT3 t3;
-    Json history;
-    {
-        Store store(path);
-        Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
-        const auto server = startWeb(store, 0, web);
-        Browser browser(*server);
-        const auto empty = browser.get(primary);
-        check(empty.at("messages").empty() && empty.at("hasOlder") == false && !empty.contains("canSend") && browser.get(reverse) == empty,
-              "an unused permitted pair did not open as the same read-only history");
-        browser.post(
-            "/api/peer-messages",
-            {{"botId", "release"}, {"peerId", "triage"}, {"clientMessageId", "direct-send"}, {"text", "Send directly to the peer"}}, 404);
-        runtime.tick();
-        check(TaskList(store).tasks().empty() && t3.launches.empty(), "opening a DM or posting to the old route started work");
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"), 403);
-
-        seedPeerHistory(store, browser, runtime, t3);
-        history = browser.get(primary).at("messages");
-        check(history.size() == 2 && history == browser.get(reverse).at("messages"),
-              "an exchange was missing, duplicated, or different from the opposite Bot page");
-        check(history.at(0).at("data").at("text") == "判定基準を教えて" &&
-                  history.at(1).at("data").at("text") == "再現条件を確認してください" &&
-                  history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
-              "the conversation lost its messages or order");
-        check(browser.get(separate).at("messages").empty(), "an exchange leaked to another allowed pair");
-        const auto before = std::to_string(history.back().at("id").get<Id>());
-        check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == Json::array({history.front()}),
-              "the peer history cursor repeated the anchor or skipped older messages");
-
-        const auto checkProjection = [](const Json& messages) {
-            for (const auto& message : messages) {
-                if (message.at("kind") != "bot_message") continue;
-                check(!message.contains("taskId") && !message.contains("taskBotId") && !message.at("data").contains("evidence"),
-                      "peer chat leaked internal task information");
-            }
-        };
-        checkProjection(history);
-        checkProjection(browser.get("/api/view?bot=release").at("events"));
-        checkProjection(browser.get("/api/view?bot=triage").at("events"));
-    }
-    {
-        Store store(path);
-        const auto server = startWeb(store, 0, web);
-        Browser browser(*server);
-        check(browser.get(primary).at("messages") == history, "restarting lost the conversation");
-        allowed = false;
-        check(browser.get(reverse).at("messages") == history, "removing a peer permission lost existing history");
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"), 403);
-        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"), 404);
-        const auto bots = browser.get("/api/bots");
-        const auto triage = std::ranges::find_if(bots, [](const Json& bot) { return bot.at("id") == "triage"; });
-        check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id", "release"}}}),
-              "the recipient lost its historical partner after peer permission was removed");
-        configured = false;
-        check(browser.get(primary).at("messages") == history, "removing a peer's configuration lost history");
-        const auto beforeFirst = std::to_string(history.front().at("id").get<Id>());
-        check(browser.get(std::string(primary) + "&before=" + beforeFirst) == Json{{"messages", Json::array()}, {"hasOlder", false}},
-              "an empty page of archived history could not be read");
-        const auto list = browser.get("/api/bots");
-        const auto release = std::ranges::find_if(list, [](const Json& bot) { return bot.at("id") == "release"; });
-        check(release != list.end() &&
-                  std::ranges::any_of(release->at("peers"), [](const Json& peer) { return peer == Json{{"id", "triage"}}; }),
-              "the picker lost the archived conversation or exposed a send action");
-    }
-}
-
-void peerConversationAnchor(const std::filesystem::path& path) {
-    Store store(path);
-    PeerModel model;
-    FixedT3 t3;
-    RuntimeOptions options;
-    options.peers = fixturePeers;
-    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
-    for (int i = 0; i < 36; ++i) {
-        TaskIntake(store).submit({"release", "Check release criteria", "local-env", "release"});
-        tick(runtime, 8);
-    }
-
-    auto web = callbacks();
-    web.peers = [](std::string_view bot) {
-        auto peers = fixturePeers(bot);
-        if (bot == "release") peers.push_back({"Settings", {"settings", "", "local-env", "settings"}});
-        return peers;
-    };
-    web.authenticate = [](std::string_view credential) { return credential == "Bearer reader" ? Person{"reader"} : Person{}; };
-    const Person owner{"fixture", true};
-    BotAccess access{store};
-    access.setMember(owner, "release", "reader", true);
-    access.setMember(owner, "settings", "reader", true);
-    const auto server = startWeb(store, 0, web);
-    Browser browser(*server);
-    browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
-
-    const auto recipient = Conversations(store).conversation("triage", 0, 200);
-    const auto sender = PeerConversations(store).peerConversation("release", "triage", 0, 200);
-    check(sender.size() == 72, "historical DM fixture did not span multiple pages");
-    const auto& target = sender.at(24);
-    const auto targetId = target.at("id").get<Id>();
-    const auto copy = std::ranges::find_if(recipient, [&](const Json& event) {
-        return event.at("kind") == "bot_message" && event.at("data").at("messageId") == target.at("data").at("messageId");
-    });
-    check(copy != recipient.end() && copy->at("id") != targetId, "fixture has no recipient copy of the anchor");
-
-    const std::string primary = "/api/peer-conversation?bot=release&peer=triage";
-    const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
-    const auto anchor = "&anchor=" + std::to_string(targetId);
-    Browser::checked(browser.client.Get(primary + anchor), 403);
-    access.setMember(owner, "triage", "reader", true);
-
-    const auto latest = browser.get(primary);
-    check(latest.at("messages").front().at("id").get<Id>() > targetId, "fixture anchor appeared in the latest page");
-    const auto page = browser.get(primary + anchor);
-    const auto& messages = page.at("messages");
-    check(page.at("anchorId") == targetId && page.at("hasOlder") == true && messages.size() == 36 && messages.at(18).at("id") == targetId &&
-              messages.at(19).at("data").at("replyTo") == messages.at(18).at("data").at("messageId"),
-          "the bounded historical page missed the precise message or its reply");
-    for (std::size_t i = 0; i < messages.size(); ++i)
-        check(messages.at(i).at("id") == sender.at(i + 6).at("id"), "historical pages skipped or reordered messages");
-    const auto reverseAnchor = "&anchor=" + std::to_string(copy->at("id").get<Id>());
-    check(browser.get(reverse + reverseAnchor) == page, "the recipient anchor did not resolve to the same shared DM page");
-    const auto before = "&before=" + std::to_string(messages.front().at("id").get<Id>());
-    const auto older = browser.get(primary + before);
-    check(older.at("messages").size() == 6 && older.at("hasOlder") == false,
-          "earlier pagination repeated or skipped messages around the anchor");
-    Browser::checked(browser.client.Get(primary + anchor + before), 400);
-    Browser::checked(browser.client.Get(primary + "&anchor=-1"), 400);
-    check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor), 404) ==
-              Json{{"error", "peer_message_not_found"}},
-          "a different readable pair resolved the anchor");
-}
-
 void conversationRequestApproval(const std::filesystem::path& path) {
     Store store(path);
     struct ConversationModel : FixedModel {
@@ -824,7 +560,7 @@ void exercise(const std::filesystem::path& path) {
     const auto settings = TaskIntake(cli).submit(web.intake("settings", "接続設定を確認する"));
     tick(*runtime, 3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
-    t3.observations["thread-release"].question = {"scope-question", {{.id = "scope"}}};
+    t3.observations["thread-release"].question = scopeQuestion();
     t3.observations["thread-triage"].kind = Observation::Kind::ExternalInput;
     t3.observations["thread-triage"].status = "権限の承認が必要";
     tick(*runtime, 2);
@@ -925,7 +661,7 @@ void exercise(const std::filesystem::path& path) {
           "Correcting the Bot's Session settings did not resume the saved launch automatically");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"], "report", "report", "T3 finished while the browser was closed") &&
-              hasEvent(page["events"], "completed", "text", "Draft complete") &&
+              hasEvent(page["events"], "completed", "text", "T3 finished while the browser was closed") &&
               hasEvent(page["events"], "completed", "runStatus", "completed"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
@@ -947,7 +683,7 @@ void exercise(const std::filesystem::path& path) {
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
-    triageQuestion.question = {"scope-question", {{.id = "scope"}}};
+    triageQuestion.question = scopeQuestion();
     tick(*runtime, 2);
     const auto question = reopened.get("/api/view?bot=triage").at("waits").at(0);
     const Json answer = {{"botId", "triage"},
@@ -1073,8 +809,6 @@ void notificationEvents(const std::filesystem::path& path) {
             if (input.event.at("kind") == "conversation_turn") {
                 return {{{"reply", {{"text", "A reply"}}, "Respond to the request"}}};
             }
-            if (input.event.at("kind") == "intake" && input.task.at("request") == "Choose a publish date")
-                return {{{"ask_user", {{"question", "When should we publish?"}}, "The schedule needs a date"}}};
             return FixedModel::decide(input);
         }
     } model;
@@ -1114,6 +848,8 @@ void notificationEvents(const std::filesystem::path& path) {
         runtime.runConversations();
         TaskIntake(store).submit({"release", "Choose a publish date", "local-env", "publication"});
         TaskIntake(store).submit(web.intake("release", "Verify staging"));
+        t3.observations["thread-publication"] = {.kind = Observation::Kind::Question,
+                                                 .question = {"publish-date", {{.id = "date", .prompt = "When should we publish?"}}}};
         t3.observations["thread-release"] = {.kind = Observation::Kind::Finished,
                                              .status = "failed",
                                              .report = "Health check failed",
@@ -1340,7 +1076,6 @@ void eventStream(const std::filesystem::path& path) {
     Browser browser(*server);
     Browser stream(*server);
     check(browser.get("/api/view?bot=release").at("canDecide") == true, "local owner lost conversation access");
-    Browser::checked(browser.client.Get("/api/events?peer=triage"), 400);
     Browser::checked(browser.client.Get("/api/events", httplib::Headers{{"Origin", "http://example.test"}}), 403);
 
     struct ReviewModel : FixedModel {
@@ -1442,7 +1177,7 @@ void conversationPermissions(const std::filesystem::path& path) {
     tick(runtime, 3);
     auto& observation = t3.observations["thread-release"];
     observation.kind = Observation::Kind::Question;
-    observation.question = {"scope-question", {{.id = "scope"}}};
+    observation.question = scopeQuestion();
     tick(runtime, 2);
 
     const auto server = startWeb(store, 0, web);
@@ -1494,26 +1229,6 @@ void conversationPermissions(const std::filesystem::path& path) {
     deciderAvailable = false;
     runtime.runConversations();
     assertReply(revoked, "access");
-}
-
-void retryEventProjection(const std::filesystem::path& path) {
-    Store store(path);
-    std::atomic<bool> peersAvailable = false;
-    auto web = callbacks();
-    web.peers = [&](std::string_view bot) {
-        if (!peersAvailable.load()) throw std::runtime_error("profiles unavailable");
-        return fixturePeers(bot);
-    };
-    const auto server = startWeb(store, 0, web);
-    Browser stream(*server);
-    readChanges(stream, "/api/events?bot=release", [&](const Json& change) {
-        if (!peersAvailable.exchange(true)) {
-            check(change == Json{{"bot", "release"}}, "a failed list projection blocked a healthy Bot view");
-            return true;
-        }
-        check(change == Json{{"list", true}}, "list projection did not recover independently");
-        return false;
-    });
 }
 
 void retryHistoryInvalidation(const std::filesystem::path& path) {
@@ -1636,30 +1351,6 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     feed.release(triage);
 }
 
-void peerEventStream(const std::filesystem::path& path) {
-    Store store(path);
-    auto web = callbacks();
-    web.peers = fixturePeers;
-    RuntimeOptions options;
-    options.peers = fixturePeers;
-    PeerModel model;
-    FixedT3 t3;
-    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, options);
-    const auto server = startWeb(store, 0, web);
-    Browser browser(*server);
-    Browser stream(*server);
-    bool initial = true;
-    readChanges(stream, "/api/events?bot=release&peer=triage", [&](const Json& change) {
-        const Json pair = {{"bot", "release"}, {"peer", "triage"}};
-        if (change.contains("dm")) check(change.at("dm") == pair, "the DM stream sent the wrong scope");
-        if (std::exchange(initial, false)) {
-            check(change == Json{{"list", true}, {"bot", "release"}, {"dm", pair}}, "missing initial DM scope");
-            seedPeerHistory(store, browser, runtime, t3);
-            return true;
-        }
-        return !change.contains("dm");
-    });
-}
 void botProfileEndpoints(const std::filesystem::path& path) {
     Store store(path);
     std::map<std::string, Json, std::less<>> profiles;
@@ -2198,7 +1889,6 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"), 403);
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"), 403);
     Browser::checked(browser.client.Get("/api/events?bot=triage"), 403);
-    Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"), 403);
     browser.post("/api/messages", {{"botId", "release"}, {"text", "hello"}, {"clientMessageId", "1"}}, 201);
     browser.post("/api/bot-settings/members", {{"botId", "release"}, {"person", "owner"}, {"add", false}}, 403);
     browser.post("/api/bot-settings/secret", {{"botId", "release"}, {"requestId", 1}, {"value", privateValue}}, 403);
@@ -2247,13 +1937,8 @@ int main() {
         watchedBotView(directory.path / "watched-bot-view.db");
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");
-        retryEventProjection(directory.path / "retry-events.db");
         retryHistoryInvalidation(directory.path / "retry-history.db");
         retryOneBotProjection(directory.path / "retry-one-bot.db");
-        peerEventStream(directory.path / "peer-events.db");
-        peerHistory(directory.path / "peers.db");
-        peerConversation(directory.path / "peer-conversations.db");
-        peerConversationAnchor(directory.path / "peer-conversation-anchor.db");
         settingsEndpoints(directory.path / "settings.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");

@@ -22,7 +22,7 @@ struct ScheduleImportError;
 class TaskOperations;
 class AutomationStorage {
 public:
-    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, const Policy&, AutomationModelResolver, TaskOperations&);
+    AutomationStorage(Database&, const SecretStorage&, const BotLifecycleStorage&, const Policy&, TaskOperations&);
 
     void retireAutomations(const Json& botIds);
     Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
@@ -32,8 +32,6 @@ public:
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);
     void skipDueAutomations(std::string_view bot, Seconds now);
-    Json automationRoute(std::string_view bot, Json routing) const;
-    void refreshPlannerModel(std::string_view bot, Json& config) const;
 private:
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
     std::vector<Id> dueAutomations(Seconds now, std::string_view bot = {}) const;
@@ -43,7 +41,6 @@ private:
     const SecretStorage& secretStorage_;
     const BotLifecycleStorage& lifecycle_;
     const Policy& permissions_;
-    const AutomationModelResolver model_;
     TaskOperations& taskOperations;
 };
 }

@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -201,11 +202,6 @@ struct Script final : Model {
             }
             return {{{"reply", {{"text", "I have the fixture request."}}, "End this turn"}}};
         }
-        if (kind == "intake" && input.task.at("request") == holdLocal)
-            return {{{"ask_user", {{"question", "Can the project be released?"}}, "Hold the local slot"}}};
-        if (kind == "intake")
-            return {{{"delegate", {{"instruction", request}, {"doneWhen", "The checks have a result"}}, "Run the checks"}}};
-        if (kind == "result") return {{{"complete", {{"report", input.event.at("report")}}, "Return the checks"}}};
         throw std::logic_error("unexpected model event: " + input.event.dump());
     }
 };
@@ -644,8 +640,26 @@ void cancelUnknownAcceptance(const Endpoint& local, const Endpoint& mini, const 
 }
 
 void independentSlots(Scenario& fixture) {
-    const auto blocker = TaskIntake(fixture.store).submit({"owner", holdLocal, fixture.local.id(), fixture.local.project()});
+    // A launch waiting for approval holds its project, so the blocker keeps the local slot without starting a Run.
+    PolicyRules{fixture.store}.setMode(localOwner, "supervised");
+    const auto blocker = TaskIntake(fixture.store).submit({"owner", holdLocal, fixture.local.id(), fixture.local.project()}, &localOwner);
+    const auto approveLaunch = [&](const Endpoint& endpoint) {
+        std::optional<Json> found;
+        fixture.advanceUntil(
+            [&](const TaskView&) {
+                for (const auto& item : Inbox(fixture.store).inbox(localOwner, bot))
+                    if (item.at("target") == endpoint.id() && item.at("status") == "pending") found = item;
+                return found.has_value();
+            },
+            "the launch did not request approval");
+        Inbox(fixture.store)
+            .decideInbox(localOwner,
+                         {found->at("botId"), InboxKind::policy_approval, found->at("itemId"), found->at("waitId"), found->at("taskId"),
+                          found->at("targetRevision"), found->at("targetGeneration")},
+                         "allow_once");
+    };
     fixture.start();
+    approveLaunch(fixture.mini);
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.mini).value("status", "") == "running"; },
                          "the free route must start while the other project is blocked");
     check(Tasks(fixture.store).task(blocker).task.state == TaskState::waiting && fixture.local.effects("t3_thread_launch").empty() &&
@@ -655,6 +669,7 @@ void independentSlots(Scenario& fixture) {
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.mini).value("status", "") == "completed"; },
                          "the free route must settle independently of the blocked sibling");
     TaskControl(fixture.store).operate(localOwner, TaskTarget::from(Tasks(fixture.store).task(blocker).task, 0), "cancel");
+    approveLaunch(fixture.local);
     fixture.advanceUntil([&](const TaskView& task) { return Scenario::result(task, fixture.local).value("status", "") == "running"; },
                          "the waiting route must launch once its project is free");
     fixture.local.configure({{"multiStatus", "completed"}});

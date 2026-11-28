@@ -31,7 +31,6 @@ struct Tool {
     std::vector<Param> params;
     const char* notificationArgument = nullptr;
     const char* notificationField = nullptr;
-    bool taskOnly = false;
 };
 
 const std::vector<std::pair<std::string_view, Tool>>& specs() {
@@ -41,13 +40,6 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
           "read",
           {{"query", "string", "Optional case-insensitive substring of owner/repo.", false},
            {"page", "integer", "Next repository page from the previous response.", false}}}},
-        {"git_read_result",
-         {"Recover a saved Git read for this task. Read IDs are listed in event.gitReadRefs.",
-          "read",
-          {{"readId", "integer", "Exact saved Git read ID."}},
-          nullptr,
-          nullptr,
-          true}},
         {"git_repo_info", {"Read repository details using repository:read.", "read", {}}},
         {"git_open_pr",
          {"Open or recover the task's PR using repository:pr and repository:read on a separate head repository. "
@@ -131,17 +123,14 @@ const Json* notificationTarget(const Tool& spec, const Json& event) {
 }
 }
 
-const std::vector<std::string>& gitTools(bool conversation) {
-    const auto names = [](bool conversation) {
+const std::vector<std::string>& gitTools() {
+    static const auto names = [] {
         std::vector<std::string> result;
-        for (const auto& [name, spec] : specs())
-            if (!conversation || !spec.taskOnly) result.emplace_back(name);
+        for (const auto& [name, spec] : specs()) result.emplace_back(name);
         std::ranges::sort(result);
         return result;
-    };
-    static const auto conversationNames = names(true);
-    static const auto taskNames = names(false);
-    return conversation ? conversationNames : taskNames;
+    }();
+    return names;
 }
 bool isGitTool(std::string_view tool) {
     return findSpec(tool) != nullptr;
@@ -173,17 +162,15 @@ bool gitNotificationToolAllowed(const Decision& call, const Json& event) {
     return argument != call.args.end() && *argument == *target;
 }
 
-Json gitToolSchema(std::string_view name, bool conversation) {
+Json gitToolSchema(std::string_view name) {
     const auto* spec = findSpec(name);
     if (!spec) throw std::out_of_range("Unknown Git tool");
     Json properties{{"host", {{"type", "string"}, {"description", "Connected Git host, for example github.com."}}}};
     Json required = {"host"};
-    if (name != "git_find_repos" && name != "git_read_result") {
+    if (name != "git_find_repos") {
         properties["repo"] = {{"type", "string"}, {"description", "Exact owner/repo from repository discovery."}};
         required.push_back("repo");
-        if (conversation)
-            properties["taskId"] = {
-                {"type", "integer"}, {"minimum", 1}, {"description", "Task owned by this Bot. Required for mutations."}};
+        properties["taskId"] = {{"type", "integer"}, {"minimum", 1}, {"description", "Task owned by this Bot. Required for mutations."}};
     }
     const auto taskIdPosition = required.size();
     auto readActions = Json::array();
@@ -216,8 +203,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
     Json parameters{
         {"type", "object"}, {"properties", std::move(properties)}, {"required", std::move(required)}, {"additionalProperties", false}};
     if (name == "git_manage_issue") {
-        Json writeRequired = {"reason"};
-        if (conversation) writeRequired.push_back("taskId");
+        Json writeRequired = {"reason", "taskId"};
         parameters["oneOf"] =
             Json::array({{{"properties", {{"action", {{"enum", std::move(readActions)}}}}}, {"not", {{"required", {"reason"}}}}},
                          {{"properties", {{"action", {{"enum", std::move(writeActions)}}}}}, {"required", std::move(writeRequired)}}});

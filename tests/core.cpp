@@ -1,4 +1,7 @@
+#include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
+#include "flock/task_target.hpp"
+#include "flock/person.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/tasks.hpp"
 #include "flock/command.hpp"
@@ -94,18 +97,7 @@ void tickUntil(Runtime& runtime, const auto& satisfied, std::string_view failure
 }
 
 struct FixedModel : Model {
-    int calls = 0;
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-    Decision choose(const ModelInput& input) {
-        ++calls;
-        if (input.event["kind"] == "intake")
-            return {"delegate", {{"instruction", "Check main"}, {"doneWhen", "Provide a report on main"}}, "The request specifies main"};
-        if (input.event["kind"] == "question")
-            return {"answer_session_question", {{"requestId", "q1"}, {"answers", {{"branch", "main"}}}}, "The request specifies main"};
-        check(input.task["doneWhen"] == "Provide a report on main", "lost doneWhen");
-        check(input.event["report"] == "main confirmed", "lost report");
-        return {"complete", {{"report", "main confirmed"}}, "The Run report satisfies the saved criterion"};
-    }
+    ModelTurn decide(const ModelInput&) override { throw std::runtime_error("a task without a conversation called the model"); }
 };
 struct FixedT3 : T3 {
     int launches = 0, replies = 0, polls = 0;
@@ -115,7 +107,7 @@ struct FixedT3 : T3 {
         if (cmd.tool == CommandTool::delegate) {
             ++launches;
             check(!cmd.actionId.empty() && cmd.instruction.starts_with("Standing rules from release's role:\nCheck the branch\n\n") &&
-                      cmd.instruction.find("\n\nCheck main\n\n") != std::string::npos &&
+                      cmd.instruction.find("\n\nTask intent:\nCheck main\n\n") != std::string::npos &&
                       cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos,
                   "T3 did not receive the work instruction and its recovery identifier");
             return {Delivery::Kind::Accepted, {"thread-1", "run-1", "t3://thread-1"}, {}};
@@ -153,12 +145,15 @@ int main() {
             Runtime runtime(store, model, t3, notes);
             id = TaskIntake(store).submit({"release", "Check main", "env", "proj"});
             tickUntil(runtime, [&] { return Tasks(store).task(id).task.state == TaskState::running; }, "delegate did not start");
-            const auto callsBeforeIdle = model.calls;
             const auto pollsBeforeIdle = t3.polls;
             for (int i = 0; i < 3; ++i) runtime.tick();
-            check(t3.polls > pollsBeforeIdle && model.calls == callsBeforeIdle, "idle monitoring did not stay model-free");
+            check(t3.polls > pollsBeforeIdle, "idle monitoring stopped polling the Run");
             t3.current.kind = Observation::Kind::Question;
-            t3.current.question = {"q1", {{.id = "branch"}}};
+            t3.current.question = {"q1", {{.id = "branch", .prompt = "Which branch?"}}};
+            tickUntil(runtime, [&] { return Tasks(store).task(id).wait.has_value(); }, "the Session question did not reach the person");
+            const auto asked = Tasks(store).task(id);
+            check(asked.wait->text == "Which branch?", "the person did not see the Session's own question");
+            TaskControl(store).operate(localOwner, TaskTarget::from(asked.task, asked.wait->id), "answer", {{"text", "main"}});
             tickUntil(
                 runtime, [&] { return t3.replies == 1 && Tasks(store).task(id).task.state == TaskState::running; },
                 "did not answer and return to the same Run");
@@ -178,8 +173,8 @@ int main() {
             const auto isCompletion = [](const Json& entry) { return entry["kind"] == "completed"; };
             const auto completion = std::find_if(history.begin(), history.end(), isCompletion);
             check(std::count_if(history.begin(), history.end(), isCompletion) == 1 && (*completion)["data"]["text"] == "main confirmed" &&
-                      (*completion)["data"]["doneWhen"] == "Provide a report on main",
-                  "completion history lost or duplicated the report and agreed criterion");
+                      (*completion)["data"]["doneWhen"] == "",
+                  "completion history lost or duplicated the report");
         }
         std::filesystem::remove_all(path);
     } catch (const std::exception& e) {

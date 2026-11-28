@@ -274,22 +274,19 @@ void runSettingsChangesResyncConfiguredSchedules() {
     check(TaskList(store).tasks("release").size() == 1, "a configured schedule fired after its destination was cleared");
 }
 
-void automationFiringsUseCurrentPlannerSettings() {
+void automationFiringsKeepTheirSavedRoute() {
     Sandbox temp;
     const auto home = temp.path / "bots";
     const auto folder = home / "release";
-    auto original = botConfig("previous-model");
-    createBot(folder, original, "", "");
+    createBot(folder, botConfig("previous-model"), "", "");
     Bots bots(home);
-    Store store(temp.path / "tasks.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
+    Store store(temp.path / "tasks.db");
     const Person owner{"fixture", true};
     const auto firstDue = utc(2026, 1, 2, 0, 0);
     const auto nextDue = utc(2026, 1, 3, 0, 0);
     auto saved = bots.get("release").intake("");
     saved.environmentId = "saved-environment";
     saved.projectId = "saved-project";
-    saved.config["modelProvider"] = "saved-provider";
-    saved.config["reasoningEffort"] = "high";
     const auto schedule = Automations(store).createAutomation(
         owner, saved, {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}}, firstDue - 60);
     const auto trigger = Automations(store).createAutomation(
@@ -314,32 +311,11 @@ void automationFiringsUseCurrentPlannerSettings() {
     const auto webhook = Automations(store).receiveWebhook(owner, "deploy", "event-1", {{"branch", "main"}}, nextDue);
     check(webhook.at("tasks").size() == 1 && webhook.at("tasks").at(0).at("triggerId") == trigger.at("id"),
           "model change lost the matched webhook firing");
-
-    auto currentConfig = saved.config;
-    currentConfig["model"] = "current-model";
-    currentConfig["modelProvider"] = "chatgpt";
-    currentConfig["reasoningEffort"] = "low";
-    const auto checkTask = [&](Id id, const Json& expected) {
+    for (const auto id : {previousTask, recurring.id, webhook.at("tasks").at(0).at("taskId").get<Id>()}) {
         const auto task = Tasks(store).task(id).task;
-        check(task.config == expected && task.environmentId == saved.environmentId && task.projectId == saved.projectId,
-              "automation task used the wrong planner settings or lost its saved route");
-    };
-    checkTask(recurring.id, currentConfig);
-    checkTask(webhook.at("tasks").at(0).at("taskId").get<Id>(), currentConfig);
-    auto previousConfig = currentConfig;
-    previousConfig["model"] = "previous-model";
-    previousConfig.erase("reasoningEffort");
-    checkTask(previousTask, previousConfig);
-
-    const auto defaultDue = utc(2026, 1, 4, 0, 0);
-    bots.updateRunSettings(store, "release", {{"reasoningEffort", ""}}, nextDue, report);
-    Automations(store).fireDueAutomations(defaultDue);
-    currentConfig.erase("reasoningEffort");
-    checkTask(TaskList(store).tasks("release").at(0).task.id, currentConfig);
-
-    write(folder / "config.json", botConfig("current-model").dump());
-    const auto reset = Automations(store).receiveWebhook(owner, "deploy", "event-2", {{"branch", "main"}}, defaultDue);
-    checkTask(reset.at("tasks").at(0).at("taskId").get<Id>(), currentConfig);
+        check(task.config == saved.config && task.environmentId == saved.environmentId && task.projectId == saved.projectId,
+              "automation task lost its saved route");
+    }
 
     const auto fallbackDue = utc(2026, 1, 5, 0, 0);
     write(folder / "config.json", "invalid");
@@ -347,7 +323,6 @@ void automationFiringsUseCurrentPlannerSettings() {
     const auto fallback = TaskList(store).tasks("release").at(0).task;
     check(std::get<TimedTaskTrigger>(fallback.trigger.value().details).targetTime == fallbackDue,
           "unreadable Bot settings prevented the saved automation from firing");
-    checkTask(fallback.id, saved.config);
 }
 
 void unreadableProfileKeepsAutomationDelivery() {
@@ -356,18 +331,15 @@ void unreadableProfileKeepsAutomationDelivery() {
     createBot(home / "release", botConfig("release-saved"), "", "");
     createBot(home / "triage", botConfig("triage-saved"), "", "");
     Bots bots(home);
-    Store store(temp.path / "tasks.db", {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); }});
+    Store store(temp.path / "tasks.db");
     const Person owner{"fixture", true};
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
     const Json trigger = {{"kind", "trigger"}, {"source", "deploy"}, {"eventFilter", {{"branch", "main"}}}, {"request", "Deploy check"}};
-    auto release = bots.get("release").intake("");
-    release.config["modelProvider"] = "saved-provider";
-    for (const auto& bot : {release, bots.get("triage").intake("")}) {
+    for (const auto& bot : {bots.get("release").intake(""), bots.get("triage").intake("")}) {
         Automations(store).createAutomation(owner, bot, schedule, due - 60);
         Automations(store).createAutomation(owner, bot, trigger, due - 60);
     }
-    write(home / "triage" / "config.json", botConfig("triage-current").dump());
     std::filesystem::rename(home / "release", home / "release.saved");
     std::filesystem::create_symlink("release", home / "release");
 
@@ -378,16 +350,9 @@ void unreadableProfileKeepsAutomationDelivery() {
     check(delivered.at("tasks").size() == 2 && repeated.at("duplicate") == true && repeated.at("tasks") == delivered.at("tasks"),
           "both Bots must receive one copy of the webhook");
     for (const auto id : {"release", "triage"}) {
-        const bool unavailable = std::string_view(id) == "release";
         const auto tasks = TaskList(store).tasks(id);
         check(tasks.size() == 2 && tasks.at(0).task.request == "Deploy check" && tasks.at(1).task.request == "Daily check",
               "both Bots must receive one task per automation");
-        for (const auto& task : tasks) {
-            const auto settings = task.task.config;
-            check(settings.at("model") == (unavailable ? "release-saved" : "triage-current") &&
-                      settings.at("modelProvider") == (unavailable ? "saved-provider" : "chatgpt"),
-                  "automations must use the saved planner only when the current profile is unavailable");
-        }
     }
 }
 
@@ -513,7 +478,7 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     runSettingsChangesResyncConfiguredSchedules();
-    automationFiringsUseCurrentPlannerSettings();
+    automationFiringsKeepTheirSavedRoute();
     unreadableProfileKeepsAutomationDelivery();
     failedScheduleSyncLeavesWorkspaceUnchanged();
     invalidSessionSettingsPreserveDueTimes();

@@ -17,14 +17,11 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-void runtime::TaskUpdates::saveTask(TaskData& task, std::optional<DecisionCheckpoint> resumedDecision) {
-    if (resumedDecision) resumedDecision->generation = task.generation + 1;
-    task.pendingDecision = std::move(resumedDecision);
+void runtime::TaskUpdates::saveTask(TaskData& task) {
     records.save(task);
 }
 
 void runtime::TaskUpdates::consumeEvent(TaskData& task) {
-    task.feedback.reset();
     events.consumeEvent(task);
 }
 
@@ -35,10 +32,6 @@ TaskData runtime::TaskUpdates::snapshot(Id id) {
 
 TaskData runtime::TaskUpdates::loadTask(Id id) {
     return records.load(id);
-}
-
-bool runtime::TaskUpdates::checkpointMatches(const DecisionCheckpoint& checkpoint, const TaskData& task) {
-    return checkpoint.eventId == task.eventId && checkpoint.generation == task.generation && checkpoint.revisionId == task.currentRevision;
 }
 
 void runtime::TaskUpdates::establishCriteria(TaskData& task, const Json& args) {

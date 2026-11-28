@@ -6,6 +6,7 @@
 #include "flock/json.hpp"
 #include "flock/model.hpp"
 #include "flock/runtime.hpp"
+#include "flock/task_interaction.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -44,25 +45,20 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-    Decision choose(const ModelInput& input) {
-        if (input.event["kind"] == "intake")
-            return {"delegate",
-                    {{"instruction", "Read the working notes"}, {"doneWhen", "Summarize user-facing changes"}},
-                    "The request needs a working report"};
-        if (input.event["kind"] == "question") {
-            if (input.event.contains("userAnswer")) {
-                return {"answer_session_question",
-                        {{"requestId", "scope-question"}, {"answers", {{"scope", input.event["userAnswer"]}}}},
-                        "The user selected the scope"};
-            }
-            return {"ask_user",
-                    {{"question", "利用者向けの変更だけを載せますか？"}, {"choices", {"利用者向けのみ", "すべて"}}},
-                    "掲載範囲の指定が必要"};
-        }
-        return {"complete", {{"report", "Draft complete"}}, "The Session report matches the criterion"};
+    ModelTurn decide(const ModelInput& input) override {
+        const auto& event = input.event;
+        if (event.contains("sessionWake") && event.contains("task") && event.at("turn").empty())
+            return {{{"complete", {{"report", "Draft complete"}}, "The Session report matches the request"}}};
+        return {{{"reply", {{"text", "Done."}}, {}}}};
     }
 };
+
+inline Question scopeQuestion() {
+    return {"scope-question",
+            {{.id = "scope",
+              .prompt = "利用者向けの変更だけを載せますか？",
+              .options = {{"利用者向けのみ", "利用者向けのみ"}, {"すべて", "すべて"}}}}};
+}
 
 inline WebCallbacks callbacks() {
     return {[] {

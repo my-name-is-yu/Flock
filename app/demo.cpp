@@ -7,12 +7,16 @@
 #include "flock/run_ref.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
+#include "flock/task_interaction.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,6 +35,18 @@ constexpr std::string_view verificationRunSuffix = "-verify-project";
 class DemoModel final : public Model {
     ModelTurn decide(const ModelInput& in) override {
         const auto event = in.event.value("kind", "");
+        if (event == "conversation_turn" && in.event.contains("sessionWake")) {
+            const auto& task = in.event.value("task", Json::object());
+            if (!task.empty() && in.event.at("turn").empty() && std::ranges::find(in.tools, "complete") != in.tools.end()) {
+                const auto report = task.value("report", "");
+                Json args{{"report", report.empty() ? "The demo finished its assigned work." : report}};
+                if (!in.learningRunId.empty() && report == verificationReport)
+                    args["learnings"] =
+                        Json::array({{{"text", "./scripts/verify.sh runs the demo project's full check."}, {"runId", in.learningRunId}}});
+                return {{{"complete", std::move(args), "The demo Session reported that it completed the requested work."}}};
+            }
+            return {{{"reply", {{"text", "The demo work finished."}}, {}}}};
+        }
         if (event == "conversation_turn") {
             const auto request = in.event.value("text", "");
             const auto& turn = in.event.at("turn");
@@ -87,46 +103,6 @@ class DemoModel final : public Model {
             }
             return {{{"start_task", {{"request", request}}, {}}}};
         }
-        if (event == "result" && in.task.contains("userInstructions")) {
-            const bool follow = std::ranges::find(in.tools, "follow_up") != in.tools.end();
-            return {{{follow ? "follow_up" : "delegate",
-                      {{"instruction", "Apply the pending user instructions."}},
-                      "The demo report predates the accepted instructions."}}};
-        }
-        if (event == "result" && std::ranges::find(in.tools, "complete") != in.tools.end()) {
-            const auto report = in.event.value("report", "");
-            Json args{{"report", report}};
-            if (!in.learningRunId.empty() && report == verificationReport)
-                args["learnings"] =
-                    Json::array({{{"text", "./scripts/verify.sh runs the demo project's full check."}, {"runId", in.learningRunId}}});
-            return {{{"complete", std::move(args), "The demo Session reported that it completed the requested work."}}};
-        }
-        if (std::ranges::find(in.tools, "delegate") != in.tools.end()) {
-            std::string answer;
-            for (const auto& row : in.history)
-                if (row.value("kind", "") == "user_answer") answer = row.value("data", Json::object()).value("text", "");
-            const auto request = in.task.value("request", "");
-            if (answer.empty() && request.starts_with("ask:")) {
-                auto question = request.substr(4);
-                if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo focus on?";
-                return {{{"ask_user", {{"question", question}}, "The demo request calls for a user answer before work begins."}}};
-            }
-            Json args = {{"instruction", request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
-            if (const auto projects = in.task.find("projects"); projects != in.task.end()) {
-                const auto& choice = answer.empty() ? request : answer;
-                const auto selected = std::ranges::find_if(*projects, [&](const Json& project) {
-                    const auto title = field(project, "title");
-                    return !title.empty() && choice.find(title) != choice.npos;
-                });
-                if (selected == projects->end())
-                    return {{{"ask_user",
-                              {{"question", "Should I use Demo project or Demo documentation?"}},
-                              "The request does not identify a project."}}};
-                args["projectId"] = selected->at("projectId");
-            }
-            if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
-            return {{{"delegate", std::move(args), "A demo Session can handle this request."}}};
-        }
         throw ModelError("No fixed demo decision for this event", false);
     }
 };
@@ -141,12 +117,44 @@ class DemoT3 final : public T3 {
         return {thread, std::move(runId), ""};
     }
 
-    Delivery send(const Command& command) override { return reconcile(command); }
+    Delivery send(const Command& command) override {
+        std::lock_guard lock(mutex);
+        if (command.tool == CommandTool::answer_session_question) {
+            answered.insert(command.target.runId);
+            return {Delivery::Kind::Accepted, command.target, ""};
+        }
+        auto delivery = reconcileLocked(command);
+        // A request that starts with "ask:" makes the demo Session ask that question before it finishes.
+        if (const auto at = command.instruction.find("ask:");
+            at != std::string::npos && command.instruction.find("User answer:") == std::string::npos) {
+            auto question = command.instruction.substr(at + 4, command.instruction.find('\n', at) - at - 4);
+            if (question.find_first_not_of(" \t\r") == std::string::npos) question = "What should the demo focus on?";
+            questions[delivery.run.runId] = question;
+        }
+        return delivery;
+    }
 
-    Delivery reconcile(const Command& command) override { return {Delivery::Kind::Accepted, run(command), ""}; }
+    Delivery reconcile(const Command& command) override {
+        std::lock_guard lock(mutex);
+        return reconcileLocked(command);
+    }
+
+    Delivery reconcileLocked(const Command& command) { return {Delivery::Kind::Accepted, run(command), ""}; }
 
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
+        std::lock_guard lock(mutex);
         Observation observed;
+        if (interrupted.contains(run.runId)) {
+            observed.kind = Observation::Kind::Finished;
+            observed.status = "cancelled";
+            observed.resultRunId = run.runId;
+            return observed;
+        }
+        if (const auto question = questions.find(run.runId); question != questions.end() && !answered.contains(run.runId)) {
+            observed.kind = Observation::Kind::Question;
+            observed.question = {"demo-question-" + run.runId, {{.id = "answer", .prompt = question->second}}};
+            return observed;
+        }
         observed.kind = Observation::Kind::Finished;
         observed.status = "completed";
         observed.report = run.runId.ends_with(verificationRunSuffix) ? verificationReport : "The demo finished its assigned work.";
@@ -159,7 +167,16 @@ class DemoT3 final : public T3 {
         return {{"demo-project", "Demo project", {}}, {"demo-docs", "Demo documentation", {}}};
     }
 
-    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef& run) override {
+        std::lock_guard lock(mutex);
+        interrupted.insert(run.runId);
+        return InterruptOutcome::Requested;
+    }
+
+    std::mutex mutex;
+    std::set<std::string> interrupted;
+    std::map<std::string, std::string> questions;
+    std::set<std::string> answered;
 };
 } // namespace
 

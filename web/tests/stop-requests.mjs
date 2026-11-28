@@ -32,7 +32,7 @@ function fixtures() {
     generation: 3,
     currentRevision: 2,
     createdAt: Math.floor(Date.now() / 1000) - 90,
-    wait: { id: 202, reason: 'model_failure', text: 'Model call failed twice.' },
+    wait: { id: 202, reason: 'bot_notes_unavailable', text: 'Model call failed twice.' },
   };
   const problemTask = {
     id: 22,
@@ -41,7 +41,7 @@ function fixtures() {
     generation: 3,
     currentRevision: 2,
     createdAt: Math.floor(Date.now() / 1000) - 90,
-    problem: { id: 202, reason: 'model_failure', text: 'Model call failed twice.' },
+    problem: { id: 202, reason: 'bot_notes_unavailable', text: 'Model call failed twice.' },
   };
   const runningTask = {
     id: 23,
@@ -144,7 +144,7 @@ async function exercise() {
   check(problemRow && problemRow.textContent.includes('Inspect release failure'),
     'Problem task in Requests -> Waiting was not clickable');
   problemRow.click();
-  await waitFor(() => $('#detail')?.open && $('#detail-title')?.textContent.includes('model needs attention'),
+  await waitFor(() => $('#detail')?.open && $('#detail-title')?.textContent.includes('notes are unavailable'),
     'Clicking problem task did not open wait detail');
   $('#close-detail').click();
 

@@ -37,11 +37,7 @@ public:
         std::string bot;
         auto operator<=>(const BotView&) const = default;
     };
-    struct DirectMessage {
-        std::string bot, peer;
-        auto operator<=>(const DirectMessage&) const = default;
-    };
-    using Target = std::variant<BotList, BotView, DirectMessage>;
+    using Target = std::variant<BotList, BotView>;
     struct Scope {
         Person person;
         Target target;

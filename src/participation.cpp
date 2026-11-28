@@ -465,18 +465,10 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 inviterId = inviter.number(0);
             } else {
                 auto launch = database.query(R"SQL(
-WITH RECURSIVE ancestry(id,source) AS (
- SELECT t.id,t.source_message_id
- FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
- WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND o.tool='delegate'
- UNION ALL
- SELECT t.id,t.source_message_id
- FROM ancestry a JOIN peer_exchanges p ON p.recipient_task=a.id JOIN tasks t ON t.id=p.sender_task
- WHERE a.source IS NULL AND p.sender_task<a.id
-)
 SELECT m.id,m.bot_id,json_extract(m.routing,'$.sessionInvitationDepth'),
        json_extract(m.routing,'$.sessionOrigin.environmentId'),json_extract(m.routing,'$.sessionOrigin.threadId')
-FROM ancestry a JOIN messages m ON m.id=a.source WHERE m.person_id=?2
+FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id JOIN messages m ON m.id=t.source_message_id
+WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND o.tool='delegate' AND m.person_id=?2
 )SQL",
                                              {message.bot, actor.id, target.environmentId, target.threadId});
                 if (!launch.next()) throw Conflict("Invite a Bot into a Session you participate in or launched");

@@ -10,10 +10,10 @@ class LiveGateTest(unittest.TestCase):
         checker = tests_dir.parent / "scripts" / "check-live-junit.py"
         fixtures = tests_dir / "fixtures" / "live-junit"
         for fixture, ctest_status, status, summary in (
-            ("pass", 0, 0, "3 passed, 0 skipped, 0 failed, 0 missing"),
-            ("skip", 0, 1, "2 passed, 1 skipped, 0 failed, 0 missing"),
-            ("fail", 0, 1, "2 passed, 0 skipped, 1 failed, 0 missing"),
-            ("missing", 0, 1, "2 passed, 0 skipped, 0 failed, 1 missing"),
+            ("pass", 0, 0, "2 passed, 0 skipped, 0 failed, 0 missing"),
+            ("skip", 0, 1, "1 passed, 1 skipped, 0 failed, 0 missing"),
+            ("fail", 0, 1, "1 passed, 0 skipped, 1 failed, 0 missing"),
+            ("missing", 0, 1, "1 passed, 0 skipped, 0 failed, 1 missing"),
             ("pass", 8, 1, "CTest exited 8"),
             ("absent", 0, 1, "live gate failed"),
         ):

@@ -23,11 +23,6 @@ constexpr std::array timedKinds{
     std::pair{TimedTriggerKind::reminder, "reminder"sv},
 };
 
-constexpr std::array peerOutcomes{
-    std::pair{TaskPeerOutcome::completed, "completed"sv},
-    std::pair{TaskPeerOutcome::failed, "failed"sv},
-};
-
 TaskRestart decodeRestart(const Json& data, const RecordDecoder& row) {
     TaskRestart restart{row.get<Id>(data, "taskId"), {}};
     const auto& delivered = row.array(row.require(data, "deliveredInstructions"), "deliveredInstructions");
@@ -63,10 +58,6 @@ TaskTrigger decodeTaskTrigger(const Json& data, const RecordDecoder& row) {
                              row.get<std::string>(data, "timezone"),
                              row.optional<std::string>(data, "label")};
     return {id, firedAt, std::move(trigger)};
-}
-
-std::string_view taskPeerOutcomeName(TaskPeerOutcome outcome) {
-    return enumName(peerOutcomes, outcome);
 }
 
 Json taskRestartJson(const TaskRestart& restart) {
@@ -107,10 +98,6 @@ void decodeTaskContext(TaskData& task, const Json& data, const RecordDecoder& ro
         task.sourceResultRefs = taskResultReferences(*found, task.id);
     if (const auto found = row.find(data, "restartContext"); found != data.end())
         task.restartContext = row.nested("restartContext").decodeClosed(*found, decodeRestart);
-    if (const auto peer = row.optional<std::string>(data, "peerOutcome")) {
-        task.peerOutcome = enumValue(peerOutcomes, *peer);
-        if (!task.peerOutcome) row.fail("peerOutcome", "unknown peer outcome");
-    }
 }
 
 void encodeTaskContext(Json& data, const TaskData& task) {
@@ -119,6 +106,5 @@ void encodeTaskContext(Json& data, const TaskData& task) {
     if (task.requester) data["requester"] = *task.requester;
     if (!task.sourceResultRefs.empty()) data["sourceResultRefs"] = sourceResultsJson(task.sourceResultRefs);
     if (task.restartContext) data["restartContext"] = taskRestartJson(*task.restartContext);
-    if (task.peerOutcome) data["peerOutcome"] = taskPeerOutcomeName(*task.peerOutcome);
 }
 }

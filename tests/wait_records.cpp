@@ -54,11 +54,6 @@ void roundTrips() {
     roundTrip(ModelQuestionWait{{"Yes", "No"}, "Need approval", "t3-question"}, question,
               WaitRun{{"thread", "run", "https://t3.test/thread", "gateway"}, "environment", RunAssignment{"bot", "project", {}}});
 
-    roundTrip(ModelFailureWait{}, stored("model_failure"));
-    auto failure = stored("model_failure");
-    failure["failureCode"] = "unsupported_reasoning_effort";
-    roundTrip(ModelFailureWait{WaitFailureCode::unsupported_reasoning_effort}, failure);
-
     roundTrip(SimpleWaitReason::bot_notes_unavailable, stored("bot_notes_unavailable"));
     roundTrip(SimpleWaitReason::t3_input, stored("t3_input"));
     roundTrip(SimpleWaitReason::auth, stored("auth"));
@@ -93,9 +88,6 @@ void decodeErrors() {
     for (const auto* reason : {"unsupported", "budget", "model_budget", "conversation_model_budget", "deadline"})
         rejects(reason, payload, "reason", "unknown wait reason");
     rejects("settings", stored("settings"), "reason", "unknown key");
-    auto badCode = payload;
-    badCode["failureCode"] = "other";
-    rejects("model_failure", badCode, "failureCode", "unknown model failure code");
     auto nested = payload;
     nested["run"] = {{"threadId", "thread"}, {"runId", "run"}, {"link", 5}};
     rejects("settings", nested, "run.link", "expected a string");

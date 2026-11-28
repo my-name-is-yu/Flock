@@ -22,32 +22,6 @@
 
 namespace flockv0 {
 namespace {
-Json checkpointJson(const DecisionCheckpoint& checkpoint) {
-    const auto& decision = checkpoint.decision;
-    Json data{{"generation", checkpoint.generation},
-              {"eventId", checkpoint.eventId},
-              {"revisionId", checkpoint.revisionId ? Json(*checkpoint.revisionId) : Json(nullptr)},
-              {"tool", decision.tool},
-              {"args", decision.args},
-              {"usage", decision.usage},
-              {"attemptId", decision.attemptId}};
-    if (!decision.reason.empty()) data["reason"] = decision.reason;
-    if (!decision.rejection.empty()) data["rejection"] = decision.rejection;
-    if (decision.setup) data["setup"] = *decision.setup;
-    return data;
-}
-
-DecisionCheckpoint decodeCheckpoint(const Json& data, const RecordDecoder& row) {
-    return {row.get<Id>(data, "generation"),
-            row.get<Id>(data, "eventId"),
-            row.nullable<Id>(data, "revisionId"),
-            {{row.get<std::string>(data, "tool"), row.require(data, "args"), row.optional<std::string>(data, "reason").value_or("")},
-             row.require(data, "usage"),
-             row.get<Id>(data, "attemptId"),
-             row.optional<std::string>(data, "rejection").value_or(""),
-             row.optional<Json>(data, "setup")}};
-}
-
 QuestionOption decodeQuestionOption(const Json& data, const RecordDecoder& row) {
     return {row.get<std::string>(data, "label"), row.get<std::string>(data, "value"), row.get<std::string>(data, "description")};
 }
@@ -79,8 +53,6 @@ TaskQuestion decodeTaskQuestion(const Json& data, const RecordDecoder& row) {
                           row.optional<Id>(data, "suspendedWaitId")};
     for (const auto& field : row.array(row.require(data, "fields"), "fields"))
         question.fields.push_back(row.nested("fields." + std::to_string(question.fields.size())).decodeClosed(field, decodeQuestionField));
-    if (const auto found = row.find(data, "suspendedDecision"); found != data.end())
-        question.suspendedDecision = row.nested("suspendedDecision").decodeClosed(*found, decodeCheckpoint);
     if (question.target.requestId != row.get<std::string>(data, "requestId")) row.fail("requestId", "does not match the question target");
     return question;
 }
@@ -108,7 +80,6 @@ Json taskQuestionJson(const TaskQuestion& question) {
     auto data = questionPayload(question.target.requestId, question.fields);
     data["target"] = questionTargetJson(question.target);
     if (question.suspendedWaitId) data["suspendedWaitId"] = *question.suspendedWaitId;
-    if (question.suspendedDecision) data["suspendedDecision"] = checkpointJson(*question.suspendedDecision);
     return data;
 }
 }
@@ -116,8 +87,6 @@ Json taskQuestionJson(const TaskQuestion& question) {
 void decodeTaskInteraction(TaskData& task, const Json& data, const RecordDecoder& row) {
     const auto& question = row.require(data, "question");
     if (!question.is_null()) task.question = row.nested("question").decodeClosed(question, decodeTaskQuestion);
-    if (const auto found = row.find(data, "pendingDecision"); found != data.end())
-        task.pendingDecision = row.nested("pendingDecision").decodeClosed(*found, decodeCheckpoint);
     const auto waitId = row.optional<Id>(data, "blockerWaitId");
     if (auto reason = row.optional<std::string>(data, "blockerReason"))
         task.blocker = RecordedTaskBlocker{std::move(*reason), waitId};
@@ -127,7 +96,6 @@ void decodeTaskInteraction(TaskData& task, const Json& data, const RecordDecoder
 
 void encodeTaskInteraction(Json& data, const TaskData& task) {
     data["question"] = task.question ? taskQuestionJson(*task.question) : Json(nullptr);
-    if (task.pendingDecision) data["pendingDecision"] = checkpointJson(*task.pendingDecision);
     if (task.blocker) {
         data["blockerReason"] = task.blocker->reason;
         if (task.blocker->waitId) data["blockerWaitId"] = *task.blocker->waitId;
@@ -165,9 +133,4 @@ void redactQuestion(Question& question, const SecretRedactor& scrub) {
     }
 }
 
-void TaskRecords::saveDecisionCheckpoint(TaskData& task, DecisionCheckpoint checkpoint) {
-    task.pendingDecision = std::move(checkpoint);
-    database.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",
-                  {checkpointJson(*task.pendingDecision), task.id});
-}
 }

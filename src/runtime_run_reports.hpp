@@ -28,15 +28,11 @@ public:
         RunReportEntry data;
     };
 
-    RunReports(Database&, JournalStorage&, TaskEvents&, T3&, const Policy&, TaskUpdates&, SessionHistory&,
-               const std::function<Seconds()>& clock);
+    RunReports(Database&, JournalStorage&, TaskEvents&, T3&, const Policy&, TaskUpdates&, const std::function<Seconds()>& clock);
     static bool hasSettledRun(const TaskData&);
     void writeRunReport(TaskData&, const SettledRunReport&);
     void recoverRunReport(const TaskData&);
     std::optional<JournalReport> settledSessionReport(const TaskData&) const;
-    bool sessionReportUnavailable(const TaskData&) const;
-    std::optional<JournalReport> reportRetry(const TaskData&, const Json& event) const;
-    void retryRunReport(const TaskData&, const Json& event, const TaskDecision&);
 private:
     RunEvidence fetchRunEvidence(const TaskData&, const std::string& environment, RunRef source, std::string_view resultRunId,
                                  std::string_view status);
@@ -47,7 +43,6 @@ private:
     T3& t3;
     const Policy& policy;
     TaskUpdates& updates;
-    SessionHistory& history;
     const std::function<Seconds()>& clock;
 };
 }

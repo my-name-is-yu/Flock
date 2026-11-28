@@ -77,29 +77,26 @@ try {
   const nextPort = occupied.address().port;
   daemon = await start();
   const initial = await read();
-  assert.deepEqual(initial.saved,{ port: null, sessionRead: null, remoteAddress: null });
-  assert.deepEqual(initial.next,{ port: null, sessionRead: 'on_demand', remoteAddress: null });
-  assert.equal(initial.active.sessionRead,'on_demand');
-  assert.deepEqual(initial.pending,{ port: false, sessionRead: false, remoteAddress: false },'An automatic port must not look pending');
+  assert.deepEqual(initial.saved,{ port: null, remoteAddress: null });
+  assert.deepEqual(initial.next,{ port: null, remoteAddress: null });
+  assert.deepEqual(initial.pending,{ port: false, remoteAddress: false },'An automatic port must not look pending');
 
-  await change({ port: nextPort, sessionRead: 'invalid' },409);
+  await change({ port: nextPort, remoteAddress: 'localhost' },409);
   assert.deepEqual(await read(),initial,'Invalid settings must not be applied in part');
-  await change({ sessionRead: 'prefill' });
-  assert.deepEqual((await read()).pending,{ port: false, sessionRead: true, remoteAddress: false },'Only the changed setting may be pending');
   await change({ port: nextPort });
   assert.deepEqual(await read(),{
     active: initial.active,
-    saved: { port: nextPort, sessionRead: 'prefill', remoteAddress: null },
-    next: { port: nextPort, sessionRead: 'prefill', remoteAddress: null },
-    overrides: { port: false, sessionRead: false, remoteAddress: false },
-    pending: { port: true, sessionRead: true, remoteAddress: false },
+    saved: { port: nextPort, remoteAddress: null },
+    next: { port: nextPort, remoteAddress: null },
+    overrides: { port: false, remoteAddress: false },
+    pending: { port: true, remoteAddress: false },
   });
   assert.equal(statSync(systemSettingsFile).mode & 0o777,0o600);
 
   await stop();
   daemon = await start();
-  assert.deepEqual((await read()).active,{ port: initial.active.port, sessionRead: 'prefill', remoteAddress: null });
-  assert.deepEqual((await read()).pending,{ port: true, sessionRead: false, remoteAddress: false },'Busy port must stay pending while the earlier port serves requests');
+  assert.deepEqual((await read()).active,{ port: initial.active.port, remoteAddress: null });
+  assert.deepEqual((await read()).pending,{ port: true, remoteAddress: false },'Busy port must stay pending while the earlier port serves requests');
 
   await stop();
   const released = once(occupied,'close');
@@ -108,10 +105,10 @@ try {
   daemon = await start();
   const applied = await read();
   assert.deepEqual(applied.active,applied.saved);
-  assert.deepEqual(applied.pending,{ port: false, sessionRead: false, remoteAddress: false });
+  assert.deepEqual(applied.pending,{ port: false, remoteAddress: false });
   await change({ port: null });
   assert.deepEqual(await read(),{ ...applied, saved: { ...applied.saved, port: null }, next: { ...applied.next, port: null },
-    pending: { port: true, sessionRead: false, remoteAddress: false } },'Returning to an automatic port must stay pending until restart');
+    pending: { port: true, remoteAddress: false } },'Returning to an automatic port must stay pending until restart');
   await change({ port: applied.saved.port });
   assert.deepEqual(await read(),applied);
   for (const address of ['127.0.0.1','127.1','0x7f.1','localhost','::1','0:0:0:0:0:0:0:1','0.0.0.0','0','::','0:0:0:0:0:0:0:0','::ffff:127.0.0.1','mini tailnet','']) await change({ remoteAddress: address },409);
@@ -127,15 +124,13 @@ try {
   await stop();
   const savedSettings = JSON.parse(readFileSync(systemSettingsFile,'utf8'));
   writeFileSync(systemSettingsFile,JSON.stringify({ ...savedSettings, remoteAddress: null }));
-  daemon = await start('--port','0','--session-read','on_demand');
+  daemon = await start('--port','0');
   const overridden = await read();
-  assert.deepEqual(overridden.overrides,{ port: true, sessionRead: true, remoteAddress: false });
-  assert.equal(overridden.active.sessionRead,'on_demand');
+  assert.deepEqual(overridden.overrides,{ port: true, remoteAddress: false });
   assert.deepEqual(overridden.saved,applied.saved);
-  assert.deepEqual(overridden.next,{ port: null, sessionRead: 'on_demand', remoteAddress: null });
-  assert.deepEqual(overridden.pending,{ port: false, sessionRead: false, remoteAddress: false },'Launch settings must not look pending');
+  assert.deepEqual(overridden.next,{ port: null, remoteAddress: null });
+  assert.deepEqual(overridden.pending,{ port: false, remoteAddress: false },'Launch settings must not look pending');
   await change({ port: null },409);
-  await change({ sessionRead: 'off' },409);
   assert.deepEqual(await read(),overridden);
 } finally {
   await stop();

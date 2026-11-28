@@ -5,10 +5,8 @@
 #include "runtime_lifecycle.hpp"
 #include "runtime_maintenance.hpp"
 #include "runtime_outbox_dispatch.hpp"
-#include "runtime_peer_exchanges.hpp"
 #include "runtime_run_observer.hpp"
 #include "runtime_run_reports.hpp"
-#include "runtime_session_history.hpp"
 #include "runtime_session_prompts.hpp"
 #include "runtime_task_decisions.hpp"
 #include "runtime_task_questions.hpp"
@@ -56,9 +54,7 @@ struct Runtime::Impl {
     runtime::SessionPrompts prompts;
     runtime::TaskUpdates updates;
     runtime::TaskQuestions questions;
-    runtime::SessionHistory history;
     runtime::RunReports reports;
-    runtime::PeerExchanges peerExchanges;
     runtime::Workers workers;
     runtime::RunObserver runs;
     runtime::OutboxDispatch dispatch;
@@ -85,34 +81,27 @@ struct Runtime::Impl {
                                                                      options.clock, options.automationError, options.storageContention),
           prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, soul),
           updates(storage.database, storage.journalStorage, storage.taskEvents, storage.taskRecords),
-          questions(storage.database, storage.waitStorage), history(storage.database, t3, policy, updates, options.sessionRead),
-          reports(storage.database, storage.journalStorage, storage.taskEvents, t3, policy, updates, history, options.clock),
-          peerExchanges(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.peerStorage,
-                        storage.taskEvents, storage.taskOperations, storage.taskRecords, storage.taskRouting, storage.waitStorage, policy,
-                        updates, reports, history, options.peers),
+          questions(storage.database, storage.waitStorage),
+          reports(storage.database, storage.journalStorage, storage.taskEvents, t3, policy, updates, options.clock),
           workers(storage.conversationTurns, storage.sessionMessageStorage, storage.sessionParticipationStorage, channelStorage, t3,
                   maintenance),
-          runs(storage.database, storage.journalStorage, storage.peerStorage, storage.secretStorage, storage.taskEvents,
-               storage.taskRecords, storage.waitStorage, storage.outboxStorage, t3, updates, questions, reports, peerExchanges,
-               options.clock, workers.stopToken()),
+          runs(storage.database, storage.journalStorage, storage.secretStorage, storage.taskEvents, storage.taskRecords,
+               storage.waitStorage, storage.outboxStorage, t3, updates, questions, reports, options.clock, workers.stopToken()),
           dispatch(storage.database, storage.botLifecycle, storage.conversationTurns, storage.journalStorage, storage.path,
                    storage.policyApprovals, storage.sessionParticipationStorage, storage.sessionReadStorage, storage.taskEvents,
                    storage.taskRecords, storage.taskRouting, storage.taskRunReports, storage.waitStorage, storage.outboxStorage, t3, policy,
                    updates, questions, reports, runs, prompts, options.clock, options.requireT3Connection, options.intake,
                    workers.stopToken()),
-          decisions(storage.database, storage.conversationTurns, storage.gitStorage, storage.journalStorage, storage.memoryStorage,
-                    storage.peerStorage, storage.secretStorage, storage.taskEvents, storage.taskRecords, storage.taskRouting,
-                    storage.waitStorage, updates, reports, history, peerExchanges, dispatch, options.sessionRead, options.gitHost.get(),
-                    options.clock),
-          taskTurn(storage.database, storage.gitStorage, storage.modelCalls, storage.peerStorage, storage.secretStorage, storage.taskEvents,
-                   storage.taskRecords, storage.taskRouting, storage.waitStorage, storage.memoryStorage, model, soul, options.clock,
-                   options.gitHost.get(), options.sessionRead, workers.stopToken(), updates, reports, history, peerExchanges, runs, prompts,
-                   decisions, storage.botSetup, options.intake, t3, options.requireT3Connection),
+          decisions(storage.database, storage.conversationTurns, storage.taskEvents, storage.taskRecords, storage.waitStorage, updates,
+                    dispatch),
+          taskTurn(storage.database, storage.taskEvents, storage.taskRouting, storage.waitStorage, updates, runs, decisions,
+                   storage.botSetup, storage.memoryStorage, soul, options.intake, t3, options.clock, workers.stopToken(),
+                   options.requireT3Connection),
           taskScheduler(storage.database, storage.taskEvents, storage.taskRouting, t3, updates, options.requireT3Connection, options.clock,
                         workers.stopToken()),
           lock(storage.database, storage.path, storage.policyApprovals, options.clock) {}
 
-    ~Impl() { workers.drain(taskTurn); }
+    ~Impl() { workers.drain(); }
 
     void step(const runtime::TaskScheduler::Work& work) {
         if (workers.stopToken().stop_requested()) return;
@@ -132,12 +121,10 @@ struct Runtime::Impl {
         else if (state == TaskState::queued)
             taskScheduler.activate(std::move(task));
         else if (state == TaskState::deciding) {
-            if (!task.pendingDecision && dispatch.step(task, nullptr)) task = updates.snapshot(id);
+            if (dispatch.step(task, nullptr)) task = updates.snapshot(id);
             if (task.state != TaskState::deciding) return;
-            if (!decisions.resumeGitApproval(task)) {
-                const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
-                if (!decisions.continueFreshSession(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
-            }
+            const auto defaults = task.freshContextRequested && task.newSessionRequired ? taskTurn.launchDefaults(task) : std::nullopt;
+            if (!decisions.continueFreshSession(task, defaults ? &*defaults : nullptr)) taskTurn.decide(task);
         } else {
             if (task.activeRun && (state == TaskState::running || state == TaskState::waiting || state == TaskState::sending) &&
                 runs.ingest(task, runs.observe(task)))
@@ -147,7 +134,7 @@ struct Runtime::Impl {
                 std::lock_guard guard(database.mutex);
                 wait = waitStorage.currentWait(id);
             }
-            if (wait && taskTurn.resume(task, *wait)) return;
+            if (wait && taskTurn.resumeNotes(task, *wait)) return;
             if (wait && wait->reason() == WaitReason::settings && task.projectId.empty()) {
                 taskScheduler.activate(std::move(task));
                 return;
@@ -182,7 +169,6 @@ void Runtime::runConversations() {
 void Runtime::tick() {
     if (p_->workers.stopToken().stop_requested()) return;
     p_->maintenance.settleApprovals();
-    p_->taskTurn.persistTaskInferences();
     p_->maintenance.fireDueAutomations();
     p_->wakeExternalEvents();
     p_->workers.wakeSessions();
@@ -202,9 +188,7 @@ void Runtime::tickConcurrent() {
     p_->workers.startChannels();
     p_->workers.stepSessionWake();
     p_->workers.startConversations(p_->options.clock, [impl = p_.get()](Id id) { impl->runTurn(id); });
-    p_->maintenance.deferContendedWork("task scheduling", [&] {
-        p_->taskTurn.persistTaskInferences();
-        p_->workers.startTasks(p_->taskScheduler, [impl = p_.get()](const auto& work) { impl->step(work); });
-    });
+    p_->maintenance.deferContendedWork(
+        "task scheduling", [&] { p_->workers.startTasks(p_->taskScheduler, [impl = p_.get()](const auto& work) { impl->step(work); }); });
 }
 } // namespace flockv0

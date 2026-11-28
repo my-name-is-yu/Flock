@@ -2,7 +2,7 @@ import sys
 from xml.etree import ElementTree
 
 
-EXPECTED_TESTS = {"flock_live_t3", "flock_live_conversation", "flock_live_evidence"}
+EXPECTED_TESTS = {"flock_live_t3", "flock_live_conversation"}
 
 
 def check_junit(report, ctest_status):

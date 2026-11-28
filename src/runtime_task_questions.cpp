@@ -25,14 +25,11 @@ void runtime::TaskQuestions::suspendQuestion(TaskData& task) {
     auto& question = *task.question;
     if (const auto wait = waits.currentWait(task.id)) {
         const auto reason = wait->reason();
-        if (reason == WaitReason::user_question || reason == WaitReason::model_failure || reason == WaitReason::bot_notes_unavailable)
-            question.suspendedWaitId = wait->id;
+        if (reason == WaitReason::user_question || reason == WaitReason::bot_notes_unavailable) question.suspendedWaitId = wait->id;
     }
-    const auto& pending = task.pendingDecision;
-    if (pending && TaskUpdates::checkpointMatches(*pending, task)) question.suspendedDecision = *pending;
 }
 
-std::optional<DecisionCheckpoint> runtime::TaskQuestions::resumeQuestion(TaskData& task) {
+void runtime::TaskQuestions::resumeQuestion(TaskData& task) {
     auto& question = *task.question;
     const auto& target = question.target;
     const auto waitId = std::exchange(question.suspendedWaitId, std::nullopt);
@@ -53,9 +50,6 @@ std::optional<DecisionCheckpoint> runtime::TaskQuestions::resumeQuestion(TaskDat
             }
         }
     }
-    auto decision = std::exchange(question.suspendedDecision, std::nullopt);
     question.target = questionTarget(task, restoredQuestion);
-    if (decision && (decision->revisionId != task.currentRevision || decision->eventId != task.eventId)) return std::nullopt;
-    return decision;
 }
 }

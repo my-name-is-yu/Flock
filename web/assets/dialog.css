@@ -271,7 +271,6 @@ a.settings-row svg { margin-left: auto; }
 .bot-pause-dialog { width: min(26rem, calc(100% - 2rem)); }
 .bot-pause-actions { display: flex; justify-content: flex-end; gap: .5rem; }
 
-
 .settings-row.danger { color: var(--danger); }
 button.settings-row.danger:hover { background: var(--danger-soft); }
 .bot-delete-dialog { width: min(26rem, calc(100% - 2rem)); }
@@ -312,25 +311,11 @@ button.settings-row.danger:hover { background: var(--danger-soft); }
   .detail:not([open]) { transform: none; }
   .wait-stop-confirm { animation: none; }
   @starting-style { .detail[open] { transform: none; } }
-  .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active,
-  .settings-name-button:active, .peer-choice:active { transform: none; }
-  .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
+  .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active, .settings-name-button:active { transform: none; }
+  .settings-name-input, .settings-status { animation: none; }
   .settings-row svg { transition: none; transform: none; }
   .detail-tab { transition: none; }
   .dialog-body.section-switching > * { animation: none; }
 }
-.peer-picker-list { display: grid; gap: .15rem; padding: 0; margin: 0; list-style: none; }
-.peer-choice {
-  display: flex; align-items: center; gap: .65rem; min-height: 2.9rem; padding: .3rem .55rem;
-  border-radius: var(--radius-md); color: var(--text); text-decoration: none; font-size: var(--text-md);
-  transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
-  animation: settings-note-in .18s cubic-bezier(0.23, 1, 0.32, 1) backwards;
-}
-.peer-picker-list li:nth-child(2) .peer-choice { animation-delay: 25ms; }
-.peer-picker-list li:nth-child(3) .peer-choice { animation-delay: 50ms; }
-.peer-picker-list li:nth-child(4) .peer-choice { animation-delay: 75ms; }
-.peer-choice:hover { background: var(--hover); }
-.peer-choice:active { transform: scale(.985); }
-.peer-choice-avatar { width: 2.1rem; height: 2.1rem; }
-.peer-choice-name { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
+
 .settings-workspace .settings-workspace-facts dd.place-name { font-family: var(--font-sans); }

@@ -1010,8 +1010,6 @@ void stopSelectedTaskAndConsultation() {
         }
     } t3;
     struct TaskModel : Model {
-        Id consultant = 0;
-        int consultantCalls = 0;
         ModelTurn decide(const ModelInput& input) override {
             const auto& event = input.event;
             if (event.at("kind") == "conversation_turn") {
@@ -1025,14 +1023,6 @@ void stopSelectedTaskAndConsultation() {
                               "Queue work"}}};
                 if (steps.empty()) return {{{"start_task", {{"request", request}}, "Start work"}}};
                 return {{{"reply", {{"text", "Started."}}, "Finish the conversation turn"}}};
-            }
-            if (input.task.at("request") == "Consult a peer.")
-                return {{{"send_bot_message", {{"botId", "triage"}, {"kind", "consult"}, {"text", "Offer advice."}}, "Consult Triage"}}};
-            if (input.task.at("request") == "Offer advice.") {
-                consultant = input.task.at("id");
-                ++consultantCalls;
-                check(std::ranges::find(input.tools, "delegate") == input.tools.end(), "A consultation acquired delegation");
-                return {{{"reply_to_bot", {{"kind", "question"}, {"text", "Which environment?"}}, "Ask the sending Bot"}}};
             }
             return {{{"delegate", {{"instruction", "Check staging."}, {"doneWhen", "Staging is checked."}}, "Run the task"}}};
         }
@@ -1058,94 +1048,16 @@ void stopSelectedTaskAndConsultation() {
         return TaskList(store).tasks("release").front().task.id;
     };
     const auto selected = start("queued-task", "Work in the selected Session.");
-    const auto sender = start("consult", "Consult a peer.");
     tick(runtime, 4);
     check(Tasks(store).task(selected).task.activeRun.value().ref.runId == "queued-task" &&
-              Tasks(store).task(blocker).task.state == TaskState::running && model.consultant &&
-              Tasks(store).task(model.consultant).task.state == TaskState::peer_waiting,
-          "The task did not queue, or the consultation did not wait behind the occupied slot");
+              Tasks(store).task(blocker).task.state == TaskState::running,
+          "The task did not queue in the selected Session");
     const auto stopped = mcp.call("flock_stop", {{"bot", "release"}, {"threadId", "thread"}}).at("structuredContent");
     tick(runtime, 4);
-    check(stopped.at("cancelled") == 1 && stopped.at("stoppedChildSessions") == 1 &&
+    check(stopped.at("cancelled") == 1 && stopped.at("stoppedChildSessions") == 0 &&
               t3.cancellations == std::vector<std::string>{"queued-task"} && t3.interrupts.empty() &&
-              Tasks(store).task(selected).task.state == TaskState::cancelled &&
-              Tasks(store).task(sender).task.state == TaskState::cancelled &&
-              Tasks(store).task(model.consultant).task.state == TaskState::cancelled && model.consultantCalls == 1 &&
-              Tasks(store).task(blocker).task.state == TaskState::running,
-          "Stop left queued work or consultation runnable, or touched an unrelated Run");
-}
-
-void inviteIntoPeerLaunch() {
-    struct PeerT3 : FixedT3 {
-        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
-            if (target.environmentId != "env-1" || (target.threadId != "thread" && target.threadId != "thread-bot-project")) return {};
-            return SessionMetadata{.title = "Peer Session", .projectId = "project"};
-        }
-    } t3;
-    struct PeerModel : Model {
-        Json invite;
-        int invitations = 0;
-        ModelTurn decide(const ModelInput& input) override {
-            const auto& event = input.event;
-            if (event.at("kind") == "bot_request")
-                return {{{"delegate", {{"instruction", "Check staging."}, {"doneWhen", "Staging is checked."}}, "Launch peer work"}}};
-            if (event.at("kind") != "conversation_turn")
-                return {{{"send_bot_message",
-                          {{"botId", "triage"}, {"kind", "work"}, {"text", "Check staging."}, {"doneWhen", "Staging is checked."}},
-                          "Ask Triage"}}};
-            const auto& steps = event.at("turn");
-            if (event.contains("sessionInvitation"))
-                ++invitations;
-            else if (event.at("text") == "Start peer work." && steps.empty())
-                return {{{"start_task", {{"request", "Start peer work."}}, "Start the parent task"}}};
-            else if (event.at("text") == "Invite the verifier.") {
-                if (steps.empty())
-                    return {{{"invite_bot",
-                              {{"botId", "settings"},
-                               {"environmentId", "env-1"},
-                               {"threadId", "thread-bot-project"},
-                               {"note", "Verify the staging checks."}},
-                              "Invite the verifier"}}};
-                invite = steps.back().at("result");
-            }
-            return {{{"reply", {{"text", "Done."}}, "Finish the turn"}}};
-        }
-    } model;
-    TestDirectory dir;
-    Store store(dir.path / "flock.sqlite3");
-    T3Connections connector(store);
-    const auto token = connector.connect("env-1", localOwner.id, 4173);
-    auto cb = callbacks();
-    cb.sessionT3 = &t3;
-    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot), std::string(request), "env-1", "origin-project", Json::object()};
-    };
-    const auto server = startWeb(store, 0, cb);
-    Runtime runtime(
-        store, model, t3, [](std::string_view) { return std::string{}; },
-        {.peers = [](std::string_view bot) { return bot == "release" ? std::vector{peer("triage")} : std::vector{peer("settings")}; },
-         .intake = cb.intake});
-    Mcp(*server, token)
-        .call("flock_ask", {{"bot", "release"}, {"threadId", "thread"}, {"requestId", "peer-launch"}, {"text", "Start peer work."}})
-        .at("structuredContent");
-    tick(runtime, 5);
-    check(t3.launches["bot-project"] == 1, "Triage did not launch its peer work");
-    const Person other{"other-admin", true};
-    WebIdentity(store).setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
-        if (id == localOwner.id || id == other.id) return true;
-        return {};
-    });
-    const auto invite = [&](const Person& actor, const char* id) {
-        connector.connect("env-1", actor.id, 4173);
-        WebConversationIntake(store).receiveWeb(actor, cb.intake("triage", ""), id, "Invite the verifier.");
-        runtime.runConversations();
-    };
-    invite(other, "foreign-peer-launch");
-    check(model.invite.value("error", "") == "Invite a Bot into a Session you participate in or launched" && model.invitations == 0,
-          "A different requester inherited the peer's Session");
-    invite(localOwner, "my-peer-launch");
-    check(model.invite.value("ok", false) && model.invitations == 1,
-          "The requester could not invite a Bot into the peer's launched Session");
+              Tasks(store).task(selected).task.state == TaskState::cancelled && Tasks(store).task(blocker).task.state == TaskState::running,
+          "Stop left queued work runnable, or touched an unrelated Run");
 }
 
 void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
@@ -1456,23 +1368,10 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
         return Browser::checked(fixture.Get("/fixture/effects"), 200).value("t3_thread_interrupt", Json::array());
     };
     struct ChildModel : Model {
-        Id task = 0, peer = 0;
+        Id task = 0;
         ModelTurn decide(const ModelInput& input) override {
-            if (input.event.at("kind") != "conversation_turn") {
-                if (input.task.at("request") == "Ask a peer first.")
-                    return {{{"send_bot_message",
-                              {{"botId", "triage"}, {"kind", "work"}, {"text", "Check a detail."}, {"doneWhen", "The detail is checked."}},
-                              "Ask the peer Bot"}}};
-                if (input.task.at("request") == "Check a detail.") {
-                    peer = input.task.at("id");
-                    if (input.event.at("kind") == "bot_request")
-                        return {{{"reply_to_bot", {{"kind", "question"}, {"text", "Which detail?"}}, "Get the detail"}}};
-                    return {{{"ask_user", {{"question", "Which detail?"}}, "Identify the detail to check"}}};
-                }
-                return {{{"delegate",
-                          {{"instruction", "Run the child trial."}, {"doneWhen", "Child trial has finished."}},
-                          "Launch the child Session"}}};
-            }
+            check(input.event.at("kind") == "conversation_turn", "a conversation task asked the task model");
+            if (input.event.contains("sessionWake")) return {{{"reply", {{"text", "Noted."}}, "Acknowledge the wake"}}};
             if (input.event.at("text") == "Confirm reactivation")
                 return {{{"reply", {{"text", "Back in the Session."}}, "Confirm reactivation"}}};
             const auto& steps = input.event.at("turn");
@@ -1488,13 +1387,9 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     auto cb = callbacks();
     cb.sessionT3 = t3.get();
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot), std::string(request), "env-1", request == "Ask a peer first." ? "peer-project" : "project",
-                Json::object()};
+        return {std::string(bot), std::string(request), "env-1", "project", Json::object()};
     };
-    const RuntimeOptions options{.peers = [](std::string_view bot) -> std::vector<PeerBot> {
-        if (bot == "release") return {{"Triage", {"triage", "", "env-1", "peer-project", Json::object()}}};
-        return {};
-    }};
+    const RuntimeOptions options{};
     PolicyRules{*db}.setMode(localOwner, "full");
     const auto token = T3Connections(*db).connect("env-1", localOwner.id, 4173);
     auto server = startWeb(*db, 0, cb);
@@ -1513,10 +1408,9 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     const auto launching = Tasks(*db).task(child);
     check(launching.task.state == TaskState::running && launching.task.activeRun.value().ref.threadId == "lineage-child-1",
           "Child launch did not assign a Run in its own Session: " + taskJson(launching).at("wait").dump());
-    const auto beforeLaunch = start("release", "lineage-parent", "peer-before-child", "Ask a peer first.");
+    const auto beforeLaunch = start("release", "lineage-parent", "queued-child", "Start another child Session.");
     tick(*runtime, 4);
-    check(model.peer && Tasks(*db).task(model.peer).task.state == TaskState::peer_waiting,
-          "The peer needed by the other child task did not reach its question");
+    check(Tasks(*db).task(beforeLaunch).task.state == TaskState::queued, "The second child task did not wait for the project slot");
     const auto otherOrigin = start("release", "lineage-unrelated", "unrelated-origin");
     const auto otherBot = start("triage", "lineage-parent", "unrelated-bot");
     const Json stop{{"bot", "release"}, {"threadId", "lineage-parent"}};
@@ -1537,7 +1431,6 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
     runtime = std::make_unique<Runtime>(*db, model, *t3, soul, options);
     tick(*runtime, 3);
     check(Tasks(*db).task(child).task.state == TaskState::cancelled && Tasks(*db).task(beforeLaunch).task.state == TaskState::cancelled &&
-              Tasks(*db).task(model.peer).task.state == TaskState::waiting &&
               Tasks(*db).task(otherOrigin).task.state != TaskState::cancelled &&
               Tasks(*db).task(otherOrigin).task.state != TaskState::cancelling &&
               Tasks(*db).task(otherBot).task.state == TaskState::queued &&
@@ -1588,7 +1481,6 @@ int main(int argc, char** argv) {
         scenario = "stop selected tasks and consultations";
         stopSelectedTaskAndConsultation();
         scenario = "invite into a peer launch";
-        inviteIntoPeerLaunch();
         scenario = "stop child Sessions";
         stopChildSessions(argv[1], argv[2]);
         return 0;

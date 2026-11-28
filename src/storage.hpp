@@ -17,7 +17,6 @@
 #include "memory_storage.hpp"
 #include "model_calls.hpp"
 #include "outbox_storage.hpp"
-#include "peer_storage.hpp"
 #include "policy_approvals.hpp"
 #include "secret_storage.hpp"
 #include "session_message_storage.hpp"
@@ -61,7 +60,6 @@ struct Store::Impl {
                                           localMachineStorage,
                                           memoryStorage,
                                           modelCalls,
-                                          peerStorage,
                                           policyApprovals,
                                           secretStorage,
                                           sessionMessageStorage,
@@ -90,15 +88,14 @@ struct Store::Impl {
                                                 taskRecords,
                                                 taskRunReports};
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
-    TaskOperations taskOperations{database,      botLifecycle, permissions, journalStorage, outboxStorage, peerStorage,
-                                  secretStorage, taskEvents,   taskRecords, taskRouting,    waitStorage,   inboxStorage};
-    TaskRouting taskRouting{database, permissions, peerStorage, waitStorage, sessionReadStorage, sessionParticipationStorage};
+    TaskOperations taskOperations{database,   botLifecycle, permissions, journalStorage, outboxStorage, secretStorage,
+                                  taskEvents, taskRecords,  taskRouting, waitStorage,    inboxStorage};
+    TaskRouting taskRouting{database, permissions, waitStorage, sessionReadStorage, sessionParticipationStorage};
     TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage};
     OutboxStorage outboxStorage{database};
-    PeerStorage peerStorage{database};
     JournalStorage journalStorage{database, channelStorage};
     TaskEvents taskEvents{database};
-    WaitStorage waitStorage{database, journalStorage, peerStorage};
+    WaitStorage waitStorage{database, journalStorage};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
     SecretStorage secretStorage{database, path.parent_path()};
     MemoryStorage memoryStorage;

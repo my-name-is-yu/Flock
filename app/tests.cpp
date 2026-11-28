@@ -73,7 +73,6 @@ void sessionConversationDispatch(Store&, const Json&);
 namespace {
 class NotesModel final : public Model {
 public:
-    std::vector<ModelInput> inputs;
     std::optional<Id> editTask;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
@@ -91,15 +90,7 @@ public:
             }
             throw std::runtime_error("The automation was missing from the conversation");
         }
-        inputs.push_back(input);
-        if (input.event["kind"] == "result")
-            return {"complete", {{"report", "Original evidence confirmed"}}, "The report meets the original acceptance criterion."};
-        if (input.history.empty() && input.task["botId"] == "first")
-            return {"ask_user", {{"question", "Which branch?"}}, "Only the user can select the branch."};
-        Json args{{"instruction", "Verify the agreed scope"}};
-        if (input.task.at("revisionId").is_null())
-            args["doneWhen"] = input.task["botId"] == "first" ? "Evidence required before edit" : "Second Bot criterion";
-        return {"delegate", std::move(args), "Run verification in T3."};
+        throw std::runtime_error("a task without a conversation called the model");
     }
 };
 
@@ -125,65 +116,6 @@ public:
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
-void scheduledTaskResumesAfterModelSetupChanges() {
-    Sandbox temp;
-    const auto folder = temp.path / "bots";
-    auto config = botConfig("old-model");
-    config["reasoningEffort"] = "high";
-    createBot(folder / "release", config, "", "");
-    Bots bots(folder);
-    const auto now = utc(2026, 1, 1, 12, 0);
-    Store store(temp.path / "state.db",
-                {.automationModel = [&](std::string_view id) { return bots.plannerModel(id); },
-                 .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
-                                     const Json& catalog) { bots.saveSetup(&target, id, edit, now, [](auto, auto) {}, catalog); }});
-    const auto saved = bots.get("release").intake("");
-    Automations(store).createAutomation(
-        localOwner, saved, {{"kind", "reminder"}, {"timezone", "Etc/UTC"}, {"fireAt", now + 1}, {"request", "Check the release"}}, now);
-    Automations(store).fireDueAutomations(now + 1);
-    const Id id = TaskList(store).tasks("release").at(0).task.id;
-    bots.updateRunSettings(
-        store, "release", {{"model", "rejected-model"}, {"reasoningEffort", "high"}}, now + 1, [](auto, auto) {},
-        Json::array({{{"slug", "rejected-model"}, {"reasoningEfforts", Json::array({"high"})}}}));
-    struct RejectEffort final : Model {
-        std::vector<Json> requests;
-        ModelTurn decide(const ModelInput& input) override {
-            requests.push_back(input.config);
-            if (input.config.contains("reasoningEffort"))
-                throw ModelError("Unsupported reasoning effort", ModelErrorCode::unsupported_reasoning_effort);
-            return {{{"ask_user", {{"question", "Which release?"}}, "Choose the release"}}};
-        }
-    } model;
-    NotesT3 t3;
-    Runtime runtime(store, model, t3, [&](auto bot) { return bots.soul(bot); });
-    for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
-    const auto rejected = Tasks(store).task(id);
-    const auto* failure = std::get_if<ModelFailureWait>(&rejected.wait.value().details);
-    check(model.requests.size() == 1 && model.requests.front().at("model") == "rejected-model" && failure &&
-              failure->code == WaitFailureCode::unsupported_reasoning_effort,
-          "The task did not preserve the failure from the model it actually called");
-    for (int tick = 0; tick < 8; ++tick) runtime.tick();
-    const auto conversation = Conversations(store).conversation("release", 0, 20, Conversations::ConversationEvents::incoming);
-    check(model.requests.size() == 1 &&
-              std::ranges::count_if(conversation,
-                                    [](const Json& event) {
-                                        return event.at("kind") == "waiting" &&
-                                               event.at("data").at("text").get<std::string>().find("Model default") != std::string::npos;
-                                    }) == 1,
-          "The rejected effort did not remain visible once while the settings were unchanged");
-    bots.updateRunSettings(store, "release",
-                           {{"model", "new-model"}, {"reasoningEffort", ""}, {"environmentId", "new-env"}, {"projectId", "new-project"}},
-                           now + 1, [](auto, auto) {});
-    runtime.tick();
-    for (int tick = 0; tick < 8 && Tasks(store).task(id).task.state != TaskState::waiting; ++tick) runtime.tick();
-    const auto retried = Tasks(store).task(id);
-    check(model.requests.size() == 2 && model.requests.back().at("model") == "new-model" &&
-              !model.requests.back().contains("reasoningEffort") && retried.wait && retried.wait->reason() == WaitReason::user_question &&
-              retried.task.environmentId == saved.environmentId && retried.task.projectId == saved.projectId &&
-              retried.task.config.at("session") == saved.config.at("session"),
-          "Retry did not preserve the original task route and Session settings while correcting its model");
-}
-
 enum class NotesRecovery { Restore, Edit };
 enum class NotesFailurePoint { Planning, Dispatch };
 
@@ -193,8 +125,7 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
     createBot(folder / "release", botConfig(), "Release role", "");
     createBot(folder / "triage", botConfig(), "Triage role", "");
     const Bots bots(folder);
-    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); },
-                                         .automationModel = [&](std::string_view bot) { return bots.plannerModel(bot); }});
+    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); }});
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
     for (const auto* bot : {"release", "triage"})
@@ -227,7 +158,8 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
           "unreadable automation notes prevented a healthy Bot from running in the same project");
     const auto paused = Tasks(store).task(release);
     check(paused.task.state == TaskState::waiting && paused.wait && paused.wait->reason() == WaitReason::bot_notes_unavailable &&
-              paused.task.actionId == savedAction && paused.task.projectId == Tasks(store).task(triage).task.projectId,
+              !paused.task.actionId.empty() && (savedAction.empty() || paused.task.actionId == savedAction) &&
+              paused.task.projectId == Tasks(store).task(triage).task.projectId,
           "the unreadable Bot's request lost its workspace or recovery action");
 
     std::filesystem::remove(folder / "release");
@@ -250,7 +182,8 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
               t3.commands.back().instruction.find("Release role") != std::string::npos,
           "the repaired Bot did not resume with its restored role");
     if (recovery == NotesRecovery::Edit)
-        check(model.inputs.back().task.at("request") == "Check staging instead" && t3.commands.back().actionId != savedAction,
+        check(t3.commands.back().instruction.find("Check staging instead") != std::string::npos &&
+                  t3.commands.back().actionId != savedAction,
               "the resumed automation lost the edit");
     else if (!savedAction.empty())
         check(t3.commands.back().actionId == savedAction, "the resumed automation did not use the original action");
@@ -267,41 +200,24 @@ void notesAndRoutingOnRestart() {
     const auto seed = [&](std::string_view bot) { return bots.initialMemory(bot); };
     NotesModel model;
     NotesT3 t3;
-    Id firstId, secondId, waitId;
+    Id firstId, secondId;
     {
         Store store(db, {.memorySeed = seed});
         Runtime runtime(store, model, t3, soul);
         firstId = TaskIntake(store).submit(bots.get("first").intake("Request for first Bot"));
-        runtime.tick();
-        runtime.tick();
-        check(Tasks(store).task(firstId).task.state == TaskState::waiting, "fixture did not reach user question");
-        waitId = Tasks(store).task(firstId).wait.value().id;
         secondId = TaskIntake(store).submit(bots.get("second").intake("Request for second Bot"));
-        runtime.tick();
-        check(Tasks(store).task(secondId).blockedBy.value().id == firstId && t3.commands.empty(),
+        for (int i = 0; i < 4; ++i) runtime.tick();
+        check(Tasks(store).task(firstId).task.state == TaskState::running && Tasks(store).task(secondId).blockedBy.value().id == firstId &&
+                  t3.commands.size() == 1,
               "same-project tasks must queue across Bots");
-    }
-    {
-        Store store(db, {.memorySeed = seed});
-        Runtime runtime(store, model, t3, soul);
-        TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer", {{"text", "main"}});
-        rejects<Conflict>(
-            [&] {
-                TaskControl(store).operate(localOwner, TaskTarget::from(Tasks(store).task(firstId).task, waitId), "answer",
-                                           {{"text", "old answer"}});
-            },
-            "duplicate answer accepted");
-        runtime.tick();
-        runtime.tick();
-        check(Tasks(store).task(firstId).task.state == TaskState::running &&
-                  Tasks(store).task(firstId).task.doneWhen == "Evidence required before edit",
-              "answer must reach the old task and initialize saved doneWhen");
-        check(t3.commands.size() == 1 && t3.commands[0].environmentId == "env-canonical" && t3.commands[0].projectId == "project-canonical",
-              "intake must preserve canonical IDs");
-        check(t3.commands[0].config["session"]["model"] == "child-model" &&
-                  t3.commands[0].config["session"]["providerInstanceId"] == "child-provider" &&
-                  t3.commands[0].config["session"]["runtimeMode"] == "auto" &&
-                  t3.commands[0].config["session"]["workspaceStrategy"]["baseRef"] == "origin/main",
+        const auto& launched = t3.commands[0];
+        check(launched.environmentId == "env-canonical" && launched.projectId == "project-canonical" &&
+                  launched.instruction.find("First version") != std::string::npos,
+              "intake must preserve canonical IDs and the Bot's role");
+        check(launched.config["session"]["model"] == "child-model" &&
+                  launched.config["session"]["providerInstanceId"] == "child-provider" &&
+                  launched.config["session"]["runtimeMode"] == "auto" &&
+                  launched.config["session"]["workspaceStrategy"]["baseRef"] == "origin/main",
               "child settings must survive intake");
     }
 
@@ -309,23 +225,14 @@ void notesAndRoutingOnRestart() {
     t3.finished = true;
     {
         Store store(db, {.memorySeed = seed});
-        Memory(store).memory({"fixture", true}, "first", "write_memory",
-                             {{"baseVersion", 0}, {"summary", "Update memory"}, {"content", "First updated memory"}});
         Runtime runtime(store, model, t3, soul);
-        for (int i = 0; i < 4; ++i) runtime.tick();
-        check(Tasks(store).task(firstId).task.state == TaskState::completed, "first Bot did not complete with its original criterion");
-        check(Tasks(store).task(secondId).task.state == TaskState::sending, "next task did not begin when the first task closed");
-        check(model.inputs.size() == 4, "unexpected model calls");
-        const auto& afterRestart = model.inputs[2];
-        check(afterRestart.task["id"] == firstId && afterRestart.task["doneWhen"] == "Evidence required before edit",
-              "stored criterion must survive restart and a SOUL edit");
-        check(afterRestart.notes.soul == "New SOUL would now ask for something different" &&
-                  afterRestart.notes.memory == "First updated memory",
-              "existing task must read current notes");
-        check(afterRestart.config["model"] == "fixture-model", "model setting must be snapshotted at intake");
-        const auto& second = model.inputs[3];
-        check(second.task["id"] == secondId && second.notes.memory == "Second-only memory" && second.history.empty(),
-              "second Bot's history and notes must remain independent");
+        for (int i = 0; i < 6 && t3.commands.size() < 2; ++i) runtime.tick();
+        check(Tasks(store).task(firstId).task.state == TaskState::completed, "first Bot did not complete after restart");
+        check(t3.commands.size() == 2 && t3.commands[1].ownerBotId == "second" &&
+                  t3.commands[1].instruction.find("Second version") != std::string::npos &&
+                  t3.commands[1].instruction.find("Second-only memory") != std::string::npos &&
+                  t3.commands[1].instruction.find("First") == std::string::npos,
+              "second Bot's notes must remain independent");
     }
     rejects<Conflict>([&] { bots.get("../first"); }, "path traversal accepted as Bot ID");
 }
@@ -358,6 +265,8 @@ void notesAcrossConversationAndWork() {
                 return text;
             };
             if (event.at("kind") == "conversation_turn") {
+                if (event.contains("sessionWake"))
+                    return {"reply", {{"text", styled("The Session returned the required evidence.")}}, "Report the finished work"};
                 const auto& turn = event.at("turn");
                 if (!turn.empty()) {
                     if (turn.back().at("tool") == "read_result")
@@ -372,14 +281,9 @@ void notesAcrossConversationAndWork() {
                     for (const auto& entry : context.at("history"))
                         if (entry.at("role") == "user") request = entry.at("text");
                 }
-                return {"start_task", {{"request", request}}, "Start the requested work"};
+                return {"start_task", {{"request", request}, {"doneWhen", criterion}}, "Start the requested work"};
             }
-            if (event.at("kind") == "intake")
-                return {"delegate", {{"instruction", "Collect the required evidence"}, {"doneWhen", criterion}}, "Gather evidence"};
-            check(event.at("kind") == "result", "unexpected model request");
-            return {"complete",
-                    {{"report", styled("The Session returned the required evidence.")}},
-                    "The Session evidence meets the criterion"};
+            throw std::runtime_error("unexpected task decision for a conversation task");
         }
     } model;
 
@@ -429,15 +333,15 @@ void notesAcrossConversationAndWork() {
         check(tasks.size() == 1, "the request should create one Task for this Bot");
         const Id task = tasks.at(0).task.id;
         for (int step = 0; step < 10 && Tasks(store).task(task).task.state != TaskState::completed; ++step) runtime.tick();
+        runtime.runConversations();
         const auto result = lastTaskEvent(store, task, "completed");
-        check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
+        check(result.at("kind") == "completed" && result.at("data").at("text") == "Returned evidence for the original criterion" &&
                   result.at("data").at("doneWhen") == criterion && Tasks(store).task(task).runs.size() == 1,
-              "the Bot's completion report should apply its notes and preserve the saved criterion");
-        check(model.requests.size() == start + 4, "expected two conversation steps, task intake, and completion requests");
-        checkRequest(model.requests.at(start), bot, notes, "conversation_turn");
-        checkRequest(model.requests.at(start + 1), bot, notes, "conversation_turn");
-        checkRequest(model.requests.at(start + 2), bot, notes, "intake");
-        checkRequest(model.requests.at(start + 3), bot, notes, "result");
+              "the task should complete with the Session report and preserve the saved criterion");
+        check(Conversations(store).conversation(bot.botId).back().at("data").at("text") == expectedReport,
+              "the Bot's report to the person should apply its notes");
+        check(model.requests.size() == start + 3, "expected two conversation steps and one wake turn");
+        for (std::size_t i = start; i < model.requests.size(); ++i) checkRequest(model.requests.at(i), bot, notes, "conversation_turn");
         return task;
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
@@ -579,13 +483,12 @@ void removedBotConfigKeysAreRejected() {
 
 void responseContract() {
     ModelInput input{
-        {{"doneWhen", "An existing requirement"}},
-        {{"kind", "result"}},
+        {{"tasks", Json::array()}},
+        {{"kind", "conversation_turn"}, {"text", "Check the release"}, {"turn", Json::array()}},
         Json::array({{{"text", "Older turn"}}}),
         {"New SOUL", "Current MEMORY"},
-        {"follow_up", "delegate", "complete", "ask_user"},
+        {"reply", "start_task", "complete", "wait_for_event"},
         "Still missing a report",
-        Json::array({{{"text", "Interim log"}}}),
         {{"modelProvider", "chatgpt"}, {"model", "fixture-slug"}, {"secret", "must-stay-local"}},
     };
     const auto request = responseRequest(input);
@@ -596,52 +499,30 @@ void responseContract() {
     check(!responseRequest(input).contains("reasoning"), "Cleared reasoning effort was still sent");
     input.config.erase("reasoningEffort");
     check(request["model"] == "fixture-slug" && request["store"] == false && request["stream"] == true &&
-              request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,
+              request["tool_choice"] == "required" && request["parallel_tool_calls"] == true,
           "request policy");
     const auto& tool = request["tools"].at(0);
     check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4, "only allowed tools grouped in namespace");
-    check(!toolParameters(request, "delegate").at("properties").contains("doneWhen"), "later delegate must omit doneWhen");
     check(request.dump().find("must-stay-local") == std::string::npos, "adapter config leaked into the prompt");
     check(!request.contains("prompt_cache_key"), "A request without a cache scope sent a prompt cache key");
     auto scoped = input;
-    scoped.cacheScope = R"(["task","scope-must-stay-local"])";
+    scoped.cacheScope = R"(["conversation","scope-must-stay-local"])";
     const auto key = responseRequest(scoped).at("prompt_cache_key").get<std::string>();
     check(key.size() == 64 && key.find_first_not_of("0123456789abcdef") == std::string::npos &&
               responseRequest(scoped).at("prompt_cache_key") == key,
           "The prompt cache key was not a stable SHA-256 digest");
     check(responseRequest(scoped).dump().find("scope-must-stay-local") == std::string::npos, "The cache scope leaked into the request");
-    scoped.cacheScope = R"(["task","another-bot"])";
+    scoped.cacheScope = R"(["conversation","another-bot"])";
     check(responseRequest(scoped).at("prompt_cache_key") != key, "Different cache scopes shared a prompt cache key");
     check(nlohmann::ordered_json::parse(requestText(request)) == nlohmann::ordered_json{{"soul", input.notes.soul},
                                                                                         {"memory", input.notes.memory},
                                                                                         {"history", input.history},
                                                                                         {"task", input.task},
-                                                                                        {"evidence", input.evidence},
                                                                                         {"feedback", input.feedback},
                                                                                         {"event", input.event}},
           "model context content or order changed");
     std::ranges::reverse(input.tools);
     check(responseRequest(input) == request, "tool input order changed the provider request");
-    check(request.at("instructions").get<std::string>().find("when writing your report") != std::string::npos,
-          "the task provider prompt must apply the notes to the Bot's own report");
-
-    input.task["doneWhen"] = "";
-    input.task["requestedDoneWhen"] = "Use independently verified measurements";
-    input.tools = {"delegate", "ask_user"};
-    const auto initial = responseRequest(input);
-    check(toolParameters(initial, "delegate").at("required") == Json::array({"instruction"}),
-          "saved requested criteria must not require model authorship");
-    check(Json::parse(requestText(initial)).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
-              initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
-          "the initial work prompt must direct the Bot to use the requested completion criteria");
-
-    check(!toolParameters(initial, "delegate").at("properties").contains("projectId"), "a routed task offered project selection");
-    input.task["projects"] = Json::array({{{"projectId", "release"}, {"title", "Release"}}, {{"projectId", "docs"}, {"title", "Docs"}}});
-    const auto unresolved = responseRequest(input);
-    check(toolParameters(unresolved, "delegate").at("required").back() == "projectId" &&
-              Json::parse(requestText(unresolved)).at("task").at("projects") == input.task.at("projects"),
-          "the first task decision could not choose a listed project");
-    input.task.erase("projects");
 
     input.tools = {"start_task",
                    "send_to_task",
@@ -652,6 +533,7 @@ void responseContract() {
                    "withdraw_task_question",
                    "message_session",
                    "invite_bot",
+                   "message_bot",
                    "leave_session",
                    "interrupt_session",
                    "read_result",
@@ -687,6 +569,7 @@ void responseContract() {
               turnTool("request_secret_input")["required"] == Json::array({"name"}) &&
               turnTool("message_session")["required"] == Json::array({"environmentId", "threadId", "text"}) &&
               turnTool("invite_bot")["required"] == Json::array({"botId", "environmentId", "threadId", "note"}) &&
+              turnTool("message_bot")["required"] == Json::array({"botId", "text"}) &&
               turnTool("leave_session")["required"] == Json::array({"environmentId", "threadId"}) &&
               turnTool("start_task")["required"] == Json::array({"request"}) &&
               turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
@@ -822,43 +705,6 @@ void responseContract() {
               content.at(1).at("image_url") == "data:image/png;base64,YQ==",
           "Screenshot did not enter the Responses image input");
     input.images.clear();
-    input.event = {{"kind", "intake"}};
-
-    input.task.erase("requestedDoneWhen");
-    input.needsDoneWhen = true;
-    input.task["peers"] = Json::array({{{"botId", "verifier"}, {"name", "Verifier"}}});
-    input.task["peer"] = {{"replyKinds", {"question", "result", "failed"}}};
-    input.tools = {"send_bot_message", "reply_to_bot", "read_bot_evidence"};
-    const auto peerRequest = responseRequest(input);
-    const auto peerContext = Json::parse(requestText(peerRequest));
-    const auto& destinations = peerContext.at("task").at("peers");
-    check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" && destinations.at(0).at("name") == "Verifier",
-          "the model did not receive the allowed peer destination");
-    check(peerRequest.at("tools").at(0).at("tools").size() == 3, "unavailable tools entered the peer request");
-    using Names = std::multiset<std::string>;
-    const auto& send = toolParameters(peerRequest, "send_bot_message");
-    check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult", "work"} &&
-              send["properties"]["doneWhen"]["type"] == "string" && !send["properties"].contains("forwardUserMessage") &&
-              send["required"].get<Names>() == Names{"botId", "kind", "text"},
-          "first peer work may set a criterion while consultation only needs a question");
-    const auto& reply = toolParameters(peerRequest, "reply_to_bot");
-    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question", "result", "failed"} &&
-              reply["required"].get<Names>() == Names{"kind", "text"},
-          "peer replies must specify their kind and text");
-    const auto& evidence = toolParameters(peerRequest, "read_bot_evidence");
-    check(evidence["properties"]["messageId"]["type"] == "string" && evidence["required"].get<Names>() == Names{"messageId"},
-          "peer evidence must identify the message that carries it");
-    input.needsDoneWhen = false;
-    input.task["doneWhen"] = "Saved work acceptance";
-    const auto nextPeerRequest = responseRequest(input);
-    check(!toolParameters(nextPeerRequest, "send_bot_message")["properties"].contains("doneWhen"),
-          "later peer work must keep the saved criterion");
-    input.canForwardUserMessage = true;
-    input.task["forwardableUserMessage"] = {{"text", "Saved user message"}, {"time", 123}};
-    const auto forwardRequest = responseRequest(input);
-    const auto& forward = toolParameters(forwardRequest, "send_bot_message");
-    check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" && forward["required"].get<Names>() == Names{"botId", "kind"},
-          "forwarding a saved user message must support an optional Bot note");
 
     const Json call = {{"type", "function_call"},
                        {"name", "complete"},
@@ -893,8 +739,7 @@ void responseContract() {
         incomplete[key] = nullptr;
         rejects<ModelError>([&] { responseDecision(Json::array({incomplete}), completeRequest); }, "null provider qualifier");
     }
-    rejects<ModelError>([&] { responseDecision(Json::array({call, call}), completeRequest); }, "multiple tools accepted");
-    rejects<ModelError>([&] { responseDecision(Json::array({call}), forwardRequest); }, "state-invalid tool accepted");
+    rejects<ModelError>([&] { responseDecision(Json::array({call}), turn); }, "state-invalid tool accepted");
     rejects<ModelError>([&] { responseDecision(Json::array(), completeRequest); }, "missing tool accepted");
 }
 
@@ -902,10 +747,9 @@ void oversizedRequestStopsBeforeAccessingCredentials() {
     Sandbox temp;
     const auto credentials = temp.path / "credentials";
     ChatGPTModel model(credentials);
-    const ModelInput input{Json::object(), {{"kind", "conversation_turn"}, {"text", std::string(1'250'000, '\x01')}},
-                           Json::array(),  {},
-                           {"reply"},      {},
-                           Json::array(),  botConfig()};
+    const ModelInput input{
+        Json::object(), {{"kind", "conversation_turn"}, {"text", std::string(1'250'000, '\x01')}}, Json::array(), {}, {"reply"}, {},
+        botConfig()};
     rejects<ModelError>([&] { model.decide(input); }, "Oversized escaped request reached the transport");
     check(!std::filesystem::exists(credentials), "An oversized request accessed the credentials");
 }
@@ -915,53 +759,14 @@ void missingChatGPTSignInIsTyped() {
     ChatGPTModel model(temp.path / "credentials");
     auto config = botConfig();
     config["modelProvider"] = "chatgpt";
-    const ModelInput input{
-        Json::object(), {{"kind", "conversation_turn"}, {"text", "Check the release"}}, Json::array(), {}, {"reply"}, {}, Json::array(),
-        config};
+    const ModelInput input{Json::object(), {{"kind", "conversation_turn"}, {"text", "Check the release"}}, Json::array(), {}, {"reply"}, {},
+                           config};
     try {
         model.decide(input);
         throw std::runtime_error("missing ChatGPT credentials were accepted");
     } catch (const ModelError& error) {
         check(error.code == ModelErrorCode::authentication_required, "missing ChatGPT credentials were not classified as sign-in required");
     }
-}
-
-class AcceptanceModel final : public Model {
-public:
-    std::vector<Json> requests;
-    bool withReason = true;
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-    Decision choose(const ModelInput& input) {
-        requests.push_back(responseRequest(input));
-        if (input.task["botId"] == "regression") {
-            return {"follow_up",
-                    {{"instruction", "Cover the reported bug with a new automated check"}},
-                    withReason ? "A regression test is missing." : ""};
-        }
-        return {"complete", {{"report", "All existing checks succeeded"}}, "The required existing tests passed."};
-    }
-};
-
-void acceptanceRunner() {
-    AcceptanceModel model;
-    std::stringstream output;
-    check(runModelAcceptance(model, "model-slug", output), "expected six successful trials");
-    check(model.requests.size() == 6 && model.requests[0] == model.requests[1] && model.requests[1] == model.requests[2] &&
-              model.requests[3] == model.requests[4] && model.requests[4] == model.requests[5],
-          "trial inputs should be fixed per Bot");
-    std::string line;
-    unsigned count = 0;
-    while (std::getline(output, line)) {
-        const auto trial = Json::parse(line);
-        ++count;
-        check(trial["pass"] == true && !trial["reason"].get<std::string>().empty() &&
-                  trial["sessionReport"] == "All existing tests passed. No regression test was added.",
-              "each trial must record the same report and its rationale");
-    }
-    check(count == 6, "six trial rows were not recorded");
-    model.withReason = false;
-    std::stringstream missingReason;
-    check(!runModelAcceptance(model, "model-slug", missingReason), "Acceptance passed further work without its rationale");
 }
 
 void fixedDemoWithUserCriteriaAndContinuation() {
@@ -1029,11 +834,10 @@ void fixedDemoWithUserCriteriaAndContinuation() {
                               [](const Json& entry) {
                                   const auto& data = entry.at("data");
                                   return entry.at("kind") == "decision" && data.at("tool") == "follow_up" &&
-                                         data.at("reason") == "The demo report predates the accepted instructions.";
+                                         data.at("reason") == "Send the person's new instructions";
                               }),
           "task history lost the reason for further work");
-    check(lastTaskEvent(store, task, "completed").at("data").at("reason") ==
-              "The demo Session reported that it completed the requested work.",
+    check(lastTaskEvent(store, task, "completed").at("data").at("reason") == "Nobody asked for more work after the Session finished",
           "task history lost the reason for completion");
     Command followUp;
     followUp.tool = CommandTool::follow_up;
@@ -1429,7 +1233,6 @@ void pullRequestSettings() {
 int main() {
     try {
         configuredSchedules();
-        scheduledTaskResumesAfterModelSetupChanges();
         for (const auto failure : {NotesFailurePoint::Planning, NotesFailurePoint::Dispatch}) {
             unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Restore, failure);
             unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit, failure);
@@ -1447,7 +1250,6 @@ int main() {
             Store store(temp.path / "state.db");
             sessionConversationDispatch(store, botConfig());
         }
-        acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
         fixedDemoFollowUpKeepsTheExplainedResult();

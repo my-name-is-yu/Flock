@@ -326,7 +326,7 @@ function liveFixture() {
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
     prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, canSaveRule: false, status: 'pending' };
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
-  const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
+  const stopWait = { id: 9, reason: 'bot_notes_unavailable', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
   const limits = { messageBytes: 45, waitAnswerBytes: 33, attachments: 1 };
   const fixture = window.inboxFixture = { bot, decision, limits, reads: 0, approvalReady: false, updated: false, failed: false,
@@ -519,10 +519,10 @@ async function exerciseLiveRetry() {
   await waitFor(openStop, 'The cancellable wait did not arrive');
   openStop().click();
   const detailTitle = document.getElementById('detail-title');
-  if (detailTitle.textContent !== 'Release $$ $&’s model needs attention') throw new Error('The Bot name was interpreted as a replacement pattern');
+  if (detailTitle.textContent !== 'Release $$ $&’s notes are unavailable') throw new Error('The Bot name was interpreted as a replacement pattern');
   fixture.bot.name = 'Recovery';
   refreshView();
-  await waitFor(() => detailTitle.textContent === 'Recovery’s model needs attention', 'An open request dialog kept the old Bot name');
+  await waitFor(() => detailTitle.textContent === 'Recovery’s notes are unavailable', 'An open request dialog kept the old Bot name');
   stop().click();
   const keep = document.querySelector('#detail .wait-stop-confirm .quiet');
   if (document.activeElement !== keep || fixture.stopRequests.length)

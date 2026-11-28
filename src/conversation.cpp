@@ -40,7 +40,7 @@ using limits::messages::maxBodyBytes;
 namespace {
 bool reservedMessageId(std::string_view id) {
     return id.starts_with("channel:") || id.starts_with("session-wake:") || id.starts_with("session-ask:") ||
-           id.starts_with("session-invite:");
+           id.starts_with("session-invite:") || id.starts_with("bot-message:") || id.starts_with("task-wake:");
 }
 
 Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
@@ -117,7 +117,7 @@ Json ConversationStorage::receive(const Person& actor, std::string_view bot, std
 
 Id ConversationStorage::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
                                             std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
-                                            const ConversationInvitationEntry* invitation) {
+                                            const ConversationInvitationEntry* invitation, const ConversationBotMessageEntry* botMessage) {
     if (botLifecycle.botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
@@ -158,6 +158,12 @@ WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
         saved["sessionInvitation"] = encodeConversationInvitation(publicInvitation);
         saved["sessionInvitationDepth"] = publicInvitation.depth;
         event.detail = std::move(publicInvitation);
+    } else if (botMessage) {
+        auto publicMessage = *botMessage;
+        publicMessage.fromBotId = scrub.text(publicMessage.fromBotId);
+        publicMessage.fromName = scrub.text(publicMessage.fromName);
+        saved["botMessage"] = encodeConversationBotMessage(publicMessage);
+        event.detail = std::move(publicMessage);
     }
     scrub.requirePublic({routing.botId, actor.id, clientId, saved});
     const auto id = journalStorage.journalConversationMessage(routing.botId, event);
@@ -169,6 +175,33 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=
                    source == conversation::PrincipalSource::trusted && actor.adminRoot ? 1 : 0, static_cast<int>(source), routing.botId});
     database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
     return id;
+}
+
+Id ConversationStorage::enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry& wake,
+                                    std::string_view clientId) {
+    routing["sessionWake"] = encodeConversationWake(wake);
+    const auto id = journalStorage.journalConversationMessage(source.bot, {wake});
+    database.exec(R"SQL(
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,'',?,?,?,? FROM messages WHERE bot_id=?
+)SQL",
+                  {id, source.bot, clientId, source.id, routing, source.admittedActor.id, source.admittedActor.adminRoot ? 1 : 0,
+                   static_cast<int>(source.principalSource), source.bot});
+    database.exec(R"SQL(
+INSERT INTO channel_messages(message_id,event_key,scope_key,origin,sender_id,person_id)
+SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE message_id=?
+)SQL",
+                  {id, clientId, source.id});
+    database.exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')", {id});
+    return id;
+}
+
+Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
+    const auto source = loadTurnMessage(sourceMessage);
+    auto routing = source.routing;
+    routing.erase("sessionInvitation");
+    wake.sourceMessageId = source.id;
+    return enqueueWake(source, std::move(routing), wake, clientId);
 }
 
 std::vector<std::pair<std::string, Id>> ConversationStorage::pendingConversations(unsigned limit, Seconds now) const {

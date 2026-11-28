@@ -645,8 +645,6 @@ function renderAccess({mode, users = [], currentPerson, pendingUntil} = {}) {
   }
 }
 
-const sessionReadOptions = {off: 'Off', on_demand: 'When needed', prefill: 'Before answering'};
-
 function editRemoteAddress(state) {
   const field = settingField('value', 'Address', {
     value: state.saved.remoteAddress ?? '', placeholder: 'Off', wide: true,
@@ -660,17 +658,9 @@ function editRemoteAddress(state) {
 
 function editSystem(key, state) {
   if (key === 'remoteAddress') return editRemoteAddress(state);
-  const isPort = key === 'port';
-  const field = isPort
-    ? settingField('value', 'Preferred port', {type: 'number', value: state.saved.port, placeholder: 'Use default', wide: true})
-    : settingField('value', 'When Bots read T3 threads', {
-      value: state.saved.sessionRead ?? '', choices: {'': 'Use default', ...sessionReadOptions}, wide: true,
-    });
-  const form = buildForm([field], 'Save', ({value}) =>
-    saveInstallation('system', {[key]: value ? (isPort ? Number(value) : value) : null}));
-  openEditor(isPort ? 'Web port' : 'Read T3 threads',
-    isPort ? 'Flock will use this port after restart. Leave it blank to use the default.'
-      : 'Bots can read the T3 threads of their own work when a report isn’t enough. Changes apply after restart.', form);
+  const field = settingField('value', 'Preferred port', {type: 'number', value: state.saved.port, placeholder: 'Use default', wide: true});
+  const form = buildForm([field], 'Save', ({value}) => saveInstallation('system', {port: value ? Number(value) : null}));
+  openEditor('Web port', 'Flock will use this port after restart. Leave it blank to use the default.', form);
 }
 
 function systemValues(title, current, next, pending) {
@@ -690,16 +680,11 @@ function renderSystem(state) {
   const port = row('system', systemValues('Web port', active.port || 'Automatic', next.port || 'Automatic', pending.port));
   if (overrides.port) port.append(statusBadge('Set at launch'));
   else actionButton(port, 'Change', () => editSystem('port', state)).setAttribute('aria-label', 'Change Web port');
-  const sessionRead = row('system', systemValues('Read T3 threads', sessionReadOptions[active.sessionRead],
-    sessionReadOptions[next.sessionRead], pending.sessionRead));
-  if (overrides.sessionRead) sessionRead.append(statusBadge('Set at launch'));
-  else actionButton(sessionRead, 'Change', () => editSystem('sessionRead', state))
-    .setAttribute('aria-label', 'Change when Bots read T3 threads');
   const remote = row('system', systemValues('Address for other computers', active.remoteAddress ?? 'Off',
     next.remoteAddress ?? 'Off', pending.remoteAddress));
   actionButton(remote, 'Change', () => editSystem('remoteAddress', state))
     .setAttribute('aria-label', 'Change the address for other computers');
-  if (pending.port || pending.sessionRead || pending.remoteAddress) restartNotice('system');
+  if (pending.port || pending.remoteAddress) restartNotice('system');
 }
 
 function copyableSetup(label, text) {

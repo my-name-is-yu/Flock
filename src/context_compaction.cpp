@@ -135,6 +135,8 @@ ORDER BY entry.id DESC LIMIT ?
                 entry["sessionWake"] = scrub.record(encodeConversationWake(*wake));
             else if (const auto* invite = std::get_if<ConversationInvitationEntry>(&decoded.detail))
                 entry["sessionInvitation"] = scrub.record(encodeConversationInvitation(*invite));
+            else if (const auto* bot = std::get_if<ConversationBotMessageEntry>(&decoded.detail))
+                entry["botMessage"] = scrub.record(encodeConversationBotMessage(*bot));
             if (message.channelScope.empty()) {
                 auto media = attachments_.attachmentViews(id);
                 if (!media.empty()) entry["attachments"] = std::move(media);

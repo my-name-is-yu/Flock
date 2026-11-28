@@ -38,7 +38,6 @@ struct OutboxCommit {
 
 struct OutboxContext {
     std::optional<std::int64_t> answerEventId, sourceMessageId;
-    std::optional<std::string> peerMessageId;
 };
 
 template <typename Version> struct SessionContextSection {

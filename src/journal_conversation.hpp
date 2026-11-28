@@ -17,10 +17,17 @@ struct ConversationInvitationEntry {
 struct ConversationWakeEntry {
     std::string environmentId, threadId, title, reason;
     Id sourceMessageId;
+    // Set when the wake reports on a task the Bot started from this conversation.
+    Id taskId = 0;
+};
+
+struct ConversationBotMessageEntry {
+    std::string fromBotId, fromName;
+    Id depth;
 };
 
 struct ConversationMessageEntry {
-    std::variant<std::monostate, ConversationInvitationEntry, ConversationWakeEntry> detail;
+    std::variant<std::monostate, ConversationInvitationEntry, ConversationWakeEntry, ConversationBotMessageEntry> detail;
 };
 
 enum class ConversationReplyRoute { reply, error, bot_paused, session_access, session_left, channel_access, access };
@@ -37,6 +44,7 @@ struct ConversationReplyEntry {
 
 Json encodeConversationInvitation(const ConversationInvitationEntry&);
 Json encodeConversationWake(const ConversationWakeEntry&);
+Json encodeConversationBotMessage(const ConversationBotMessageEntry&);
 ConversationMessageEntry decodeConversationMessage(Id, const Json&);
 ConversationReplyEntry decodeConversationReply(Id, const Json&);
 }

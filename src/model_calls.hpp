@@ -37,7 +37,6 @@ public:
         : database(database), botLifecycle(botLifecycle), permissions(permissions), secretStorage(secretStorage) {}
 
     std::string messageModelScope(Id messageId) const;
-    std::string taskModelScope(Id taskId) const;
     Id recordAttempt(std::string_view scope, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     void recordBotTool(std::string_view scope, Id messageId);
     Id takeReservedConversationCall(Id messageId);

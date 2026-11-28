@@ -79,9 +79,7 @@ add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/
                        src/runtime_outbox_dispatch.cpp src/runtime_outbox_destinations.cpp
                        src/runtime_session_prompts.cpp
                        src/runtime_run_observer.cpp
-                       src/runtime_peer_exchanges.cpp
                        src/runtime_run_reports.cpp
-                       src/runtime_session_history.cpp
                        src/runtime_task_questions.cpp
                        src/runtime_task_updates.cpp
                        src/run_reports.cpp src/project_slots.cpp src/task_destinations.cpp src/policy.cpp src/policy_approval.cpp src/bot_lifecycle.cpp
@@ -92,7 +90,7 @@ add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
-target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_peer.cpp src/journal_task.cpp src/peer_storage.cpp)
+target_sources(flock_core PRIVATE src/journal_conversation.cpp src/journal_git.cpp src/journal_task.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()
@@ -230,21 +228,17 @@ if(BUILD_TESTING)
   target_include_directories(flock_live_conversation PRIVATE app)
   target_link_libraries(flock_live_conversation PRIVATE flock_app_support)
   add_test(NAME flock_live_conversation_self_test COMMAND flock_live_conversation --self-test)
-  add_executable(flock_live_evidence tests/live_evidence.cpp)
-  target_include_directories(flock_live_evidence PRIVATE app)
-  target_link_libraries(flock_live_evidence PRIVATE flock_t3 flock_app_support)
-  add_test(NAME flock_live_evidence_schema COMMAND flock_live_evidence --self-test)
   add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
   add_test(NAME flock_header_fanout COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/header_fanout.py")
   if(FLOCK_LIVE_TESTS)
-    foreach(test flock_live_t3 flock_live_conversation flock_live_evidence)
+    foreach(test flock_live_t3 flock_live_conversation)
       add_test(NAME ${test} COMMAND ${test} --live)
       set_tests_properties(${test} PROPERTIES LABELS live SKIP_RETURN_CODE 77 RESOURCE_LOCK flock_live)
     endforeach()
     set_tests_properties(flock_live_t3 PROPERTIES TIMEOUT 360)
-    set_tests_properties(flock_live_conversation flock_live_evidence PROPERTIES TIMEOUT 1500)
+    set_tests_properties(flock_live_conversation PROPERTIES TIMEOUT 1500)
   endif()
   add_executable(flock_git_pr_ci tests/git_pr_ci.cpp tests/git_pr_followup.cpp)
   target_include_directories(flock_git_pr_ci PRIVATE app)
