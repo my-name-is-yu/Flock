@@ -38,10 +38,14 @@
 
 .bot-message-row {
   display: flex; align-items: center; gap: .45rem; width: fit-content; min-width: 0; max-width: min(100%, 40rem);
-  margin: .2rem auto 0; padding: .2rem .45rem; border-radius: var(--radius-sm);
+  /* Pull the hover padding outside so the avatar lines up with the Bot's bubble edge. */
+  margin: .2rem 0 0 calc(var(--avatar-col) - .45rem); padding: .2rem .45rem; border-radius: var(--radius-sm);
   color: var(--text-3); font-size: var(--text-sm); line-height: 1.35; text-decoration: none;
 }
 .bot-message-row + .bot-message-row, .row:has(> .bot-message-row) + .row:has(> .bot-message-row) { margin-top: 0; }
+@container conversation-layout (max-width: 700px) {
+  .bot-message-row { --avatar-col: 0px; }
+}
 a.bot-message-row { transition: background-color var(--dur-fast) ease; }
 a.bot-message-row:hover { background: var(--hover); }
 a.bot-message-row:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
