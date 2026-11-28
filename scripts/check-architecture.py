@@ -17,6 +17,11 @@ TEST_FILE = re.compile(r"(^|_)tests\.cpp$")
 SINGLE_OWNERS = (
     (re.compile(r"set_content\([^;]*application/json"), "web/http.cpp", "send JSON responses with web::reply or web::error"),
     (re.compile(r'"0123456789abcdef"(\[|;)|\bEVP_Digest\(|\bSHA256\('), "src/digest.cpp", "encode hex with encodeHex and hash with sha256Hex"),
+    (
+        re.compile(r'"(FLOCK|T3CODE)_[A-Z0-9_]+"'),
+        "include/flock/environment.hpp",
+        "name environment variables in flock/environment.hpp",
+    ),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
 

@@ -1,4 +1,5 @@
 #include "flock/bot_access.hpp"
+#include "flock/environment.hpp"
 #include "flock/policy_rules.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/conversation_intake.hpp"
@@ -127,7 +128,7 @@ std::filesystem::path homePath(Arguments& args) {
         if (path.empty()) throw Conflict("Flock home must not be empty");
         return std::filesystem::absolute(path);
     }
-    if (const auto* configured = std::getenv("FLOCK_HOME"); configured && *configured) return std::filesystem::absolute(configured);
+    if (const auto* configured = std::getenv(environment::home); configured && *configured) return std::filesystem::absolute(configured);
     if (const auto* home = std::getenv("HOME"); home && *home) return std::filesystem::path(home) / ".config" / "flock";
     throw Conflict("Set FLOCK_HOME or provide --home DIRECTORY");
 }
@@ -229,7 +230,7 @@ int externalMcpCommand(Arguments& args, const std::filesystem::path& home, const
             authorizedBots.emplace_back(bot);
         } while (!args.empty());
         auto store = openStore(home);
-        const SettingsAccess access(store, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+        const SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
         const auto credential = ExternalMcp(store).connect(person, authorizedBots);
         print({{"connectionId", credential.connectionId}, {"bearerToken", credential.bearerToken}});
     } else if (action == "disconnect") {
@@ -282,7 +283,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                  .botSetupCatalog = loadSetupModelCatalog});
     SettingsSystem system(home, port);
     SettingsConnections connections(home);
-    SettingsAccess access(store, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+    SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
     const auto identities = access.identities();
     const auto savedPort = T3Connections(store).port();
     if (savedPort && !web)

@@ -54,6 +54,13 @@ class ArchitectureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("app/model.cpp: encode hex with encodeHex and hash with sha256Hex", result.stderr)
 
+    def test_environment_variables_are_named_in_one_header(self):
+        name = 'std::getenv("FLOCK_HOME");\n'
+        self.assertEqual(self.check({"include/flock/environment.hpp": name, "app/tests/home.cpp": name}).returncode, 0)
+        result = self.check({"include/flock/environment.hpp": name, "app/main.cpp": name})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("app/main.cpp: name environment variables in flock/environment.hpp", result.stderr)
+
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"
         self.assertEqual(self.check({"tests/support.hpp": define}).returncode, 0)

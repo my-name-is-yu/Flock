@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/environment.hpp"
 #include "flock/json.hpp"
 #include "flock/t3_mcp.hpp"
 
@@ -55,7 +56,7 @@ std::uint64_t boundedInteger(const Json& record, const char* key, std::uint64_t 
 }
 
 std::optional<LocalT3Environment> discoverLocalT3() {
-    const auto* configured = std::getenv("T3CODE_HOME");
+    const auto* configured = std::getenv(environment::t3Home);
     const auto setting = configured ? t3detail::trim(configured) : std::string{};
     std::filesystem::path base(setting);
     if (setting.empty() || setting == "~" || setting.starts_with("~/")) {

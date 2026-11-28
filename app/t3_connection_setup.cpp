@@ -1,4 +1,5 @@
 #include "t3_connection_setup.hpp"
+#include "flock/environment.hpp"
 #include "flock/settings_access.hpp"
 #include "settings_system.hpp"
 #include "t3_setup.hpp"
@@ -67,7 +68,7 @@ T3SetupResult connectT3(const std::filesystem::path& home, const T3ConnectReques
                         const std::optional<Person>& requester) {
     const T3SetupLock setup;
     Store store(home / "flock.sqlite3");
-    SettingsAccess access(store, std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
+    SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
     const auto resolve = access.identities().resolvePerson;
     const auto verifyAccess = [&] {
         if (access.enabled() && !resolve(localOwner.id)) throw Conflict("Keep a Web identity for local-owner to connect T3.");

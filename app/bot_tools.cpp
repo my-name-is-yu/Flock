@@ -1,4 +1,5 @@
 #include "bot_tools.hpp"
+#include "flock/environment.hpp"
 #include "flock/percent_encoding.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/detail/json_rpc.hpp"
@@ -478,7 +479,7 @@ std::string mcpUrl(const std::string& url) {
 }
 
 Json readBotToolSettings(const std::filesystem::path& home) {
-    auto settings = Json{{"searchKey", environmentToken("FLOCK_WEB_SEARCH_KEY")}};
+    auto settings = Json{{"searchKey", environmentToken(environment::webSearchKey)}};
     const auto file = home / "bot-tools.json";
     if (!std::filesystem::exists(file)) return settings;
     if (!std::filesystem::is_regular_file(file) || std::filesystem::file_size(file) > 65536)
