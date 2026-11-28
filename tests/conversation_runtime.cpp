@@ -1775,6 +1775,49 @@ void failedReviewStepDoesNotAutoComplete() {
     }
 }
 
+void failedReviewSearchDoesNotAutoComplete() {
+    enum class Retry { none, otherQuery, otherPage, correctedCursor };
+    for (const auto retry : {Retry::none, Retry::otherQuery, Retry::otherPage, Retry::correctedCursor}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        const auto dependency = TaskIntake(*f.store).submit(f.routing("Release dependency"));
+        const auto other = TaskIntake(*f.store).submit(f.routing("Other dependency"));
+        f.model.onWake = [&](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                if (retry == Retry::none) return {"find_tasks", {{"query", std::string(401, 'x')}}, "Search for the blocker"};
+                return {"find_tasks", {{"query", "Release dependency"}, {"before", "invalid"}}, "Search for the release dependency"};
+            }
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the task search did not fail");
+                if (retry == Retry::otherQuery) return {"find_tasks", {{"query", "Other dependency"}}, "Check a different dependency"};
+                if (retry == Retry::otherPage)
+                    return {"find_tasks", {{"query", "Release dependency"}, {"before", dependency}}, "Read a different page"};
+                if (retry == Retry::correctedCursor)
+                    return {"find_tasks", {{"query", "Release dependency"}}, "Retry the search with a valid cursor"};
+                return {"reply", {{"text", "The search failed."}}, "Report the failed search"};
+            }
+            const auto& result = turn.back().at("result");
+            check(result.at("ok") == true, "the second task search failed");
+            const auto& matches = result.at("tasks");
+            if (retry == Retry::otherPage)
+                check(matches.empty(), "the other page unexpectedly found the dependency");
+            else
+                check(matches.size() == 1 && matches.at(0).at("taskId") == (retry == Retry::otherQuery ? other : dependency),
+                      "the second search found the wrong dependency");
+            return {"reply", {{"text", "I finished my review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the search review did not settle");
+        const bool canComplete = retry == Retry::correctedCursor;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its task search");
+    }
+}
+
 Decision completeWithLearnings(const ModelInput& input, Json learnings) {
     return {
         "complete", {{"report", input.event.at("report")}, {"learnings", std::move(learnings)}}, "The Session verified the requested work"};
@@ -4505,6 +4548,7 @@ int main(int argc, char** argv) {
         requestsOfOneKindShareAPromptCacheScope();
         finishedTurnDoesNotHoldCompletion();
         failedReviewStepDoesNotAutoComplete();
+        failedReviewSearchDoesNotAutoComplete();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();

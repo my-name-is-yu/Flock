@@ -266,7 +266,13 @@ std::optional<std::pair<std::string, Json>> wakeEvidenceLookup(const Json& call)
     const auto tool = field(call, "tool");
     const auto& args = call.at("args");
     if (!args.is_object()) return std::nullopt;
-    if (tool == "find_tasks" && args.contains("taskId")) return std::pair{tool, args.at("taskId")};
+    if (tool == "find_tasks") {
+        auto task = args.value("taskId", Json{});
+        if (!task.is_null()) return std::pair{tool, Json{{"taskId", std::move(task)}}};
+        auto query = args.value("query", Json{});
+        if (query.is_null() || (query.is_string() && !conversation_storage::hasText(query.get_ref<const std::string&>()))) query = "";
+        return std::pair{tool, Json{{"query", std::move(query)}, {"before", std::max<Id>(0, integer(args, "before"))}}};
+    }
     if (tool == "read_result" && args.contains("messageId")) return std::pair{tool, args.at("messageId")};
     if (tool == "flock_session_events") return std::pair{tool, args};
     return std::nullopt;
