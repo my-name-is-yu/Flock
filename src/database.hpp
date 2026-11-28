@@ -37,7 +37,35 @@ enum class JournalKind {
     cancel_requested,
     cancelled,
     tool_error,
-    decision
+    decision,
+    blocker_cleared,
+    blocker_recorded,
+    bot_setup_undone,
+    bot_setup_updated,
+    cancelling,
+    delivery_superseded,
+    git_mutation,
+    git_webhook,
+    inbox_decision,
+    interrupt_settled,
+    memory_remembered,
+    policy_action_closed,
+    policy_approval,
+    policy_denied,
+    question_withdrawn,
+    replanning,
+    request,
+    run_id_pending,
+    run_started,
+    session_answered,
+    session_destination_changed,
+    session_lineage_unavailable,
+    session_participation_stop,
+    session_question,
+    session_question_closed,
+    task_contract_changed,
+    wait_closed,
+    resource_used,
 };
 
 struct JournalKeys {
@@ -105,9 +133,10 @@ public:
     Id dataVersion() const;
     std::pair<Id, Id> changeStamp() const;
     Id last() const;
-    Id writeJournal(Id task, std::string_view kind, const Json&);
+    Id writeJournal(Id task, JournalKind, const Json&);
     struct BotJournalEntry {
-        std::string_view bot, kind;
+        std::string_view bot;
+        JournalKind kind;
         Seconds time;
         std::optional<Id> task = {};
         std::optional<std::string_view> operationId = {};

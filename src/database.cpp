@@ -37,6 +37,34 @@ constexpr std::array kinds{
     std::pair{JournalKind::cancelled, std::string_view{"cancelled"}},
     std::pair{JournalKind::tool_error, std::string_view{"tool_error"}},
     std::pair{JournalKind::decision, std::string_view{"decision"}},
+    std::pair{JournalKind::blocker_cleared, std::string_view{"blocker_cleared"}},
+    std::pair{JournalKind::blocker_recorded, std::string_view{"blocker_recorded"}},
+    std::pair{JournalKind::bot_setup_undone, std::string_view{"bot_setup_undone"}},
+    std::pair{JournalKind::bot_setup_updated, std::string_view{"bot_setup_updated"}},
+    std::pair{JournalKind::cancelling, std::string_view{"cancelling"}},
+    std::pair{JournalKind::delivery_superseded, std::string_view{"delivery_superseded"}},
+    std::pair{JournalKind::git_mutation, std::string_view{"git_mutation"}},
+    std::pair{JournalKind::git_webhook, std::string_view{"git_webhook"}},
+    std::pair{JournalKind::inbox_decision, std::string_view{"inbox_decision"}},
+    std::pair{JournalKind::interrupt_settled, std::string_view{"interrupt_settled"}},
+    std::pair{JournalKind::memory_remembered, std::string_view{"memory_remembered"}},
+    std::pair{JournalKind::policy_action_closed, std::string_view{"policy_action_closed"}},
+    std::pair{JournalKind::policy_approval, std::string_view{"policy_approval"}},
+    std::pair{JournalKind::policy_denied, std::string_view{"policy_denied"}},
+    std::pair{JournalKind::question_withdrawn, std::string_view{"question_withdrawn"}},
+    std::pair{JournalKind::replanning, std::string_view{"replanning"}},
+    std::pair{JournalKind::request, std::string_view{"request"}},
+    std::pair{JournalKind::run_id_pending, std::string_view{"run_id_pending"}},
+    std::pair{JournalKind::run_started, std::string_view{"run_started"}},
+    std::pair{JournalKind::session_answered, std::string_view{"session_answered"}},
+    std::pair{JournalKind::session_destination_changed, std::string_view{"session_destination_changed"}},
+    std::pair{JournalKind::session_lineage_unavailable, std::string_view{"session_lineage_unavailable"}},
+    std::pair{JournalKind::session_participation_stop, std::string_view{"session_participation_stop"}},
+    std::pair{JournalKind::session_question, std::string_view{"session_question"}},
+    std::pair{JournalKind::session_question_closed, std::string_view{"session_question_closed"}},
+    std::pair{JournalKind::task_contract_changed, std::string_view{"task_contract_changed"}},
+    std::pair{JournalKind::wait_closed, std::string_view{"wait_closed"}},
+    std::pair{JournalKind::resource_used, std::string_view{"resource_used"}},
 };
 
 template <class T> Json sqlValue(const std::optional<T>& value) {
@@ -213,12 +241,12 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 
 Id Database::writeJournal(const BotJournalEntry& entry, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,operation_id) VALUES(?,?,?,?,?,?)",
-         {sqlValue(entry.task), entry.time, entry.kind, data, entry.bot, sqlValue(entry.operationId)});
+         {sqlValue(entry.task), entry.time, enumName(kinds, entry.kind), data, entry.bot, sqlValue(entry.operationId)});
     return last();
 }
 
-Id Database::writeJournal(Id id, std::string_view kind, const Json& data) {
-    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
+Id Database::writeJournal(Id id, JournalKind kind, const Json& data) {
+    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), enumName(kinds, kind), data});
     return last();
 }
 

@@ -365,7 +365,7 @@ Id TaskOperations::submit(const Intake& item, Id sourceMessageId, const OutboxSo
                              : task.trigger  ? "automation"
                                              : "manual"}};
     if (task.trigger) entry["trigger"] = taskTriggerJson(*task.trigger);
-    database.writeJournal(id, "request", entry);
+    database.writeJournal(id, JournalKind::request, entry);
     return id;
 }
 

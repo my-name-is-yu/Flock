@@ -271,7 +271,7 @@ WHERE json_extract(result,'$.data.id')=?1
         const Json routing{
             {"environmentId", task.environmentId}, {"projectId", task.projectId}, {"config", task.config}, {"gitEvent", event}};
         const auto message =
-            database.writeJournal({.bot = bot, .kind = "git_webhook", .time = unixTime(), .task = taskId}, scrub.record(event));
+            database.writeJournal({.bot = bot, .kind = JournalKind::git_webhook, .time = unixTime(), .task = taskId}, scrub.record(event));
         database.exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messages WHERE bot_id=?

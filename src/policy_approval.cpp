@@ -175,7 +175,8 @@ WHERE a.status IN ('pending','approved')
         releasePolicyTurn(change.turn);
         releasePolicyTask(change.id, change.status);
         policy_storage::audit(database, Person{}, {}, "approval_closed", {{"itemId", change.id}, {"status", change.status}});
-        if (change.task) database.writeJournal(change.task, "policy_approval", {{"itemId", change.id}, {"status", change.status}});
+        if (change.task)
+            database.writeJournal(change.task, JournalKind::policy_approval, {{"itemId", change.id}, {"status", change.status}});
     }
 }
 
@@ -190,7 +191,7 @@ ApprovalGate PolicyApprovals::approveAction(const PolicyOrigin& origin, const Re
     const auto deny = [&](std::string_view reason) {
         auto details = secretStorage.sharedRedactor().record({{"action", action}, {"target", resource.target}, {"reason", reason}});
         policy_storage::audit(database, Person{}, origin.bot, "action_denied", details);
-        if (origin.task) database.writeJournal(origin.task, "policy_denied", details);
+        if (origin.task) database.writeJournal(origin.task, JournalKind::policy_denied, details);
         return ApprovalGate::denied;
     };
     if (botLifecycle.botPaused(origin.bot)) return ApprovalGate::stale;
@@ -273,7 +274,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
                               {waitId, resume, task.generation, task.generation, card});
             }
         }
-        database.writeJournal(origin.task, "policy_approval", {{"itemId", card}, {"status", "pending"}});
+        database.writeJournal(origin.task, JournalKind::policy_approval, {{"itemId", card}, {"status", "pending"}});
     }
     policy_storage::audit(database, Person{}, origin.bot, "approval_requested",
                           {{"itemId", card}, {"action", action}, {"target", resource.target}});

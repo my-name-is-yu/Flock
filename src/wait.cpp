@@ -222,12 +222,13 @@ void WaitStorage::clearWait(TaskData& task, std::string_view resolution) {
     const auto id = row.number(0);
     row.next();
     if (task.blocker && task.blocker->waitId == id) task.blocker.reset();
-    database.writeJournal(task.id, "wait_closed", {{"waitId", id}, {"resolution", resolution}});
+    database.writeJournal(task.id, JournalKind::wait_closed, {{"waitId", id}, {"resolution", resolution}});
 }
 
 void WaitStorage::unlockQuestion(TaskData& task, std::string_view reason) {
     if (!task.question) return;
-    database.writeJournal(task.id, "session_question_closed", {{"requestId", task.question->target.requestId}, {"resolution", reason}});
+    database.writeJournal(task.id, JournalKind::session_question_closed,
+                          {{"requestId", task.question->target.requestId}, {"resolution", reason}});
     task.question.reset();
 }
 

@@ -115,7 +115,7 @@ void runtime::OutboxDispatch::stop(TaskData task) {
             current.actionId.clear();
             current.t3CheckAt.reset();
             waitStorage.clearWait(current, "superseded_instruction");
-            database.writeJournal(current.id, "delivery_superseded",
+            database.writeJournal(current.id, JournalKind::delivery_superseded,
                                   {{"actionId", action->command.actionId}, {"revisionId", revisionJson(current.currentRevision)}});
             return true;
         });
@@ -212,7 +212,7 @@ AssignedRun runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, c
     }
     auto sources = Json::array();
     for (const auto& source : action.sourceResultRefs) sources.push_back(sourceJson(source));
-    database.writeJournal(task.id, "run_started",
+    database.writeJournal(task.id, JournalKind::run_started,
                           {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
                            {"actionId", cmd.actionId},
                            {"revisionId", revisionJson(action.revisionId)},
@@ -304,7 +304,8 @@ bool runtime::OutboxDispatch::deferSingleDelivery(TaskData& task, const Outbox& 
         auto& savedDetail = cancelling ? task.cancellationDetail : task.replanningDetail;
         if (savedDetail == detail && !unsent) return false;
         savedDetail = detail;
-        database.writeJournal(task.id, cancelling ? "cancelling" : "replanning", {{"detail", detail}, {"actionId", key}});
+        database.writeJournal(task.id, cancelling ? JournalKind::cancelling : JournalKind::replanning,
+                              {{"detail", detail}, {"actionId", key}});
         return true;
     }
     task.t3CheckAt = clock() + deliveryCheckInterval;
@@ -339,7 +340,7 @@ void runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Deliver
         }
         if (!outcome.launchWarning.empty()) {
             task.launchWarning = policy.secretRedactor(task.botId).text(outcome.launchWarning);
-            database.writeJournal(id, "session_lineage_unavailable", {{"actionId", key}, {"text", *task.launchWarning}});
+            database.writeJournal(id, JournalKind::session_lineage_unavailable, {{"actionId", key}, {"text", *task.launchWarning}});
         }
         const bool cancelling = task.state == TaskState::cancelling;
         const bool reply = action.command.tool == CommandTool::answer_session_question;
@@ -352,7 +353,7 @@ void runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Deliver
             (action.command.target.threadId.empty() || action.command.target.threadId == outcome.run.threadId)) {
             saved->command.receipt = outcome.run;
             outboxStorage.saveOutbox(*saved, OutboxPhase::started);
-            database.writeJournal(id, "run_id_pending", {{"actionId", key}, {"thread", runJson(outcome.run)}});
+            database.writeJournal(id, JournalKind::run_id_pending, {{"actionId", key}, {"thread", runJson(outcome.run)}});
             if (destination) {
                 auto& run = destinationRun(task, key);
                 run.ref.link = outcome.run.link;
@@ -392,7 +393,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 }
             }
             if (reply)
-                database.writeJournal(id, "session_answered",
+                database.writeJournal(id, JournalKind::session_answered,
                                       {{"requestId", action.command.questionId}, {"actionId", action.command.actionId}});
             task.actionId.clear();
             task.t3CheckAt.reset();
@@ -493,7 +494,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
             current.state = !current.activeRun ? TaskState::deciding : TaskState::running;
             if (current.state == TaskState::deciding)
                 taskEvents.event(current, "policy/" + cmd.actionId, {{"kind", "policy_outcome"}, {"text", approvalError(gate)}});
-            database.writeJournal(id, "policy_action_closed", {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
+            database.writeJournal(id, JournalKind::policy_action_closed, {{"actionId", cmd.actionId}, {"text", approvalError(gate)}});
             return true;
         });
     };

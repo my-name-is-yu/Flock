@@ -226,7 +226,7 @@ void Policy::executeSessionResource(std::string_view environment, const RunRef& 
     }
     std::lock_guard lock(database.mutex);
     database.writeJournal(
-        task, "resource_used",
+        task, JournalKind::resource_used,
         {{"target", resource.target}, {"action", actionName(resource.action)}, {"threadId", run.threadId}, {"runId", run.runId}});
 }
 

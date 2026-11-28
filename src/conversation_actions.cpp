@@ -1117,7 +1117,7 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
             else {
                 task.intent = intent;
                 if (criteriaChanged) task.criteriaProposal = TaskCriteriaProposal{done, messageId};
-                database.writeJournal(task.id, "task_contract_changed", {{"messageId", messageId}});
+                database.writeJournal(task.id, JournalKind::task_contract_changed, {{"messageId", messageId}});
             }
             if (intentChanged) task.sourceMessageCoversFullRequest = false;
             conflicting = true;
@@ -1176,7 +1176,7 @@ void TaskOperations::recordTaskBlocker(TaskData& task, std::string_view reason, 
         task.blocker = RecordedTaskBlocker{publicReason, waitId ? std::optional{waitId} : std::nullopt};
     auto entry = Json{{"blockerReason", publicReason}, {"targetRevision", task.currentRevision.value_or(0)}};
     if (waitId) entry["waitId"] = waitId;
-    database.writeJournal(task.id, reason.empty() ? "blocker_cleared" : "blocker_recorded", entry);
+    database.writeJournal(task.id, reason.empty() ? JournalKind::blocker_cleared : JournalKind::blocker_recorded, entry);
     taskRecords.save(task);
 }
 
@@ -1192,7 +1192,7 @@ void TaskOperations::withdrawTaskQuestion(TaskData& task, Id waitId) {
     taskEvents.event(task, "withdraw/" + std::to_string(waitId), updated);
     waitStorage.clearWait(task, "withdrawn");
     if (task.question) task.question->target = questionTarget(task);
-    database.writeJournal(task.id, "question_withdrawn", {{"waitId", waitId}});
+    database.writeJournal(task.id, JournalKind::question_withdrawn, {{"waitId", waitId}});
     task.state = TaskState::deciding;
     taskRecords.save(task);
 }

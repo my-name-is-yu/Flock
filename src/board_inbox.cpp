@@ -208,7 +208,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?)
     if (target.taskId) {
         auto entry = key(target);
         entry.update(Json{{"decidedBy", actor.id}, {"decidedAt", now}, {"decision", decision}});
-        database.writeJournal(target.taskId, "inbox_decision", entry);
+        database.writeJournal(target.taskId, JournalKind::inbox_decision, entry);
     }
 }
 
