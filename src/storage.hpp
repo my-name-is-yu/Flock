@@ -31,6 +31,7 @@
 #include "task_records.hpp"
 #include "task_routing.hpp"
 #include "task_run_reports.hpp"
+#include "turn_results.hpp"
 #include "wait_storage.hpp"
 #include "web_identity_state.hpp"
 #include "flock/bot_access.hpp"
@@ -50,6 +51,7 @@ struct Store::Impl {
     ConversationMessages conversationMessages{database, permissions, webIdentity};
     ChannelDeliveryQueue channelDeliveries{database, permissions};
     SessionParticipationRecords sessionParticipations{database};
+    TurnResults turnResults{database};
     ChannelConnectors channelConnectors{database, permissions, webIdentity};
     ChannelNotices channelNotices{database, channelConnectors, permissions, journalStorage, channelDeliveries};
     BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
@@ -82,14 +84,16 @@ struct Store::Impl {
                                           conversationMessages,
                                           channelDeliveries,
                                           sessionParticipations,
-                                          channelConnectors};
-    ConversationTools conversationTools{database,           attachments, conversationTurns, conversationMessages, permissions,  path,
-                                        botSettingsStorage, modelCalls,  policyApprovals,   sessionReadStorage,   secretStorage};
+                                          channelConnectors,
+                                          turnResults};
+    ConversationTools conversationTools{database,      attachments,        conversationTurns, conversationMessages, permissions,
+                                        path,          botSettingsStorage, modelCalls,        policyApprovals,      sessionReadStorage,
+                                        secretStorage, turnResults};
     SessionMessageStorage sessionMessageStorage{database,
                                                 botLifecycle,
                                                 conversationTurns,
                                                 conversationMessages,
-                                                conversationTools,
+                                                turnResults,
                                                 gitStorage,
                                                 permissions,
                                                 path,
@@ -132,7 +136,7 @@ struct Store::Impl {
                                                             secretStorage,     taskRecords,
                                                             webIdentity,       permissions,
                                                             conversationTurns, conversationMessages,
-                                                            conversationTools, sessionMessageStorage,
+                                                            turnResults,       sessionMessageStorage,
                                                             botLifecycle,      taskOperations,
                                                             policyApprovals,   sessionParticipations};
     SessionReadStorage sessionReadStorage{database,          secretStorage,  sessionParticipations, permissions, conversationMessages,

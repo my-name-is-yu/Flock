@@ -22,6 +22,7 @@ class AttachmentStorage;
 class ConversationStorage;
 class ConversationMessages;
 class SecretStorage;
+class TurnResults;
 struct ConversationCallContext;
 struct Decision;
 struct ModelCall;
@@ -37,23 +38,21 @@ public:
     ConversationTools(Database& database, AttachmentStorage& attachments, ConversationStorage& conversationTurns,
                       ConversationMessages& conversationMessages, Policy& permissions, const std::filesystem::path& path,
                       BotSettingsStorage& botSettingsStorage, ModelCalls& modelCalls, PolicyApprovals& policyApprovals,
-                      SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage)
+                      SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage, TurnResults& turnResults)
         : database(database), attachments(attachments), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           permissions(permissions), path(path), botSettingsStorage(botSettingsStorage), modelCalls(modelCalls),
-          policyApprovals(policyApprovals), sessionReadStorage(sessionReadStorage), secretStorage(secretStorage) {}
+          policyApprovals(policyApprovals), sessionReadStorage(sessionReadStorage), secretStorage(secretStorage), turnResults(turnResults) {
+    }
 
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
-    void saveTurnResults(Id, int step, const Json& results);
     bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
                       const ConversationCallContext&);
-    void discardPendingResults(Id message);
 private:
     class ToolBatch;
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
-    std::map<std::pair<Id, int>, std::map<std::size_t, ToolCallResult>> unpersistedToolResults;
     Database& database;
     AttachmentStorage& attachments;
     ConversationStorage& conversationTurns;
@@ -65,5 +64,6 @@ private:
     PolicyApprovals& policyApprovals;
     SessionReadStorage& sessionReadStorage;
     SecretStorage& secretStorage;
+    TurnResults& turnResults;
 };
 }

@@ -1,4 +1,5 @@
 #include "flock/bot_access.hpp"
+#include "turn_results.hpp"
 #include "conversation_messages.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/avatar_style.hpp"
@@ -75,7 +76,7 @@ std::optional<BotAvatarChoice> requestedAvatar(const Json& args) {
 }
 
 void ConversationStorage::saveConversationCallResult(const Message& message, int step, Json result) {
-    conversationTools.saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+    turnResults.save(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
 }
 
 CallOutcome ConversationStorage::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,
@@ -127,7 +128,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
             result["delivery"] = "unknown";
             result["error"] = "The host outcome is unknown. Check the target before retrying.";
         }
-        conversationTools.saveTurnResults(message.id, step, Json::array({result}));
+        turnResults.save(message.id, step, Json::array({result}));
         transaction.commit();
         return advance;
     }
@@ -260,7 +261,7 @@ CallOutcome ConversationStorage::executeBotSetup(const Message& message, int ste
     Transaction transaction(database.db);
     policyApprovals.consumePolicyApproval(key);
     if (reply)
-        conversationTools.saveTurnResults(message.id, step, Json::array({result, toolFailure("The Bot setup change did not apply")}));
+        turnResults.save(message.id, step, Json::array({result, toolFailure("The Bot setup change did not apply")}));
     else
         saveConversationCallResult(message, step, std::move(result));
     transaction.commit();
@@ -304,7 +305,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
                                                            ctx.applyBotChange, exhausted ? &ctx.reconcileBotCreation : nullptr);
             Transaction completed(database.db);
             policyApprovals.consumePolicyApproval(key);
-            conversationTools.saveTurnResults(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
+            turnResults.save(id, step, Json::array({Json{{"ok", true}, {"changeId", changeId}, {"status", "applied"}}}));
             completed.commit();
             return advance;
         } catch (const BotCreationUncertain&) {
@@ -341,7 +342,7 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
     const auto saveReplyResult = [&](Json result) {
         if (setup) {
             policyApprovals.consumePolicyApproval(key);
-            conversationTools.saveTurnResults(id, step, Json::array({*setup, result}));
+            turnResults.save(id, step, Json::array({*setup, result}));
         } else {
             saveConversationCallResult(message, step, std::move(result));
         }

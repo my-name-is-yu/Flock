@@ -1,4 +1,5 @@
 #include "store_access.hpp"
+#include "turn_results.hpp"
 #include "t3_connected_environments.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_lifecycle.hpp"
@@ -403,7 +404,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 .next()) {
             auto result = replay();
             if (result.is_null()) result = apply();
-            conversationTools.saveTurnResults(message.id, step, Json::array({result}));
+            turnResults.save(message.id, step, Json::array({result}));
         }
         transaction.commit();
         return true;
@@ -857,9 +858,9 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
             stop = stopSessionParticipation(sessionReadStorage, conversationMessages.actor(message), message.bot, target, SessionExit::left,
                                             message.id);
         } catch (const Conflict& error) {
-            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            turnResults.save(message.id, step, Json::array({toolFailure(error.what())}));
         } catch (const conversation_storage::ToolError& error) {
-            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            turnResults.save(message.id, step, Json::array({toolFailure(error.what())}));
         }
         transaction.commit();
     }
@@ -869,7 +870,7 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     Transaction transaction(database.db);
     auto result = stopped.data();
     result["ok"] = true;
-    conversationTools.saveTurnResults(message.id, step, Json::array({result}));
+    turnResults.save(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
     if (message.principalSource == conversation::PrincipalSource::session && !sessionParticipations.activeOrigin(message) &&
         conversationTurns.isNextTurn(message.id)) {

@@ -1,4 +1,5 @@
 #include "model_calls.hpp"
+#include "turn_results.hpp"
 #include "session_read_storage.hpp"
 #include "flock/policy_action.hpp"
 #include "policy_approvals.hpp"
@@ -46,7 +47,7 @@ bool slotFailed(const Json& slot) {
 }
 }
 
-void ConversationTools::saveTurnResults(Id message, int step, const Json& results) {
+void TurnResults::save(Id message, int step, const Json& results) {
     database.exec(saveStepResult, {results, message, step});
     if (!sqlite3_changes(database.db) || std::ranges::none_of(results, slotFailed)) return;
     auto queued = database.query("SELECT step,json_array_length(decision) FROM conversation_steps"
@@ -59,8 +60,8 @@ void ConversationTools::saveTurnResults(Id message, int step, const Json& result
     for (const auto& [later, calls] : skipped) database.exec(saveStepResult, {Json(std::vector<Json>(calls, notRun)), message, later});
 }
 
-void ConversationTools::discardPendingResults(Id message) {
-    std::erase_if(unpersistedToolResults, [message](const auto& entry) { return entry.first.first == message; });
+void TurnResults::discardUnpersisted(Id message) {
+    std::erase_if(unpersisted, [message](const auto& entry) { return entry.first.first == message; });
 }
 
 namespace {
@@ -312,12 +313,12 @@ private:
     void recordResult(std::size_t slot, ToolCallResult execution) {
         std::lock_guard lock(store_.database.mutex);
         if (!execution) approvalWaiting_ = true;
-        store_.unpersistedToolResults[{message_.id, step_}].insert_or_assign(slot, std::move(execution));
+        store_.turnResults.unpersisted[{message_.id, step_}].insert_or_assign(slot, std::move(execution));
         flushResults();
     }
 
     void flushResults() {
-        auto& unpersisted = store_.unpersistedToolResults;
+        auto& unpersisted = store_.turnResults.unpersisted;
         const auto batch = unpersisted.find({message_.id, step_});
         if (batch == unpersisted.end()) return;
         auto& slots = batch->second;
@@ -348,7 +349,7 @@ private:
         store_.modelCalls.releaseModelCall(store_.modelCalls.takeReservedConversationCall(message_.id));
         const bool complete = std::ranges::none_of(results, [](const auto& result) { return result.is_null(); });
         if (complete) {
-            store_.saveTurnResults(message_.id, step_, results);
+            store_.turnResults.save(message_.id, step_, results);
         } else if (approvalWaiting_) {
             store_.database.exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=?"
                                  " AND EXISTS (SELECT 1 FROM policy_approvals WHERE turn=? AND status='pending')",

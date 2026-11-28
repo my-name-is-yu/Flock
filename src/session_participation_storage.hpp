@@ -14,7 +14,7 @@ class Policy;
 class ConversationStorage;
 class SessionParticipationRecords;
 class ConversationMessages;
-class ConversationTools;
+class TurnResults;
 class SessionMessageStorage;
 
 class Database;
@@ -40,12 +40,12 @@ public:
     SessionParticipationStorage(Database& database, const std::filesystem::path& path, SecretStorage& secretStorage,
                                 TaskRecords& taskRecords, const WebIdentityState& webIdentity, Policy& permissions,
                                 ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
-                                ConversationTools& conversationTools, SessionMessageStorage& sessionMessageStorage,
-                                BotLifecycleStorage& botLifecycle, TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
+                                TurnResults& turnResults, SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
+                                TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
                                 SessionParticipationRecords& sessionParticipations)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
           permissions(permissions), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
-          conversationTools(conversationTools), sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle),
+          turnResults(turnResults), sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle),
           taskOperations(taskOperations), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations) {}
 
     SessionStop stopSessionParticipation(SessionReadStorage&, const Person&, std::string_view bot, const SessionTarget&, SessionExit,
@@ -66,7 +66,7 @@ private:
     Policy& permissions;
     ConversationStorage& conversationTurns;
     ConversationMessages& conversationMessages;
-    ConversationTools& conversationTools;
+    TurnResults& turnResults;
     SessionMessageStorage& sessionMessageStorage;
     BotLifecycleStorage& botLifecycle;
     TaskOperations& taskOperations;

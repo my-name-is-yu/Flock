@@ -16,7 +16,7 @@ class Database;
 class BotLifecycleStorage;
 class ConversationStorage;
 class ConversationMessages;
-class ConversationTools;
+class TurnResults;
 class GitStorage;
 class JournalStorage;
 class OutboxStorage;
@@ -37,14 +37,14 @@ struct Message;
 class SessionMessageStorage {
 public:
     SessionMessageStorage(Database& database, BotLifecycleStorage& botLifecycle, ConversationStorage& conversationTurns,
-                          ConversationMessages& conversationMessages, ConversationTools& conversationTools, GitStorage& gitStorage,
+                          ConversationMessages& conversationMessages, TurnResults& turnResults, GitStorage& gitStorage,
                           const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
                           OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                           SessionParticipationRecords& sessionParticipations, SessionReadStorage& sessionReadStorage,
                           TaskRecords& taskRecords, TaskRunReports& taskRunReports)
         : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
-          conversationTools(conversationTools), gitStorage(gitStorage), permissions(permissions), path(path),
-          journalStorage(journalStorage), outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          turnResults(turnResults), gitStorage(gitStorage), permissions(permissions), path(path), journalStorage(journalStorage),
+          outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), taskRecords(taskRecords),
           taskRunReports(taskRunReports) {}
 
@@ -76,7 +76,7 @@ private:
     BotLifecycleStorage& botLifecycle;
     ConversationStorage& conversationTurns;
     ConversationMessages& conversationMessages;
-    ConversationTools& conversationTools;
+    TurnResults& turnResults;
     GitStorage& gitStorage;
     const Policy& permissions;
     const std::filesystem::path& path;

@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "turn_results.hpp"
 #include "channel_connectors.hpp"
 #include "session_participation_records.hpp"
 #include "channel_delivery_queue.hpp"
@@ -826,12 +827,11 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         std::vector<int> steps;
         while (pending.next()) steps.push_back(static_cast<int>(pending.number(0)));
         for (const auto step : steps)
-            conversationTools.saveTurnResults(
-                message.id, step,
-                Json::array({secretStorage.redactor(message.bot)
-                                 .record({{"ok", false},
-                                          {"delivery", "not_accepted"},
-                                          {"error", "The turn ended before the T3 Session message was sent."}})}));
+            turnResults.save(message.id, step,
+                             Json::array({secretStorage.redactor(message.bot)
+                                              .record({{"ok", false},
+                                                       {"delivery", "not_accepted"},
+                                                       {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
     if (auto woken = wokenTask(message)) {
         settleUndecided(*woken, field(message.routing.at("sessionWake"), "reason"), taskRecords, waitStorage);
@@ -895,7 +895,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
-    conversationTools.discardPendingResults(message.id);
+    turnResults.discardUnpersisted(message.id);
     if (pendingReceipt) sessionMessageStorage.forgetPendingReceipt(message.id);
 }
 

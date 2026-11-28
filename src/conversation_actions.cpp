@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "turn_results.hpp"
 #include "session_participation_records.hpp"
 #include "conversation_messages.hpp"
 #include "flock/t3_session.hpp"
@@ -143,7 +144,7 @@ CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message&
         auto failure = error.details;
         failure["ok"] = false;
         failure["error"] = error.what();
-        conversationTools.saveTurnResults(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(failure))}));
+        turnResults.save(id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(failure))}));
     };
     const auto& args = decision.args;
     const auto admit = [&](Id taskId, Id expected, const AssignedRun* expectedRun) {
@@ -180,14 +181,14 @@ CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message&
                                     "AND result IS NULL AND effect IS NOT NULL",
                                     {id, step});
         if (saved.next()) {
-            conversationTools.saveTurnResults(id, step,
-                                              Json::array({Json{{"ok", false},
-                                                                {"taskId", saved.json(0).at("taskId")},
-                                                                {"delivery", "unknown"},
-                                                                {"error", "Flock restarted while sending this, so T3 may have received it. "
-                                                                          "Check the Session before sending it again"}}}));
+            turnResults.save(id, step,
+                             Json::array({Json{{"ok", false},
+                                               {"taskId", saved.json(0).at("taskId")},
+                                               {"delivery", "unknown"},
+                                               {"error", "Flock restarted while sending this, so T3 may have received it. "
+                                                         "Check the Session before sending it again"}}}));
         } else if (!offered) {
-            conversationTools.saveTurnResults(id, step, Json::array({toolFailure("Session control was not offered for this turn")}));
+            turnResults.save(id, step, Json::array({toolFailure("Session control was not offered for this turn")}));
         } else {
             try {
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
@@ -264,7 +265,7 @@ CallOutcome SessionMessageStorage::runSessionEffect(const conversation::Message&
     if (!database.query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, step}).next())
         return stop;
     if (outcome.value("ok", false)) journalStorage.journalInterrupt(effect->taskId, {id, step, effect->run});
-    conversationTools.saveTurnResults(id, step, Json::array({outcome}));
+    turnResults.save(id, step, Json::array({outcome}));
     transaction.commit();
     return advance;
 }
@@ -516,8 +517,7 @@ void requireSendable(const ConversationStorage& turns, const TaskData& task, Id 
 }
 
 void SessionMessageStorage::saveSessionSendStep(const SessionSend& send, Json result) {
-    conversationTools.saveTurnResults(send.message.id, send.step,
-                                      Json::array({secretStorage.redactor(send.message.bot).record(std::move(result))}));
+    turnResults.save(send.message.id, send.step, Json::array({secretStorage.redactor(send.message.bot).record(std::move(result))}));
 }
 
 void SessionMessageStorage::addressSessionSend(SessionSend& send) {
@@ -815,8 +815,7 @@ CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Mess
     } catch (const std::exception& error) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        if (conversationTurns.authorizeTurn(message))
-            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+        if (conversationTurns.authorizeTurn(message)) turnResults.save(message.id, step, Json::array({toolFailure(error.what())}));
         transaction.commit();
         return advance;
     }
@@ -827,7 +826,7 @@ CallOutcome SessionMessageStorage::cancelDestinationRun(const conversation::Mess
         return stop;
     }
     const auto save = [&](Json result) {
-        conversationTools.saveTurnResults(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
+        turnResults.save(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
     };
     const auto fail = [&](const ToolError& error) {
         auto result = error.details;

@@ -31,6 +31,7 @@ class ChannelConnectors;
 class ChannelDeliveryQueue;
 class ConversationMessages;
 class ConversationTools;
+class TurnResults;
 class GitStorage;
 class JournalStorage;
 class LocalMachineStorage;
@@ -87,7 +88,7 @@ public:
                         SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
                         TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
                         WebIdentityState& webIdentity, ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
-                        SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors)
+                        SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
@@ -96,7 +97,8 @@ public:
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
           waitStorage(waitStorage), webIdentity(webIdentity), conversationMessages(conversationMessages),
-          channelDeliveries(channelDeliveries), sessionParticipations(sessionParticipations), channelConnectors(channelConnectors) {}
+          channelDeliveries(channelDeliveries), sessionParticipations(sessionParticipations), channelConnectors(channelConnectors),
+          turnResults(turnResults) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -184,5 +186,6 @@ private:
     ChannelDeliveryQueue& channelDeliveries;
     SessionParticipationRecords& sessionParticipations;
     ChannelConnectors& channelConnectors;
+    TurnResults& turnResults;
 };
 }
