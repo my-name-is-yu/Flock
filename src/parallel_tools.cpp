@@ -94,8 +94,9 @@ ProviderState providerState(const BotTools& settings, const Decision& call) {
 class ConversationTools::ToolBatch {
 public:
     ToolBatch(ConversationTools& store, const conversation::Message& message, const ToolContext& tools, int step,
-              const std::vector<ModelCall>& calls, const ConversationCallContext& ctx)
-        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx), blocked_(calls.size()) {}
+              const std::vector<ModelCall>& calls, const ConversationCallContext& ctx, const StoreRead& readStore)
+        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx), readStore_(readStore),
+          blocked_(calls.size()) {}
 
     bool run() {
         std::vector<tool_batch::Candidate> pending;
@@ -138,6 +139,7 @@ private:
     int step_;
     const std::vector<ModelCall>& calls_;
     const ConversationCallContext& ctx_;
+    const StoreRead& readStore_;
     std::vector<bool> blocked_;
     bool approvalWaiting_ = false;
 
@@ -254,9 +256,7 @@ private:
         std::lock_guard lock(store_.database.mutex);
         Transaction transaction(store_.database.db);
         if (authorize()) {
-            auto result =
-                store_.conversationTurns.applyLocalConversationCall(message_, step_, calls_[slot], callKey(slot), ctx_.clock(),
-                                                                    ApprovalWait::defer, nullptr, TaskDestinations{}, tools_.settings);
+            auto result = readStore_(calls_[slot], callKey(slot));
             if (result)
                 saveSlot(slot, store_.secretStorage.redactor(message_.bot).record(std::move(*result)));
             else
@@ -361,7 +361,7 @@ private:
 };
 
 bool ConversationTools::runToolBatch(const conversation::Message& message, const ToolContext& tools, int step,
-                                     const std::vector<ModelCall>& calls, const ConversationCallContext& ctx) {
-    return ToolBatch(*this, message, tools, step, calls, ctx).run();
+                                     const std::vector<ModelCall>& calls, const ConversationCallContext& ctx, const StoreRead& readStore) {
+    return ToolBatch(*this, message, tools, step, calls, ctx, readStore).run();
 }
 }

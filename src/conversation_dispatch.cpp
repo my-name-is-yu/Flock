@@ -20,6 +20,7 @@
 #include "git_storage.hpp"
 #include "conversation_tools.hpp"
 #include "conversation_turns.hpp"
+#include "turn_runner.hpp"
 #include "channel_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
@@ -75,13 +76,12 @@ std::optional<BotAvatarChoice> requestedAvatar(const Json& args) {
 }
 }
 
-void ConversationStorage::saveConversationCallResult(const Message& message, int step, Json result) {
+void TurnRunner::saveConversationCallResult(const Message& message, int step, Json result) {
     turnResults.save(message.id, step, Json::array({secretStorage.redactor(message.bot).record(std::move(result))}));
 }
 
-CallOutcome ConversationStorage::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,
-                                                         std::string_view effectType, const BotTools& settings,
-                                                         const ConversationCallContext& ctx) {
+CallOutcome TurnRunner::executeConversationStep(const Message& message, int step, const std::vector<ModelCall>& calls,
+                                                std::string_view effectType, const BotTools& settings, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto& decision = calls.front();
     const auto& tool = decision.tool;
@@ -93,7 +93,8 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
         try {
             std::lock_guard lock(database.mutex);
             Transaction transaction(database.db);
-            destinationTask = !ownTask(conversation_storage::identifier(decision.args, "taskId", true), message).runResults().empty();
+            destinationTask =
+                !conversationTurns.ownTask(conversation_storage::identifier(decision.args, "taskId", true), message).runResults().empty();
             transaction.commit();
         } catch (const ToolError&) {
         }
@@ -106,7 +107,11 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     if (effectType == "array" || calls.size() > 1 || isBotTool(tool) ||
         tool_batch::conversationRead(tool) != tool_batch::ConversationRead::none) {
         const ToolContext tools{message.bot, message.id, settings};
-        return conversationTools.runToolBatch(message, tools, step, calls, ctx) ? advance : stop;
+        const auto readStore = [&](const Decision& call, std::string_view key) {
+            return applyLocalConversationCall(message, step, call, key, ctx.clock(), ApprovalWait::defer, nullptr, TaskDestinations{},
+                                              settings);
+        };
+        return conversationTools.runToolBatch(message, tools, step, calls, ctx, readStore) ? advance : stop;
     }
     const bool offered = decision.rejection.empty();
     if (offered || effectType == "object") {
@@ -119,7 +124,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     if (!offered) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        if (!authorizeTurn(message)) {
+        if (!conversationTurns.authorizeTurn(message)) {
             transaction.commit();
             return stop;
         }
@@ -152,7 +157,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
         if (ctx.shutdown.stop_requested()) return stop;
-        const bool allowed = authorizeTurn(message);
+        const bool allowed = conversationTurns.authorizeTurn(message);
         transaction.commit();
         if (!allowed) return stop;
     }
@@ -162,7 +167,7 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
 
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
-    if (!authorizeTurn(message)) {
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
@@ -171,15 +176,14 @@ CallOutcome ConversationStorage::executeConversationStep(const Message& message,
     return advance;
 }
 
-CallOutcome ConversationStorage::executeMessageBot(const Message& message, int step, const Decision& decision,
-                                                   const ConversationCallContext& ctx) {
+CallOutcome TurnRunner::executeMessageBot(const Message& message, int step, const Decision& decision, const ConversationCallContext& ctx) {
     using enum CallOutcome;
     // Each hop from the person's message counts, so two Bots cannot keep messaging each other.
     constexpr Id maxDepth = 6;
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
     if (ctx.shutdown.stop_requested()) return stop;
-    if (!authorizeTurn(message)) {
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
@@ -214,7 +218,8 @@ CallOutcome ConversationStorage::executeMessageBot(const Message& message, int s
             const auto routing = ctx.intake(bot, body);
             if (routing.botId != bot) throw Conflict("The destination Bot is unavailable");
             const ConversationBotMessageEntry origin{message.bot, message.routing.at("config").value("botDisplayName", message.bot), depth};
-            const auto id = enqueueConversation(actor, routing, message.principalSource, key, body, 0, nullptr, nullptr, &origin);
+            const auto id =
+                conversationTurns.enqueueConversation(actor, routing, message.principalSource, key, body, 0, nullptr, nullptr, &origin);
             result = {{"ok", true}, {"effect", "sent"}, {"messageId", id}, {"depth", depth}};
         }
     } catch (const Conflict& error) {
@@ -227,15 +232,15 @@ CallOutcome ConversationStorage::executeMessageBot(const Message& message, int s
     return advance;
 }
 
-CallOutcome ConversationStorage::executeBotSetup(const Message& message, int step, const Decision& decision, std::string_view key,
-                                                 const ConversationCallContext& ctx, const Decision* reply) {
+CallOutcome TurnRunner::executeBotSetup(const Message& message, int step, const Decision& decision, std::string_view key,
+                                        const ConversationCallContext& ctx, const Decision* reply) {
     using enum CallOutcome;
     const auto catalog = botSetup.modelCatalog(decision.args);
     std::lock_guard lock(database.mutex);
     Json result;
     try {
         Transaction authorization(database.db);
-        if (!authorizeTurn(message) || ctx.shutdown.stop_requested()) {
+        if (!conversationTurns.authorizeTurn(message) || ctx.shutdown.stop_requested()) {
             authorization.commit();
             return stop;
         }
@@ -268,8 +273,8 @@ CallOutcome ConversationStorage::executeBotSetup(const Message& message, int ste
     return advance;
 }
 
-CallOutcome ConversationStorage::executeConversationBotChange(const Message& message, int step, const Decision& decision,
-                                                              std::string_view key, const ConversationCallContext& ctx) {
+CallOutcome TurnRunner::executeConversationBotChange(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                     const ConversationCallContext& ctx) {
     using enum CallOutcome;
     const auto id = message.id;
     Json result;
@@ -288,7 +293,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             const auto payload = Json::array({decision.tool, args});
             {
                 Transaction authorization(database.db);
-                if (!authorizeTurn(message) || ctx.shutdown.stop_requested()) {
+                if (!conversationTurns.authorizeTurn(message) || ctx.shutdown.stop_requested()) {
                     authorization.commit();
                     return stop;
                 }
@@ -309,7 +314,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             completed.commit();
             return advance;
         } catch (const BotCreationUncertain&) {
-            deferConversation(id, ctx.clock());
+            conversationTurns.deferConversation(id, ctx.clock());
             return stop;
         } catch (const Conflict& error) {
             result = toolFailure(error.what());
@@ -319,7 +324,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
     }
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
-    if (!authorizeTurn(message)) {
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
@@ -329,13 +334,13 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
     return advance;
 }
 
-CallOutcome ConversationStorage::executeConversationReply(const Message& message, int step, const Decision& decision, std::string_view key,
-                                                          const std::function<Seconds()>& clock, const Json* setup) {
+CallOutcome TurnRunner::executeConversationReply(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                 const std::function<Seconds()>& clock, const Json* setup) {
     using enum CallOutcome;
     const auto id = message.id;
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
-    if (!authorizeTurn(message)) {
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
@@ -358,7 +363,8 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
             if (continuesQuestion->get<bool>()) {
                 if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
                 const auto taskId = message.question->taskId;
-                if (const auto error = questionAnswerError(taskRecords.load(taskId), message, waitStorage.currentWait(taskId)))
+                if (const auto error =
+                        conversationTurns.questionAnswerError(taskRecords.load(taskId), message, waitStorage.currentWait(taskId)))
                     throw ToolError(error);
                 question = &*message.question;
             }
@@ -385,7 +391,7 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
             if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
         }
         saveReplyResult({{"ok", true}});
-        finishTurn(message, std::move(reply), suggestions, ConversationReplyRoute::reply, question);
+        conversationTurns.finishTurn(message, std::move(reply), suggestions, ConversationReplyRoute::reply, question);
         transaction.commit();
         return finished;
     } catch (const ToolError& error) {
@@ -395,7 +401,7 @@ CallOutcome ConversationStorage::executeConversationReply(const Message& message
     return advance;
 }
 
-std::optional<Resource> ConversationStorage::conversationCallResource(const Message& message, const Decision& decision) {
+std::optional<Resource> TurnRunner::conversationCallResource(const Message& message, const Decision& decision) {
     const auto& tool = decision.tool;
     if (tool == "create_schedule" || tool == "create_reminder" || tool == "create_trigger" || tool == "remove_schedule")
         return Resource{Action::automation_change, message.bot};
@@ -409,9 +415,8 @@ std::optional<Resource> ConversationStorage::conversationCallResource(const Mess
     return std::nullopt;
 }
 
-CallOutcome ConversationStorage::executeLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                                              std::string_view key, const ConversationCallContext& ctx,
-                                                              const BotTools& settings) {
+CallOutcome TurnRunner::executeLocalConversationCall(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                     const ConversationCallContext& ctx, const BotTools& settings) {
     using enum CallOutcome;
     Json result;
     std::optional<WorkSession> selectedSession;
@@ -432,7 +437,7 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
                                                       decision.tool == "change_task" ? &decision.args : nullptr);
     std::lock_guard lock(database.mutex);
     Transaction transaction(database.db);
-    if (!authorizeTurn(message)) {
+    if (!conversationTurns.authorizeTurn(message)) {
         transaction.commit();
         return stop;
     }
@@ -449,10 +454,9 @@ CallOutcome ConversationStorage::executeLocalConversationCall(const Message& mes
     return completed ? advance : waiting;
 }
 
-std::optional<Json> ConversationStorage::applyLocalConversationCall(const Message& message, int step, const Decision& decision,
-                                                                    std::string_view key, Seconds now, ApprovalWait waitMode,
-                                                                    const WorkSession* selectedSession, const TaskDestinations& linked,
-                                                                    const BotTools& settings) {
+std::optional<Json> TurnRunner::applyLocalConversationCall(const Message& message, int step, const Decision& decision, std::string_view key,
+                                                           Seconds now, ApprovalWait waitMode, const WorkSession* selectedSession,
+                                                           const TaskDestinations& linked, const BotTools& settings) {
     if (const auto resource = conversationCallResource(message, decision)) {
         using enum Action;
         const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;

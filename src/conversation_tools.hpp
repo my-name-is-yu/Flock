@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -45,8 +46,10 @@ public:
     }
 
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
+    // Runs one of the batch's calls that reads the conversation's own records.
+    using StoreRead = std::function<std::optional<Json>(const Decision&, std::string_view key)>;
     bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
-                      const ConversationCallContext&);
+                      const ConversationCallContext&, const StoreRead&);
 private:
     class ToolBatch;
     Json workspaceTool(const ToolContext&, const Decision&);

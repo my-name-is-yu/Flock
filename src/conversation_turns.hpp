@@ -17,61 +17,32 @@
 
 namespace flockv0 {
 class Policy;
-class BotAccess;
 
 class Database;
 class AttachmentStorage;
-class AutomationStorage;
 class BotLifecycleStorage;
-class BotSettingsStorage;
-class BotSetupStorage;
 class ChannelStorage;
-class ConversationContextStorage;
 class ChannelConnectors;
 class ChannelDeliveryQueue;
 class ConversationMessages;
-class ConversationTools;
 class SessionSendReceipts;
 class TurnResults;
 class GitStorage;
 class JournalStorage;
-class LocalMachineStorage;
-class MemoryStorage;
 class ModelCalls;
-class PolicyApprovals;
 class SecretStorage;
-class SessionMessageStorage;
 class SessionParticipationRecords;
-class SessionParticipationStorage;
-class SessionReadStorage;
-class TaskOperations;
 class TaskRecords;
-class TaskRouting;
 class WaitStorage;
-struct WebIdentityState;
-class GitHost;
-class Model;
-class T3;
-enum class ApprovalWait;
-enum class CallOutcome;
 enum class ConversationReplyRoute;
-enum class SessionExit;
-struct BotTools;
-struct ConversationCallContext;
 struct ConversationBotMessageEntry;
 struct ConversationWakeEntry;
 struct ConversationInvitationEntry;
-struct Decision;
-struct TaskDestinations;
-struct ModelCall;
-struct ModelImage;
 struct Person;
-struct Resource;
 struct SessionOrigin;
 struct TaskData;
 struct VerifiedChannelMessage;
 struct Wait;
-struct WorkSession;
 namespace conversation {
 struct Message;
 struct QuestionAnchor;
@@ -80,25 +51,15 @@ enum class PrincipalSource;
 
 class ConversationStorage {
 public:
-    ConversationStorage(Database& database, AttachmentStorage& attachments, AutomationStorage& automationStorage,
-                        BotLifecycleStorage& botLifecycle, BotAccess& botAccess, BotSettingsStorage& botSettingsStorage,
-                        BotSetupStorage& botSetup, ChannelStorage& channelStorage, ConversationContextStorage& conversationContextStorage,
-                        ConversationTools& conversationTools, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
-                        LocalMachineStorage& localMachineStorage, MemoryStorage& memoryStorage, ModelCalls& modelCalls,
-                        PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionMessageStorage& sessionMessageStorage,
-                        SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
-                        TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-                        WebIdentityState& webIdentity, ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
+    ConversationStorage(Database& database, AttachmentStorage& attachments, BotLifecycleStorage& botLifecycle,
+                        ChannelStorage& channelStorage, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
+                        ModelCalls& modelCalls, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
+                        ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
                         SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults,
                         SessionSendReceipts& sessionSendReceipts)
-        : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
-          botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
-          conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
-          permissions(permissions), journalStorage(journalStorage), localMachineStorage(localMachineStorage), memoryStorage(memoryStorage),
-          modelCalls(modelCalls), policyApprovals(policyApprovals), secretStorage(secretStorage),
-          sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
-          sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage), webIdentity(webIdentity), conversationMessages(conversationMessages),
+        : database(database), attachments(attachments), botLifecycle(botLifecycle), channelStorage(channelStorage), gitStorage(gitStorage),
+          permissions(permissions), journalStorage(journalStorage), modelCalls(modelCalls), secretStorage(secretStorage),
+          taskRecords(taskRecords), waitStorage(waitStorage), conversationMessages(conversationMessages),
           channelDeliveries(channelDeliveries), sessionParticipations(sessionParticipations), channelConnectors(channelConnectors),
           turnResults(turnResults), sessionSendReceipts(sessionSendReceipts) {}
 
@@ -114,76 +75,30 @@ public:
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;
-    void runTurn(Id messageId, Model&, T3&, const SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*,
-                 const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&, const PeerResolver&, std::stop_token);
-    std::optional<Json> applyLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                                   Seconds now, ApprovalWait, const WorkSession* selectedSession,
-                                                   const TaskDestinations& linked, const BotTools&);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
     // The task this wake reports on, while it waits for the conversation to decide what happens next.
     std::optional<TaskData> wokenTask(const conversation::Message&) const;
-    Json applyWokenTaskDecision(const conversation::Message&, const Decision&, Seconds now);
-    struct WorkLearningSource {
-        Id report;
-        std::string runId;
-    };
-    // The finished Run whose report the Bot may learn from when it completes the woken task.
-    std::optional<WorkLearningSource> wokenLearningSource(const TaskData&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, ConversationReplyRoute route,
                     const conversation::QuestionAnchor* question = nullptr);
     TaskData ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;
     bool conversationPending(std::string_view bot) const;
-private:
     void deferConversation(Id, Seconds now);
-    CallOutcome executeConversationStep(const conversation::Message&, int step, const std::vector<ModelCall>&, std::string_view effectType,
-                                        const BotTools&, const ConversationCallContext&);
-    CallOutcome executeBotSetup(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                const ConversationCallContext&, const Decision* reply = nullptr);
-    CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                             const ConversationCallContext&);
-    CallOutcome executeMessageBot(const conversation::Message&, int step, const Decision&, const ConversationCallContext&);
-    CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                         const std::function<Seconds()>&, const Json* setup = nullptr);
-    CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&, std::string_view key,
-                                             const ConversationCallContext&, const BotTools&);
-    std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
-    void saveConversationCallResult(const conversation::Message&, int step, Json result);
     const char* questionAnswerError(const TaskData& task, const conversation::Message&, const std::optional<Wait>&) const;
-    Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
-    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
-                   const TaskDestinations& linked);
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now, const WorkSession* selectedSession,
-                       const TaskDestinations& linked, const BotTools&);
-    std::map<Id, ConversationModelCheckpoint> conversationCheckpoints;
+private:
     Database& database;
     AttachmentStorage& attachments;
-    AutomationStorage& automationStorage;
     BotLifecycleStorage& botLifecycle;
-    BotAccess& botAccess;
-    BotSettingsStorage& botSettingsStorage;
-    BotSetupStorage& botSetup;
     ChannelStorage& channelStorage;
-    ConversationContextStorage& conversationContextStorage;
-    ConversationTools& conversationTools;
     GitStorage& gitStorage;
     Policy& permissions;
     JournalStorage& journalStorage;
-    LocalMachineStorage& localMachineStorage;
-    MemoryStorage& memoryStorage;
     ModelCalls& modelCalls;
-    PolicyApprovals& policyApprovals;
     SecretStorage& secretStorage;
-    SessionMessageStorage& sessionMessageStorage;
-    SessionParticipationStorage& sessionParticipationStorage;
-    SessionReadStorage& sessionReadStorage;
-    TaskOperations& taskOperations;
     TaskRecords& taskRecords;
-    TaskRouting& taskRouting;
     WaitStorage& waitStorage;
-    WebIdentityState& webIdentity;
     ConversationMessages& conversationMessages;
     ChannelDeliveryQueue& channelDeliveries;
     SessionParticipationRecords& sessionParticipations;

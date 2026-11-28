@@ -12,6 +12,7 @@
 #include "conversation_messages.hpp"
 #include "conversation_tools.hpp"
 #include "conversation_turns.hpp"
+#include "turn_runner.hpp"
 #include "database.hpp"
 #include "git_storage.hpp"
 #include "inbox_storage.hpp"
@@ -57,38 +58,37 @@ struct Store::Impl {
     ChannelConnectors channelConnectors{database, permissions, webIdentity};
     ChannelNotices channelNotices{database, channelConnectors, permissions, journalStorage, channelDeliveries};
     BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
-    ConversationStorage conversationTurns{database,
-                                          attachments,
-                                          automationStorage,
-                                          botLifecycle,
-                                          botAccess,
-                                          botSettingsStorage,
-                                          botSetup,
-                                          channelStorage,
-                                          conversationContextStorage,
-                                          conversationTools,
-                                          gitStorage,
-                                          permissions,
-                                          journalStorage,
-                                          localMachineStorage,
-                                          memoryStorage,
-                                          modelCalls,
-                                          policyApprovals,
-                                          secretStorage,
-                                          sessionMessageStorage,
-                                          sessionParticipationStorage,
-                                          sessionReadStorage,
-                                          taskOperations,
-                                          taskRecords,
-                                          taskRouting,
-                                          waitStorage,
-                                          webIdentity,
-                                          conversationMessages,
-                                          channelDeliveries,
-                                          sessionParticipations,
-                                          channelConnectors,
-                                          turnResults,
-                                          sessionSendReceipts};
+    ConversationStorage conversationTurns{database,    attachments,          botLifecycle,      channelStorage,        gitStorage,
+                                          permissions, journalStorage,       modelCalls,        secretStorage,         taskRecords,
+                                          waitStorage, conversationMessages, channelDeliveries, sessionParticipations, channelConnectors,
+                                          turnResults, sessionSendReceipts};
+    TurnRunner turnRunner{database,
+                          attachments,
+                          automationStorage,
+                          botLifecycle,
+                          botAccess,
+                          botSettingsStorage,
+                          botSetup,
+                          channelStorage,
+                          conversationContextStorage,
+                          conversationTools,
+                          gitStorage,
+                          permissions,
+                          localMachineStorage,
+                          memoryStorage,
+                          modelCalls,
+                          policyApprovals,
+                          secretStorage,
+                          sessionMessageStorage,
+                          sessionParticipationStorage,
+                          sessionReadStorage,
+                          taskOperations,
+                          taskRecords,
+                          taskRouting,
+                          waitStorage,
+                          conversationMessages,
+                          turnResults,
+                          conversationTurns};
     ConversationTools conversationTools{database,      attachments,        conversationTurns, conversationMessages, permissions,
                                         path,          botSettingsStorage, modelCalls,        policyApprovals,      sessionReadStorage,
                                         secretStorage, turnResults};
