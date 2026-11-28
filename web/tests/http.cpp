@@ -13,6 +13,7 @@
 #include "../change_feed.hpp"
 #include "../../tests/fake_git.hpp"
 #include "flock/base64.hpp"
+#include "flock/limits.hpp"
 #include "flock/memory_automation.hpp"
 #include "flock/person.hpp"
 #include "flock/bot_access.hpp"
@@ -168,7 +169,7 @@ std::string screenshotPng(std::size_t size) {
 }
 
 void messageAttachmentLimits(const std::filesystem::path& path) {
-    constexpr std::size_t imageLimit = 2 * 1024 * 1024;
+    using namespace limits::messages;
     constexpr auto endpoint = "/api/messages";
     Store store(path);
     const auto server = startWeb(store, 0, callbacks());
@@ -182,13 +183,14 @@ void messageAttachmentLimits(const std::filesystem::path& path) {
     };
 
     auto large = small;
-    large["dataBase64"] = screenshotPng(imageLimit);
-    const auto four = Json::array({large, large, large, large});
-    const auto receipt = submit("four-screenshots", four, 201);
-    check(submit("four-screenshots", four, 201) == receipt, "large attachments changed the message receipt on retry");
+    large["dataBase64"] = screenshotPng(2 * 1024 * 1024);
+    const auto audio = Json{{"name", "clip.mp3"}, {"mimeType", "audio/mpeg"}, {"dataBase64", "SUQzAA=="}};
+    const auto attachments = Json::array({large, large, large, large, small, small, small, audio});
+    const auto receipt = submit("eight-files", attachments, 201);
+    check(submit("eight-files", attachments, 201) == receipt, "large attachments changed the message receipt on retry");
 
-    submit("too-many", Json::array({small, small, small, small, small}), 409);
-    large["dataBase64"] = screenshotPng(imageLimit + 1);
+    submit("too-many", Json::array_t(maxAttachments + 1, small), 409);
+    large["dataBase64"] = screenshotPng(maxImageBytes + 1);
     submit("too-large", Json::array({large}), 409);
     auto mismatch = small;
     mismatch["mimeType"] = "image/jpeg";
@@ -197,23 +199,25 @@ void messageAttachmentLimits(const std::filesystem::path& path) {
     invalidBase64["dataBase64"] = "!!!!";
     submit("bad-encoding", Json::array({invalidBase64}), 409);
 
-    std::string audio(64 * 1024 + 1, 'x');
-    audio.replace(0, 3, "ID3");
-    submit("oversized-audio", Json::array({{{"name", "clip.mp3"}, {"mimeType", "audio/mpeg"}, {"dataBase64", encodeBase64(audio)}}}), 409);
+    const auto oversizedFile = std::string((maxFileBytes / 3 + 1) * 4, 'A');
+    submit("oversized-file", Json::array({{{"name", "large.bin"}, {"mimeType", "application/octet-stream"}, {"dataBase64", oversizedFile}}}), 409);
 
-    auto oversized = message("oversized-request", four).dump();
-    oversized.append(256 * 1024, ' ');
     auto headers = browser.headers();
     headers.emplace("Expect", "100-continue");
-    const auto response = browser.client.Post(endpoint, headers, oversized, "application/json");
+    bool sentBody = false;
+    const auto response = browser.client.Post(
+        endpoint, headers, maxEncodedFilesBytes + 1024 * 1024,
+        [&](std::size_t, std::size_t, httplib::DataSink&) { sentBody = true; return false; }, "application/json");
     Browser::checked(response, 413);
+    check(!sentBody, "An oversized attachment request attempted to send its body");
 
     const auto view = browser.get("/api/view?bot=release");
-    check(view.at("limits") == Json{{"messageBytes", 16'000}, {"waitAnswerBytes", 8'000}, {"attachments", 4}},
+    check(view.at("limits") == Json{{"messageBytes", maxBodyBytes}, {"waitAnswerBytes", maxWaitAnswerBytes}, {"attachments", maxAttachments}},
           "The Bot view did not publish the composer limits");
     const auto& events = view.at("events");
-    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") && events[0].at("data").at("imageAttachmentCount") == 4,
-          "HTTP attachment intake did not save exactly four screenshots on one message");
+    check(events.size() == 1 && events[0].at("id") == receipt.at("messageId") &&
+              events[0].at("data").at("imageAttachmentCount") == 7 && events[0].at("data").at("attachmentCount") == 8,
+          "HTTP attachment intake did not save exactly seven images and one audio file on one message");
     check(!events[0].at("data").contains("attachments"), "HTTP projection exposed attachment payloads");
 }
 
