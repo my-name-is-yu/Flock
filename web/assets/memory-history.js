@@ -1,35 +1,36 @@
-import { element } from './settings-ui.js';
+import { node } from './dom.js';
+
 
 const date = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 
 export function createMemoryHistory(readPage, openConversationEvent, sessionLink, botName) {
-  const card = element('section', '', 'settings-card memory-history');
-  const heading = element('h2', 'Memory history', 'settings-card-label');
-  const list = element('ol', '', 'memory-history-list');
-  const status = element('p', '', 'settings-card-feedback');
+  const card = node('section', 'settings-card memory-history');
+  const heading = node('h2', 'settings-card-label', 'Memory history');
+  const list = node('ol', 'memory-history-list');
+  const status = node('p', 'settings-card-feedback');
   status.setAttribute('role', 'status');
-  const more = element('button', 'Show earlier changes', 'text-button memory-history-more');
+  const more = node('button', 'text-button memory-history-more', 'Show earlier changes');
   more.type = 'button';
   more.hidden = true;
   let before = 0;
 
   function eventButton(label, eventId) {
-    const button = element('button', label, 'text-button');
+    const button = node('button', 'text-button', label);
     button.type = 'button';
     button.addEventListener('click', () => openConversationEvent(eventId));
     return button;
   }
 
   function revisionRow({ author, source, learning, revertedFrom, createdAt, diffSummary }) {
-    const item = element('li');
+    const item = node('li');
     const label = source ? 'Learned' : revertedFrom ? 'Undid a change' : 'Edited memory';
     const editor = author.startsWith('bot:') ? botName : author.startsWith('person:') ? author.slice('person:'.length) : author;
-    item.append(element('strong', label), element('span', ` · ${editor} · ${date.format(createdAt * 1000)}`, 'memory-history-meta'));
-    if (learning?.added.length) item.append(element('p', learning.added.map((fact) => `“${fact}”`).join(' · ')));
-    if (learning?.removed.length) item.append(element('p', 'Replaced · ' + learning.removed.map((fact) => `“${fact}”`).join(' · ')));
-    item.append(element('p', diffSummary, 'memory-history-meta'));
+    item.append(node('strong', null, label), node('span', 'memory-history-meta', ` · ${editor} · ${date.format(createdAt * 1000)}`));
+    if (learning?.added.length) item.append(node('p', null, learning.added.map((fact) => `“${fact}”`).join(' · ')));
+    if (learning?.removed.length) item.append(node('p', null, 'Replaced · ' + learning.removed.map((fact) => `“${fact}”`).join(' · ')));
+    item.append(node('p', 'memory-history-meta', diffSummary));
     if (!learning) return item;
-    const provenance = element('p', 'From ', 'memory-history-source');
+    const provenance = node('p', 'memory-history-source', 'From ');
     provenance.append(eventButton(learning.taskTitle || 'Source request', learning.requestEventId),
       ' · ', eventButton('Session report', learning.reportEventId));
     const session = sessionLink(learning.run);

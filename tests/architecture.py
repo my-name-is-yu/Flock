@@ -61,6 +61,15 @@ class ArchitectureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("app/main.cpp: name environment variables in flock/environment.hpp", result.stderr)
 
+    def test_pages_share_one_element_helper(self):
+        define = "export function node(tag, className, text) {}\n"
+        self.assertEqual(self.check({"web/assets/dom.js": define}).returncode, 0)
+        for copy in ("function node(tag, className, text) {}\n", "function element(tag, text, className) {}\n"):
+            with self.subTest(copy=copy):
+                result = self.check({"web/assets/dom.js": define, "web/assets/settings.js": copy})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("web/assets/settings.js: create elements with node from dom.js", result.stderr)
+
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"
         self.assertEqual(self.check({"tests/support.hpp": define}).returncode, 0)

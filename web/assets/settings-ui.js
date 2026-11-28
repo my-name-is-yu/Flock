@@ -1,3 +1,5 @@
+import { node } from './dom.js';
+
 export function settingsNavigation(conversations = '/') {
   const nav = document.querySelector('.settings-nav');
   nav.innerHTML = `
@@ -28,18 +30,11 @@ export function setSettingsStatus(statusEl, text, isError = false) {
   statusEl.classList.toggle('error', Boolean(isError && text));
 }
 
-export function element(tag, text, className) {
-  const node = document.createElement(tag);
-  if (text) node.textContent = text;
-  if (className) node.className = className;
-  return node;
-}
-
 export function rowLabel(title, ...detail) {
-  const label = element('div', '', 'row-label');
-  label.append(element('strong', title));
+  const label = node('div', 'row-label');
+  label.append(node('strong', null, title));
   if (detail.length) {
-    const description = element('small');
+    const description = node('small');
     description.append(...detail);
     label.append(description);
   }
@@ -47,14 +42,14 @@ export function rowLabel(title, ...detail) {
 }
 
 export function row(list, content) {
-  const item = element('div', '', 'settings-row');
+  const item = node('div', 'settings-row');
   item.append(content);
   (typeof list === 'string' ? document.getElementById(list) : list).append(item);
   return item;
 }
 
 export function actionButton(item, label, onclick, primary = false) {
-  const control = element('button', label, primary ? 'button primary' : 'button');
+  const control = node('button', primary ? 'button primary' : 'button', label);
   control.type = 'button';
   control.onclick = onclick;
   item.append(control);

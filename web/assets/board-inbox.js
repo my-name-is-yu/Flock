@@ -1,5 +1,6 @@
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
 import { actionLabel, approvalSummary } from './action-labels.mjs';
+import { node } from './dom.js';
 
 // One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
 export const pendingKindLabels = {
@@ -36,14 +37,8 @@ export function taskWaitDecision(botId, task) {
     targetGeneration: task.generation, request: task.request, prompt: wait.text, choices: wait.choices ?? [] };
 }
 
-function element(tag, text, className) {
-  const node = document.createElement(tag);
-  if (text) node.textContent = text;
-  if (className) node.className = className;
-  return node;
-}
 function labeled(text, control) {
-  const label = element('label', text);
+  const label = node('label', null, text);
   label.append(control);
   return label;
 }
@@ -74,24 +69,24 @@ function relativeTime(seconds) {
   return olderDate.format(seconds * 1000);
 }
 function historyCard(entry) {
-  const article = element('article', '', 'board-inbox-card history-card');
+  const article = node('article', 'board-inbox-card history-card');
   const approval = entry.itemKind === 'policy_approval' && entry.action;
   const title = approval ? actionLabel(entry.action) : entry.requestTitle || historyKinds[entry.itemKind] || 'Request';
-  const heading = element('h3', title);
-  if (approval && entry.target) heading.append(element('span', entry.target, 'board-inbox-target'));
+  const heading = node('h3', null, title);
+  if (approval && entry.target) heading.append(node('span', 'board-inbox-target', entry.target));
   article.append(heading);
   // Name the kind of item only when the title doesn't already say it, then who answered and when.
   const about = approval ? entry.requestTitle : entry.requestTitle && historyKinds[entry.itemKind];
-  if (about) article.append(element('p', about, 'history-about'));
+  if (about) article.append(node('p', 'history-about', about));
   const by = entry.decidedByYou ? 'you' : entry.decidedBy;
-  article.append(element('p', `${labels[entry.decision] ?? 'Answered'} by ${by} · ${time(entry.decidedAt)}`, 'board-inbox-meta'));
+  article.append(node('p', 'board-inbox-meta', `${labels[entry.decision] ?? 'Answered'} by ${by} · ${time(entry.decidedAt)}`));
   return article;
 }
 function button(text, className, click) {
-  const node = element('button', text, className);
-  node.type = 'button';
-  node.addEventListener('click', click);
-  return node;
+  const control = node('button', className, text);
+  control.type = 'button';
+  control.addEventListener('click', click);
+  return control;
 }
 function setCardBusy(card, busy) {
   for (const control of card.querySelector('.board-inbox-form')?.elements ?? []) control.disabled = busy;
@@ -99,7 +94,7 @@ function setCardBusy(card, busy) {
 }
 
 function stopSection(item, submit, busy) {
-  const container = element('div', '', 'board-inbox-stop');
+  const container = node('div', 'board-inbox-stop');
   const showDefault = (restoreFocus = false) => {
     const stop = button('Stop this request', 'wait-cancel', showConfirm);
     stop.disabled = busy;
@@ -107,18 +102,18 @@ function stopSection(item, submit, busy) {
     if (restoreFocus) stop.focus();
   };
   function showConfirm() {
-    const confirm = element('div', '', 'wait-stop-confirm');
+    const confirm = node('div', 'wait-stop-confirm');
     confirm.setAttribute('role', 'group');
-    const prompt = element('p', '', 'wait-stop-text');
+    const prompt = node('p', 'wait-stop-text');
     prompt.id = `inbox-stop-text-${item.waitId}`;
-    prompt.append(element('strong', 'Stop this request?'),
+    prompt.append(node('strong', null, 'Stop this request?'),
       ' This requests a stop for this work, including any T3 work assigned to it.');
     confirm.setAttribute('aria-labelledby', prompt.id);
     const keep = button('Keep working', 'button quiet wait-stop-keep', () => showDefault(true));
     const confirmStop = button('Stop request', 'button danger', () => void submit(item, 'cancel', {}));
     keep.disabled = busy;
     confirmStop.disabled = busy;
-    const choices = element('div', '', 'board-inbox-actions');
+    const choices = node('div', 'board-inbox-actions');
     choices.append(keep, confirmStop);
     confirm.append(prompt, choices);
     container.replaceChildren(confirm);
@@ -129,25 +124,25 @@ function stopSection(item, submit, busy) {
 }
 
 function decisionCard(item, submit, source, question, busy) {
-  const article = element('article', '', 'board-inbox-card');
+  const article = node('article', 'board-inbox-card');
 
-  const titleGroup = element('div', '', 'board-inbox-title-group');
+  const titleGroup = node('div', 'board-inbox-title-group');
   const approval = item.itemKind === 'policy_approval' && item.action;
-  titleGroup.append(element('h3', approval ? actionLabel(item.action) : item.requestTitle));
+  titleGroup.append(node('h3', null, approval ? actionLabel(item.action) : item.requestTitle));
 
-  const submeta = element('div', '', 'board-inbox-submeta');
+  const submeta = node('div', 'board-inbox-submeta');
   const parts = [];
   if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
-    parts.push(element('span', labels[item.itemKind]));
+    parts.push(node('span', null, labels[item.itemKind]));
   }
   const target = item.displayTarget ?? item.target;
-  if (approval && target) parts.push(element('span', target, 'board-inbox-target'));
-  if (item.status === 'expired') parts.push(element('span', 'Expired'));
+  if (approval && target) parts.push(node('span', 'board-inbox-target', target));
+  if (item.status === 'expired') parts.push(node('span', null, 'Expired'));
   const rel = relativeTime(item.createdAt);
-  if (rel) parts.push(element('span', rel));
+  if (rel) parts.push(node('span', null, rel));
   if (source) parts.push(source);
   parts.forEach((part, idx) => {
-    if (idx > 0) submeta.append(element('span', '·', 'board-inbox-submeta-sep'));
+    if (idx > 0) submeta.append(node('span', 'board-inbox-submeta-sep', '·'));
     submeta.append(part);
   });
   if (parts.length) titleGroup.append(submeta);
@@ -158,11 +153,11 @@ function decisionCard(item, submit, source, question, busy) {
   const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   const text = bodyLines.join('\n').trim();
-  if (text) article.append(element('p', text, 'board-inbox-body'));
+  if (text) article.append(node('p', 'board-inbox-body', text));
 
   const expiredApproval = item.itemKind === 'policy_approval' && item.status === 'expired';
   if (!item.canDecide || (expiredApproval && item.canSaveRule !== true)) {
-    if (item.itemKind !== 'policy_approval') article.append(element('p', 'View only', 'board-inbox-meta'));
+    if (item.itemKind !== 'policy_approval') article.append(node('p', 'board-inbox-meta', 'View only'));
     return article;
   }
   if (item.itemKind === 'user_question') {
@@ -170,11 +165,11 @@ function decisionCard(item, submit, source, question, busy) {
     if (isTaskWait(item)) article.append(stopSection(item, submit, busy));
     return article;
   }
-  const form = element('form', '', 'board-inbox-form');
+  const form = node('form', 'board-inbox-form');
   const inputs = {};
-  const buttons = element('div', '', 'board-inbox-actions');
+  const buttons = node('div', 'board-inbox-actions');
   if (item.itemKind === 'protected_input') {
-    inputs.value = element('input');
+    inputs.value = node('input');
     inputs.value.type = 'password';
     inputs.value.autocomplete = 'off';
     inputs.value.required = true;
@@ -183,7 +178,7 @@ function decisionCard(item, submit, source, question, busy) {
   const choices = expiredApproval ? [['allow_next_time', 'Allow next time for this Flock']] : actions[item.itemKind];
   for (const [decision, title] of choices) {
     if (savesFlockRule(decision) && item.canSaveRule !== true) continue;
-    const btn = element('button', title, ['deny', 'always_allow'].includes(decision) ? 'secondary' : 'primary');
+    const btn = node('button', ['deny', 'always_allow'].includes(decision) ? 'secondary' : 'primary', title);
     btn.value = decision;
     btn.type = 'submit';
     buttons.append(btn);
@@ -302,10 +297,10 @@ export function mountBoardInbox({
   function animateCloseToPill(cardRect, pillRect) {
     clearMorph();
     if (reducedMotion?.matches || !main || !cardRect || !cardRect.width || !cardRect.height || !pillRect || !pillRect.width || !pillRect.height) return;
-    const overlay = element('div', '', 'decision-morph-overlay');
+    const overlay = node('div', 'decision-morph-overlay');
     overlay.setAttribute('aria-hidden', 'true');
-    const ghostShade = element('div', '', 'decision-morph-shade');
-    const ghostCard = element('div', '', 'decision-morph-card');
+    const ghostShade = node('div', 'decision-morph-shade');
+    const ghostCard = node('div', 'decision-morph-card');
     ghostCard.style.left = `${cardRect.left}px`;
     ghostCard.style.top = `${cardRect.top}px`;
     ghostCard.style.width = `${cardRect.width}px`;
@@ -388,9 +383,9 @@ export function mountBoardInbox({
       targetHost.replaceChildren();
       return;
     }
-    targetHost.replaceChildren(element('p', saved.target === target
+    targetHost.replaceChildren(node('p', 'board-inbox-meta', saved.target === target
       ? 'The question changed. Waiting for the current question.'
-      : 'The question changed. Review it before using the previous draft.', 'board-inbox-meta'));
+      : 'The question changed. Review it before using the previous draft.'));
     if (saved.target !== target) {
       targetHost.append(button('Use draft for this question', 'text-button', () => {
         if (!canCompose()) return;
@@ -403,7 +398,7 @@ export function mountBoardInbox({
   }
 
   function questionControls(item, pending) {
-    const group = element('div', '', 'board-inbox-question');
+    const group = node('div', 'board-inbox-question');
     const { key, text, stale } = choice(item);
     if (hasQuestionChoices(item.choices)) {
       group.append(questionChoiceForm({
@@ -418,7 +413,7 @@ export function mountBoardInbox({
     });
     write.disabled = pending;
     group.append(write);
-    const needsReview = element('div', '', 'board-inbox-draft-review');
+    const needsReview = node('div', 'board-inbox-draft-review');
     reviewDraft(item, needsReview);
     group.append(needsReview);
     return group;

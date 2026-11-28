@@ -1,15 +1,10 @@
+import { node } from './dom.js';
+
 const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const dateOptions = { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' };
 const localTime = new Intl.DateTimeFormat('en', dateOptions);
 const browserZone = localTime.resolvedOptions().timeZone;
 const maxRequestBytes = 16000;
-
-function node(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text != null) element.textContent = text;
-  return element;
-}
 
 function zoneName(zone) {
   try {

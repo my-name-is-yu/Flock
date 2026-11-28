@@ -1,16 +1,11 @@
+import { node } from './dom.js';
+
 const setupLabels = {
   name: 'Name', avatar: 'Appearance', soul: 'Role', model: 'Model', reasoningEffort: 'Reasoning effort',
   environmentId: 'T3 environment', projectId: 'T3 project', sessionModel: 'Session model',
   workspaceStrategy: 'Session workspace', fixPullRequests: 'PR follow-ups',
 };
 const workspaceNames = { root: 'Project root', worktree: 'New worktree', existing_worktree: 'Existing worktree' };
-
-function element(tag, text = '', className = '') {
-  const result = document.createElement(tag);
-  result.textContent = text;
-  if (className) result.className = className;
-  return result;
-}
 
 export function orderSetupNotices(events) {
   const replies = new Map(events.filter(event => event.kind === 'conversation_reply')
@@ -38,11 +33,11 @@ function roleDiff(before, after) {
   const removed = oldLines.slice(start, oldLines.length - tail);
   const added = newLines.slice(start, newLines.length - tail);
   const counts = [removed.length && `−${removed.length}`, added.length && `+${added.length}`].filter(Boolean).join(' ');
-  const diff = element('details', '', 'setup-role-diff');
-  diff.append(element('summary', `Role: ${counts} ${removed.length + added.length === 1 ? 'line' : 'lines'}`));
-  const content = element('pre');
+  const diff = node('details', 'setup-role-diff');
+  diff.append(node('summary', null, `Role: ${counts} ${removed.length + added.length === 1 ? 'line' : 'lines'}`));
+  const content = node('pre');
   for (const [sign, items, tag] of [['−', removed, 'del'], ['+', added, 'ins']])
-    for (const line of items) content.append(element(tag, `${sign} ${line.endsWith('\n') ? line : line + '\n'}`));
+    for (const line of items) content.append(node(tag, null, `${sign} ${line.endsWith('\n') ? line : line + '\n'}`));
   diff.append(content);
   return diff;
 }
@@ -58,10 +53,10 @@ function settingValue(field, value) {
 
 export function setupNotice(event, canUndo, undoChange) {
   const { before, after, undone } = event.data;
-  const note = element('article', '', 'system-note memory-notice');
+  const note = node('article', 'system-note memory-notice');
   note.id = `event-${event.id}`;
   note.tabIndex = -1;
-  note.append(element('strong', undone ? 'Update undone' : 'Updated'));
+  note.append(node('strong', null, undone ? 'Update undone' : 'Updated'));
   for (const field of Object.keys(setupLabels)) {
     if (!Object.hasOwn(after, field)) continue;
     if (field === 'reasoningEffort' && Object.hasOwn(after, 'model')) continue;
@@ -73,10 +68,10 @@ export function setupNotice(event, canUndo, undoChange) {
     } else note.append(`${setupLabels[field]}: ${settingValue(field, after[field])}`);
   }
   if (canUndo && !undone) {
-    const undo = element('button', 'Undo', 'text-button');
+    const undo = node('button', 'text-button', 'Undo');
     undo.type = 'button';
     undo.dataset.timelineAction = 'undo-setup';
-    const status = element('span', '', 'memory-notice-status');
+    const status = node('span', 'memory-notice-status');
     status.setAttribute('role', 'status');
     undo.addEventListener('click', async () => {
       if (undo.disabled) return;
@@ -95,14 +90,14 @@ export function setupNotice(event, canUndo, undoChange) {
 }
 
 export function createSetupSettings(save) {
-  const panel = element('details', '', 'settings-card setup-details');
-  panel.append(element('summary', 'Setup details', 'settings-card-label'));
-  const facts = element('dl', '', 'settings-workspace-facts');
-  const form = element('form', '', 'settings-workspace-form');
+  const panel = node('details', 'settings-card setup-details');
+  panel.append(node('summary', 'settings-card-label', 'Setup details'));
+  const facts = node('dl', 'settings-workspace-facts');
+  const form = node('form', 'settings-workspace-form');
   const edited = new Set();
   const input = (label, type = 'text') => {
-    const row = element('label', label, 'settings-workspace-field');
-    const control = element('input');
+    const row = node('label', 'settings-workspace-field', label);
+    const control = node('input');
     control.type = type;
     row.append(control);
     form.append(row);
@@ -110,17 +105,17 @@ export function createSetupSettings(save) {
   };
   const provider = input('Session provider ID');
   const model = input('Session model ID');
-  const select = element('select');
+  const select = node('select');
   for (const [value, label] of [['', 'Default'], ...Object.entries(workspaceNames)]) select.add(new Option(label, value));
-  const workspace = element('label', 'Session workspace', 'settings-workspace-field');
+  const workspace = node('label', 'settings-workspace-field', 'Session workspace');
   workspace.append(select);
   form.append(workspace);
   const base = input('Base ref');
   const branch = input('Branch');
   const path = input('Worktree path');
   const origin = input('Start from origin', 'checkbox');
-  const submit = element('button', 'Save', 'button primary');
-  const status = element('p', '', 'settings-workspace-hint');
+  const submit = node('button', 'button primary', 'Save');
+  const status = node('p', 'settings-workspace-hint');
   status.setAttribute('role', 'status');
   form.append(submit, status);
   panel.append(facts, form);
@@ -139,8 +134,8 @@ export function createSetupSettings(save) {
       const session = field === 'sessionModel' || field === 'workspaceStrategy';
       if (!authored && !session) continue;
       const description = authored === 'bot' ? 'Last changed by the Bot' : authored === 'person' ? 'Last changed in settings' : '';
-      facts.append(element('dt', label),
-        element('dd', [session && settingValue(field, bot[field]), description].filter(Boolean).join(' · ')));
+      facts.append(node('dt', null, label),
+        node('dd', null, [session && settingValue(field, bot[field]), description].filter(Boolean).join(' · ')));
     }
     form.hidden = !bot.canDelete;
     if (!edited.has('sessionModel')) {

@@ -22,6 +22,7 @@ import { mountConversationFind } from '/conversation-find.mjs';
 import { createRecurringRequests } from '/recurring-requests.js';
 import { createMemoryHistory } from '/memory-history.js';
 import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+import { node } from './dom.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -164,12 +165,6 @@ let profileMotion;
 let scopeKey = '';
 let connection = 'loading';
 
-function node(tag, className, text) {
-  const el = document.createElement(tag);
-  if (className) el.className = className;
-  if (text != null) el.textContent = text;
-  return el;
-}
 function button(text, className, click) {
   const el = node('button', className, text);
   el.type = 'button';
