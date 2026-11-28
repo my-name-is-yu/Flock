@@ -114,8 +114,9 @@ Json ConversationContextStorage::conversationHistory(const conversation::Message
     }
     auto rows = database_.query(
         R"SQL(
-SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text,entry.wait_id FROM compactable_messages entry
+SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text,entry.wait_id,turn.silent FROM compactable_messages entry
 LEFT JOIN channel_messages source ON source.message_id=entry.source_message_id
+LEFT JOIN conversation_turns turn ON turn.message_id=entry.id AND entry.kind='conversation_message'
 WHERE entry.bot_id=? AND entry.id>?
   AND (entry.kind NOT IN ('conversation_message','conversation_reply') OR entry.source_message_id<?)
   AND (?='' OR (source.scope_key=? AND entry.kind!='user_answer'))
@@ -140,6 +141,23 @@ ORDER BY entry.id DESC LIMIT ?
             if (message.channelScope.empty()) {
                 auto media = attachments_.attachmentViews(id);
                 if (!media.empty()) entry["attachments"] = std::move(media);
+            }
+            if (message.channelScope.empty() && rows.number(6)) {
+                auto sends = database_.query(R"SQL(
+SELECT json_extract(s.decision,'$[0].args.botId'),json_extract(s.decision,'$[0].args.text')
+FROM conversation_steps s
+WHERE s.message_id=? AND json_extract(s.decision,'$[0].tool')='message_bot'
+  AND json_extract(s.result,'$[0].effect')='sent'
+ORDER BY s.step
+)SQL",
+                                             {id});
+                auto actions = Json::array();
+                while (sends.next())
+                    actions.push_back({{"tool", "message_bot"},
+                                       {"effect", "sent"},
+                                       {"botId", sends.string(0)},
+                                       {"text", bounded(scrub.text(sends.string(1)), 2000)}});
+                if (!actions.empty()) entry["actions"] = scrub.record(std::move(actions));
             }
         }
         const bool user = !system && (kind == "conversation_message" || kind == "user_answer");

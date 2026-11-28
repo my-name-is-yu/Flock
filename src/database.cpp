@@ -30,6 +30,7 @@ constexpr std::array kinds{
     std::pair{JournalKind::task_revision, std::string_view{"task_revision"}},
     std::pair{JournalKind::git_pr_followup_requested, std::string_view{"git_pr_followup_requested"}},
     std::pair{JournalKind::conversation_message, std::string_view{"conversation_message"}},
+    std::pair{JournalKind::conversation_handoff, std::string_view{"conversation_handoff"}},
     std::pair{JournalKind::conversation_reply, std::string_view{"conversation_reply"}},
     std::pair{JournalKind::memory_learned, std::string_view{"memory_learned"}},
     std::pair{JournalKind::completed, std::string_view{"completed"}},

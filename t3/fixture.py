@@ -1233,12 +1233,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             return db.execute("SELECT * FROM t3_connector").fetchone()
     previous_connector = connector()
     previous_claude = claude_config.read_bytes()
-    for setting, value in [
-        ("FIXTURE_CLAUDE_VERSION", "2.1.326"),
-        ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
+    for setting, value, error in [
+        ("FIXTURE_CLAUDE_VERSION", "2.1.326", "Claude Code 2.1.327 or later is required"),
+        ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token, "Claude Code could not register the Flock MCP server"),
     ]:
         env[setting] = value
-        connect("env-2", ["--port", str(port - 1)], expected_error="Claude Code 2.1.327 or later is required")
+        connect("env-2", ["--port", str(port - 1)], expected_error=error)
         del env[setting]
         assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
         assert codex_config.read_bytes() == previous_config and connector() == previous_connector

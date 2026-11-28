@@ -134,7 +134,7 @@ Json waitView(const Wait& wait) {
     return view;
 }
 
-Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
+Json eventView(const Json& event, const markdown::SensitiveText& sensitive, Store& store, const Person* viewer) {
     auto view = Json::object();
     const auto kind = field(event, "kind");
     copyFields(view, event, {"id", "time", "kind"});
@@ -166,6 +166,10 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         if (data.at("before").contains("soul")) details["before"] = {{"soul", data.at("before").at("soul")}};
         if (auto avatar = details["after"].find("avatar"); avatar != details["after"].end() && avatar->is_object())
             *avatar = avatarView(*avatar, {});
+    } else if (kind == "conversation_handoff") {
+        const auto peerBotId = field(data, "peerBotId");
+        if (viewer && !peerBotId.empty() && Policy{store}.allows(*viewer, Action::bot_view, peerBotId))
+            copyFields(details, data, {"peerBotId", "messageId"});
     } else if (kind == "completed") {
         copyFields(details, data, {"text", "revisionId", "runOutcome", "requestedCommit"});
         renderMarkdown("text");
@@ -456,7 +460,8 @@ Json conversation(Store& store, std::string_view bot, Id before, const Person* v
     const bool more = events.size() > conversationSize;
     Json result = {{"events", Json::array()}, {"olderBefore", 0}};
     auto& page = result["events"];
-    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event) page.push_back(eventView(*event, sensitive));
+    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
+        page.push_back(eventView(*event, sensitive, store, viewer));
     if (more) result["olderBefore"] = page.front().at("id");
     return result;
 }

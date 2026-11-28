@@ -190,6 +190,12 @@ public:
         return pull(json("POST", path(base) + "/pulls", body));
     }
 
+    std::optional<GitPullRequest> readPullRequest(const GitContext&, const GitRepository& repo, Id number) override {
+        const auto raw = json("GET", path(repo) + "/pulls/" + std::to_string(number));
+        if (raw.at("state") != "open" || raw.at("head").at("repo").is_null()) return std::nullopt;
+        return pull(raw);
+    }
+
     std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget& target) override {
         const auto& [base, head, baseRef, headRef] = target;
         const auto owner = head.repo.substr(0, head.repo.find('/'));

@@ -56,6 +56,8 @@ public:
     Json results = Json::object();
     unsigned notifications = 0;
     bool openAfterSession = false;
+    bool associateExisting = false;
+    bool allowAmbiguousOpen = false;
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
     std::function<void()> beforeTaskWait;
@@ -77,10 +79,19 @@ private:
             if (openAfterSession && steps.empty()) {
                 auto args = openArgs();
                 args["taskId"] = event.at("task").at("taskId");
+                if (associateExisting) {
+                    args.erase("title");
+                    args.update({{"associateExisting", true}, {"prNumber", 1}});
+                }
                 return {"git_open_pr", std::move(args), {}};
             }
             if (!steps.empty() && steps.back().at("tool") == "git_open_pr") {
                 results["session-pr"] = steps.back().at("result");
+                if (!results["session-pr"].value("ok", false) && allowAmbiguousOpen &&
+                    results["session-pr"].value("status", "") == "ambiguous")
+                    return {"wait_for_event", {{"note", "Waiting for the PR operation to resolve"}, {"checkAgainAfterMinutes", 5}}, {}};
+                if (!results["session-pr"].value("ok", false) && associateExisting)
+                    return {"complete", {{"report", "The existing PR could not be safely associated."}}, "PR association was unavailable"};
                 check(results["session-pr"].value("ok", false), "task PR open failed: " + results["session-pr"].dump());
             }
             if (!steps.empty() && steps.back().at("tool") != "git_open_pr") return {"reply", {{"text", "Waiting for review."}}, {}};
@@ -173,6 +184,44 @@ std::string watchedPrUrl(const std::filesystem::path& db) {
     return url;
 }
 
+unsigned watchedPrCount(const std::filesystem::path& db) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(db.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK, "could not read PR watches");
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(raw, sqlite3_close);
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(raw, "SELECT count(*) FROM git_pr_watches", -1, &stmt, nullptr) == SQLITE_OK, "could not count PR watches");
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
+    check(sqlite3_step(stmt) == SQLITE_ROW, "could not read PR watch count");
+    return static_cast<unsigned>(sqlite3_column_int(stmt, 0));
+}
+
+void deletePrWatch(const std::filesystem::path& db, std::string_view host, std::string_view repo, Id pr) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(db.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK, "could not open PR watches");
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(raw, sqlite3_close);
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(raw, "DELETE FROM git_pr_watches WHERE host=? AND repo=? AND pr_number=?", -1, &stmt, nullptr) == SQLITE_OK,
+          "could not prepare PR watch deletion");
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
+    sqlite3_bind_text(stmt, 1, host.data(), static_cast<int>(host.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, repo.data(), static_cast<int>(repo.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, pr);
+    check(sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(raw) == 1, "could not delete the PR watch");
+}
+
+void setTaskState(const std::filesystem::path& db, Id task, std::string_view state) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(db.c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK, "could not open task state");
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> connection(raw, sqlite3_close);
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(raw, "UPDATE tasks SET state=? WHERE id=?", -1, &stmt, nullptr) == SQLITE_OK,
+          "could not prepare task state update");
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
+    sqlite3_bind_text(stmt, 1, state.data(), static_cast<int>(state.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, task);
+    check(sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(raw) == 1, "could not update task state");
+}
+
 void freshPrSchema() {
     TemporaryDirectory directory;
     const auto path = directory.path / "fresh.db";
@@ -192,7 +241,7 @@ SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE name IN ('pr_review_items',
     check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1, "Fresh DB has incorrect PR operation or journal storage");
 }
 
-void runner() {
+void runner(bool associateExisting = false, bool updateCursorRace = false) {
     TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
@@ -200,24 +249,81 @@ void runner() {
     Script script;
     script.openAfterSession = true;
     script.checkOriginatingSession = true;
+    script.associateExisting = associateExisting;
+    const auto prUrl = std::string("https://") + repositoryTarget + "/pull/1";
+    if (associateExisting) {
+        const GitRepository repo{hostName, repoName};
+        host->prs.push_back({{{repo, repo, "main", "change"}, 1, prUrl, "", sha}, "Opened in T3", FakeHost::State::open});
+    }
+    const auto expectedNotifications = updateCursorRace ? 6U : 3U;
+    std::string currentHeadSha = sha;
     Id task, other;
     {
         Store store(path);
         Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
         task = startTask(store, runtime, script, "ship");
         for (int i = 0; i < 8; ++i) runtime.tick();
-        check(Tasks(store).task(task).task.state == TaskState::external_waiting && host->createCalls == 1,
+        if (associateExisting) {
+            check(Tasks(store).task(task).task.state == TaskState::completed,
+                  "An unbound T3-created PR did not leave the task unassociated");
+            check(script.results.at("session-pr").at("status") == "unassociated" && watchedPrCount(path) == 0 && host->createCalls == 0 &&
+                      host->prReadCalls == 0 && host->hostCalls == 0,
+                  "A matching unbound PR was attached or read from the host");
+            return;
+        }
+        check(Tasks(store).task(task).task.state == TaskState::external_waiting,
               "Session-to-PR flow did not wait: " + TaskHistory(store).history(task).dump());
+        check(host->createCalls == (associateExisting ? 0 : 1) && host->hostCalls == 0, "Unexpected write to the Git host");
         other = TaskIntake(store).submit(intake("other", "other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1, "task did not receive the PR number");
+        auto association = openArgs();
+        association.erase("title");
+        association.update({{"taskId", task}, {"prNumber", 1}, {"associateExisting", true}});
+        const auto reused = invoke(store, runtime, script, "reuse-trusted-pr", "git_open_pr", association);
+        check(reused.value("ok", false) && reused.value("status", "") == "associated" && reused.value("reused", false),
+              "A trusted task-owned PR link was not reused");
+        const GitPrTarget matchingTarget{{hostName, repoName}, {hostName, repoName}, "main", "change"};
+        host->prs.push_back(
+            {{matchingTarget, 2, "https://" + std::string(repositoryTarget) + "/pull/2", "", sha}, "Unbound PR", FakeHost::State::open});
+        association["prNumber"] = 2;
+        const auto rejected = invoke(store, runtime, script, "reject-unbound-pr", "git_open_pr", association);
+        check(!rejected.value("ok", false) && rejected.value("status", "") == "unassociated" && watchedPrCount(path) == 1 &&
+                  host->prReadCalls == 0,
+              "A matching unbound PR was associated with the task");
         check(historyCount(store, task, "git_mutation") == 2, "PR operation history must include intent and result");
         check(recordedMutationReason(TaskHistory(store).history(task), "git_open_pr"), "PR creation lost its rationale in task history");
+        if (updateCursorRace) {
+            const std::string newSha(40, 'b');
+            host->onPrStateUpdate = [&](std::string_view) {
+                check(GitEvents(store).receiveGitWebhook(
+                          {hostName, "ci-during-update", repoName, "ci", "completed", {}, sha, "CI during PR update", 81}),
+                      "Old-head CI event during PR update was rejected");
+                check(GitEvents(store).receiveGitWebhook(
+                          {hostName, "new-ci-during-update", repoName, "ci", "completed", {}, newSha, "New-head CI during PR update", 81}),
+                      "New-head CI event during PR update was rejected");
+                host->result["headSha"] = newSha;
+            };
+            auto update = Json{{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "open"}, {"taskId", task}};
+            check(invoke(store, runtime, script, "update-existing-watch", "git_update_pr", update).at("ok").get<bool>(),
+                  "Existing PR update failed");
+            for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+            currentHeadSha = newSha;
+            check(script.notifications == 1 && historyCount(store, task, "git_webhook") == 1,
+                  "Old-head CI was not delivered or an unconfirmed future head was inferred");
+            check(GitEvents(store).receiveGitWebhook(
+                      {hostName, "confirm-new-head", repoName, "pull_request", "synchronize", {1}, newSha, "Head synchronized", 0}),
+                  "Could not confirm the new PR head");
+            for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+            check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3,
+                  "A confirmed new head did not release its pending CI event");
+        }
         check(historyCount(store, task, "report") == 1, "Session result missing");
         check(Inbox(store).inbox(localOwner, "owner").empty(), "Opening a PR appeared in Needs you");
         check(GitEvents(store).receiveGitWebhook(
-                  {hostName, "ci-before-restart", repoName, "ci", "completed", {1}, sha, "test job failed", 81}),
+                  {hostName, "ci-before-restart", repoName, "ci", "completed", {1}, currentHeadSha, "test job failed", 81}),
               "CI event was rejected before restart");
-        check(historyCount(store, task, "git_webhook") == 0, "intake ran delivery synchronously");
+        check(script.notifications <= (updateCursorRace ? 3U : 0U) && historyCount(store, task, "git_webhook") == script.notifications,
+              "Webhook delivery ran unexpectedly during intake");
     }
     {
         Store store(path);
@@ -230,9 +336,11 @@ void runner() {
               "unmatched webhook was not recorded");
         check(GitEvents(store).receiveGitWebhook({hostName, "wrong-repo", "org/other", "ci", "completed", {1}, sha, "wrong repo", 81}),
               "unmatched repository event was not recorded");
-        runtime.runConversations();
-        check(script.notifications == 1 && host->logCalls == 1 && historyCount(store, task, "git_webhook") == 1,
-              "CI event did not wake exactly the persistent PR owner");
+        for (int i = 0; i < 3; ++i) runtime.runConversations();
+        check(script.notifications == (updateCursorRace ? 4U : 1U) && host->logCalls == (updateCursorRace ? 3 : 1) &&
+                  historyCount(store, task, "git_webhook") == (updateCursorRace ? 4U : 1U),
+              "CI event did not wake exactly the persistent PR owner: notifications=" + std::to_string(script.notifications) +
+                  ", logs=" + std::to_string(host->logCalls) + ", history=" + std::to_string(historyCount(store, task, "git_webhook")));
         check(TaskHistory(store).history(other) == otherHistory &&
                   Conversations(store).conversation("other").dump().find("CI failed") == std::string::npos,
               "unrelated task was woken");
@@ -240,25 +348,123 @@ void runner() {
               "CI report is missing from the owning task");
         check(GitEvents(store).receiveGitWebhook({hostName, "review", repoName, "review", "submitted", {1}, sha, "Approved", 0}),
               "review rejected");
-        check(GitEvents(store).receiveGitWebhook({hostName, "scan", repoName, "code_scan", "appeared", {}, sha, "Scan result", 0}),
-              "scan rejected");
+        check(
+            GitEvents(store).receiveGitWebhook({hostName, "scan", repoName, "code_scan", "appeared", {}, currentHeadSha, "Scan result", 0}),
+            "scan rejected");
         runtime.runConversations();
         runtime.runConversations();
         check(Inbox(store).inbox(localOwner, "owner").empty() && Inbox(store).decisionHistory(localOwner, "owner").empty(),
               "Review or code scanning appeared in Needs you or History");
-        check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3, "webhooks were delivered more than once");
+        const auto delivered = historyCount(store, task, "git_webhook");
+        check(script.notifications == expectedNotifications && delivered == expectedNotifications,
+              "webhooks were delivered more than once: notifications=" + std::to_string(script.notifications) +
+                  ", history=" + std::to_string(delivered) + ", expected=" + std::to_string(expectedNotifications));
 
-        const auto sibling = TaskIntake(store).submit(intake());
-        auto args = openArgs("sibling-change");
-        args["taskId"] = sibling;
-        check(invoke(store, runtime, script, "watch-sibling", "git_open_pr", args).at("prNumber") == 2,
-              "Could not create a second watch at the same commit");
-        check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 81}),
-              "CI event with a shared SHA was not saved");
-        runtime.runConversations();
-        check(script.notifications == 3 && historyCount(store, sibling, "git_webhook") == 0,
-              "A SHA-only CI event woke a task without an unambiguous watch");
+        if (!updateCursorRace) {
+            const auto sibling = TaskIntake(store).submit(intake());
+            auto args = openArgs("sibling-change");
+            args["taskId"] = sibling;
+            check(invoke(store, runtime, script, "watch-sibling", "git_open_pr", args).at("prNumber") == 3,
+                  "Could not create a second watch at the same commit");
+            check(GitEvents(store).receiveGitWebhook({hostName, "shared-commit", repoName, "ci", "completed", {}, sha, "Shared SHA", 81}),
+                  "CI event with a shared SHA was not saved");
+            runtime.runConversations();
+            check(script.notifications == expectedNotifications && historyCount(store, sibling, "git_webhook") == 0,
+                  "A SHA-only CI event woke a task without an unambiguous watch");
+        }
     }
+}
+
+void trustedReceiptAssociation() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "state.db";
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    Script script;
+    script.openAfterSession = true;
+    Store store(path);
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    const auto task = startTask(store, runtime, script, "ship");
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting && watchedPrCount(path) == 1,
+          "Trusted PR receipt fixture did not create its initial watch");
+    deletePrWatch(path, hostName, repoName, 1);
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "advance-before-restoration", repoName, "ci", "completed", {99}, sha, "Unmatched cursor advance", 0}),
+          "Could not advance the webhook cursor before restoring the watch");
+    const std::string newSha(40, 'b');
+    host->prs.front().pr.headSha = newSha;
+    host->onPrRead = [&] {
+        check(
+            GitEvents(store).receiveGitWebhook({hostName, "old-head-during-read", repoName, "ci", "completed", {}, sha, "Old-head CI", 81}),
+            "Could not enqueue old-head CI during PR association");
+        check(GitEvents(store).receiveGitWebhook(
+                  {hostName, "new-head-during-read", repoName, "ci", "completed", {}, newSha, "New-head CI", 81}),
+              "Could not enqueue new-head CI during PR association");
+    };
+
+    auto args = openArgs();
+    args.erase("title");
+    args.update({{"taskId", task}, {"prNumber", 1}, {"associateExisting", true}});
+    const auto associated = invoke(store, runtime, script, "restore-trusted-pr", "git_open_pr", args);
+    check(associated.value("ok", false) && associated.value("status", "") == "associated" && !associated.value("reused", false) &&
+              host->prReadCalls == 1 && watchedPrCount(path) == 1,
+          "A trusted receipt without a watch did not restore its PR association");
+    for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+    check(script.notifications == 1 && historyCount(store, task, "git_webhook") == 1,
+          "Receipt restoration overwrote the earlier head seen during the PR read");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "confirm-associated-head", repoName, "pull_request", "synchronize", {1}, newSha, "Head synchronized", 0}),
+          "Could not confirm the associated PR head");
+    for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+    check(script.notifications == 3 && historyCount(store, task, "git_webhook") == 3,
+          "An explicit association head transition did not release the queued CI event");
+}
+
+void recoveredHeadCursor() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "state.db";
+    auto host = std::make_shared<FakeHost>();
+    host->create = FakeHost::Create::lostResponse;
+    Sessions sessions;
+    Script script;
+    script.openAfterSession = true;
+    script.allowAmbiguousOpen = true;
+    Store store(path);
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    const auto task = startTask(store, runtime, script, "ship");
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting &&
+              script.results.at("session-pr").value("status", "") == "ambiguous",
+          "Lost-create fixture did not keep its task waiting");
+
+    check(GitEvents(store).receiveGitWebhook({hostName, "before-watch", repoName, "ci", "completed", {99}, sha, "Before watch", 81}),
+          "Could not advance the webhook cursor before update");
+    const auto update = Json{{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "open"}, {"taskId", task}};
+    const auto attached = invoke(store, runtime, script, "attach-after-lost-create", "git_update_pr", update);
+    check(attached.value("watchAttached", false), "PR update did not attach the existing watch");
+
+    const std::string newSha(40, 'b');
+    host->prs.front().pr.headSha = newSha;
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "new-head-before-recovery", repoName, "ci", "completed", {}, newSha, "New-head CI", 81}),
+          "Could not enqueue CI for the advanced head");
+    runtime.runConversations();
+    check(script.notifications == 0, "An unknown new head was delivered before recovery");
+
+    auto args = openArgs();
+    args["taskId"] = task;
+    const auto recovered = invoke(store, runtime, script, "recover-after-update", "git_open_pr", args);
+    check(recovered.value("status", "") == "created" && recovered.value("prNumber", 0) == 1, "The existing PR operation did not recover");
+    for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+    check(script.notifications == 0 && historyCount(store, task, "git_webhook") == 0,
+          "Recovery inferred a new head from an ordinary PR read");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "confirm-recovered-head", repoName, "pull_request", "synchronize", {1}, newSha, "Head synchronized", 0}),
+          "Could not confirm the recovered PR head");
+    for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+    check(script.notifications == 2 && historyCount(store, task, "git_webhook") == 2,
+          "An explicit recovered-head transition did not release the queued CI event");
 }
 
 void invalidWebhookMetadata() {
@@ -286,6 +492,83 @@ void invalidWebhookMetadata() {
         event.headSha.clear();
     });
     check(GitEvents(store).receiveGitWebhook(valid), "Rejected valid webhook metadata");
+}
+
+void ordinaryHeadSnapshotDoesNotBackfillShaOnlyEvent() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "state.db";
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    Script script;
+    script.openAfterSession = true;
+    Store store(path);
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    const auto task = startTask(store, runtime, script, "ship");
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(Tasks(store).task(task).task.state == TaskState::external_waiting, "PR watch fixture did not start");
+
+    const std::string laterSha(40, 'b');
+    check(GitEvents(store).receiveGitWebhook({hostName, "early-later-head-ci", repoName, "ci", "completed", {}, laterSha, "Early CI", 81}),
+          "Could not enqueue SHA-only CI before the PR reached that head");
+    host->result["headSha"] = laterSha;
+    const auto update = Json{{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "open"}, {"taskId", task}};
+    check(invoke(store, runtime, script, "observe-later-head", "git_update_pr", update).at("ok").get<bool>(),
+          "Could not record the ordinary PR read snapshot");
+    runtime.runConversations();
+    check(script.notifications == 0 && historyCount(store, task, "git_webhook") == 0,
+          "A later ordinary PR snapshot retroactively matched an earlier SHA-only CI event");
+
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "confirmed-later-head", repoName, "pull_request", "synchronize", {1}, laterSha, "Head synchronized", 0}),
+          "Could not confirm the PR head transition");
+    runtime.runConversations();
+    check(script.notifications == 2 && historyCount(store, task, "git_webhook") == 2,
+          "An explicit head synchronization did not release the queued CI and sync events");
+}
+
+void nonmatchingSnapshotKeepsShaOnlyCiWithOtherWatch() {
+    TemporaryDirectory directory;
+    Store store(directory.path / "state.db");
+    auto host = std::make_shared<FakeHost>();
+    Sessions sessions;
+    Script script;
+    Runtime runtime(store, script, sessions, [](std::string_view) { return std::string{}; }, options(host));
+    const auto first = TaskIntake(store).submit(intake());
+    auto args = openArgs();
+    args["taskId"] = first;
+    const auto firstOpen = invoke(store, runtime, script, "watch-first-at-old-head", "git_open_pr", args);
+    check(firstOpen.value("prNumber", 0) == 1, "Could not create the old-head watch: " + firstOpen.dump());
+
+    const std::string secondHead(40, 'b');
+    const std::string interveningHead(40, 'c');
+    host->createHeadSha = secondHead;
+    const auto second = TaskIntake(store).submit(intake());
+    args = openArgs("second-change");
+    args["taskId"] = second;
+    const auto secondOpen = invoke(store, runtime, script, "watch-second-at-ci-head", "git_open_pr", args);
+    check(secondOpen.value("prNumber", 0) == 2, "Could not create the matching-head watch: " + secondOpen.dump());
+    setTaskState(directory.path / "state.db", second, "deciding");
+
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "ci-before-conflicting-read", repoName, "ci", "completed", {}, secondHead, "Second-head CI", 81}),
+          "Could not enqueue the SHA-only CI event");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "advance-before-conflicting-read", repoName, "ci", "completed", {99}, sha, "Unmatched cursor advance", 0}),
+          "Could not advance the webhook cursor");
+    host->result["headSha"] = interveningHead;
+    const auto update = Json{{"host", hostName}, {"repo", repoName}, {"prNumber", 1}, {"state", "open"}, {"taskId", first}};
+    check(invoke(store, runtime, script, "record-intervening-head", "git_update_pr", update).value("ok", false),
+          "Could not record the intervening ordinary head snapshot");
+    check(GitEvents(store).receiveGitWebhook(
+              {hostName, "sync-back-to-ci-head", repoName, "pull_request", "synchronize", {1}, secondHead, "Synced old head", 0}),
+          "Could not enqueue the later head synchronization");
+    setTaskState(directory.path / "state.db", second, "external_waiting");
+    for (int attempt = 0; attempt < 3; ++attempt) runtime.runConversations();
+
+    check(historyCount(store, first, "git_webhook") == 1 && historyCount(store, second, "git_webhook") == 1,
+          "A later synchronization crossed an intervening head snapshot instead of delivering CI only to its watch: first=" +
+              std::to_string(historyCount(store, first, "git_webhook")) +
+              ", second=" + std::to_string(historyCount(store, second, "git_webhook")));
 }
 
 void webhookHeadPeriods() {
@@ -923,7 +1206,13 @@ int main() {
         freshPrSchema();
         schemas();
         runner();
+        runner(true);
+        trustedReceiptAssociation();
+        recoveredHeadCursor();
+        runner(false, true);
         invalidWebhookMetadata();
+        ordinaryHeadSnapshotDoesNotBackfillShaOnlyEvent();
+        nonmatchingSnapshotKeepsShaOnlyCiWithOtherWatch();
         webhookHeadPeriods();
         pausedGitNotifications();
         webhookDeliveryResumesAfterAnIdlePoll();

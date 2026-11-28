@@ -1,4 +1,4 @@
-export async function refreshEventHistory(history, latest, readOlder, isCurrent) {
+export async function refreshEventHistory(history, latest, readOlder, isCurrent, reprojectLoaded = false) {
   const updates = new Map(latest.events.map(event => [event.id, event]));
   async function readPage(cursor, loadedOnly) {
     const page = await readOlder(cursor);
@@ -13,6 +13,14 @@ export async function refreshEventHistory(history, latest, readOlder, isCurrent)
   while (history.newestEvent != null && before > history.newestEvent) {
     if (!isCurrent()) return;
     before = await readPage(before, false);
+  }
+
+  if (reprojectLoaded && history.newestEvent != null) {
+    let projectionBefore = latest.olderBefore;
+    while (projectionBefore > history.olderBefore) {
+      if (!isCurrent()) return;
+      projectionBefore = await readPage(projectionBefore, true);
+    }
   }
 
   const older = (latest.changedMessageIds ?? []).filter(id => id < before && history.events.has(id)).sort((a, b) => b - a);

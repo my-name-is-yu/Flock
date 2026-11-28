@@ -147,7 +147,7 @@ CallOutcome TurnRunner::executeConversationStep(const Message& message, int step
         return sessionParticipationStorage.leaveSession(sessionReadStorage, message, step, decision, ctx.t3, ctx.shutdown) ? advance : stop;
     }
 
-    if (tool == "reply") return executeConversationReply(message, step, decision, key, ctx.clock);
+    if (tool == "reply" || tool == "no_reply") return executeConversationReply(message, step, decision, key, ctx.clock);
     if (tool == botSetupTool) return executeBotSetup(message, step, decision, key, ctx);
     if (tool == "request_bot_change") return executeConversationBotChange(message, step, decision, key, ctx);
 
@@ -357,6 +357,13 @@ CallOutcome TurnRunner::executeConversationReply(const Message& message, int ste
     try {
         const auto& args = decision.args;
         if (!args.is_object()) throw ToolError("Tool arguments must be an object");
+        if (decision.tool == "no_reply") {
+            if (!args.empty()) throw ToolError("no_reply takes no arguments");
+            conversationTurns.finishTurn(message, std::nullopt, nullptr, ConversationReplyRoute::reply);
+            saveReplyResult({{"ok", true}});
+            transaction.commit();
+            return finished;
+        }
         auto reply = text(args, "text", 8000, true);
         const auto continuesQuestion = args.find("continuesQuestion");
         const conversation::QuestionAnchor* question = nullptr;

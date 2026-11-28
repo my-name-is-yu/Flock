@@ -125,6 +125,7 @@ import {
   cardSourceAction,
   closeMessageTime,
   eventHistoryForRefresh,
+  invalidateCachedHistoryProjections,
   leaveConversationSource,
   messageBubble,
   nextSuggestion,
@@ -213,10 +214,19 @@ function selectLocation() {
   const params = new URLSearchParams(location.search);
   const requested = params.get('bot');
   const bot = bots.find((entry) => entry.id === requested);
+  const messageId = Number(params.get('message'));
   const wantsSettings = params.get('settings') === '1';
   const preferred = saved('flock-selected-bot', null);
   const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
   selectBot(selectedBot, { updateHistory: false });
+  if (bot && Number.isSafeInteger(messageId) && messageId > 0 && view?.id === selectedBot) {
+    const context = view;
+    const url = conversationUrl(selectedBot);
+    url.searchParams.delete('message');
+    history.replaceState(history.state, '', url);
+    void context.refresh(context.data ? undefined : 'bottom').then(() =>
+      showConversationMessage(context, messageId, { preferLoaded: true }));
+  }
   if (wantsSettings) {
     const url = conversationUrl(selectedBot);
     url.searchParams.delete('settings');
@@ -410,7 +420,8 @@ async function conversationPage(timeline, before) {
   return api(botQuery('conversation', timeline.id, before));
 }
 async function refreshView(context, scroll, animationGeneration) {
-  const isCurrent = () => context === view &&
+  const projectionRevision = context.projectionRevision ?? 0;
+  const isCurrent = () => context === view && (context.projectionRevision ?? 0) === projectionRevision &&
     (animationGeneration == null || (animationGeneration === visibilityGeneration && !document.hidden));
   if (!isCurrent()) return;
   const liveAfterId = animationGeneration == null ? undefined : context.newestEvent;
@@ -422,9 +433,24 @@ async function refreshView(context, scroll, animationGeneration) {
     if (context.data) params.set('sessionsAfter', context.data.sessionCursor);
     const latest = await api(`view?${params}`);
     if (!isCurrent()) return;
-    await refreshEventHistory(eventHistory, latest, before => conversationPage(context, before), isCurrent);
+    const reprojectLoaded = context.reprojectLoadedHistory === true || eventHistory.reprojectLoadedHistory === true;
+    await refreshEventHistory(eventHistory, latest, before => conversationPage(context, before), isCurrent, reprojectLoaded);
     if (!isCurrent()) return;
+    const source = reprojectLoaded ? context.source : null;
+    if (source) {
+      try {
+        const page = await conversationPage(context, source.id + 1);
+        if (!isCurrent()) return;
+        if (context.source === source) {
+          context.source = page.events.some(event => event.id === source.id) ? { ...source, events: page.events } : null;
+        }
+      } catch {
+        if (!isCurrent()) return;
+        if (context.source === source) context.source = null;
+      }
+    }
     if (eventHistory !== context) Object.assign(context, eventHistory);
+    if (reprojectLoaded) context.reprojectLoadedHistory = false;
     mergeLatest(context, latest);
     setConnection('ready');
   } catch (error) {
@@ -452,6 +478,9 @@ const refreshBots = coalescedRefresh(async () => {
     const latest = await api('bots');
     if (revisionAtFetch !== rosterRevision) return;
     const viewer = responseViewers.get(latest) ?? null;
+    const previousBotIds = bots.map(bot => bot.id).sort().join('\0');
+    const nextBotIds = latest.map(bot => bot.id).sort().join('\0');
+    const permissionsChanged = viewer !== sidebarViewer || previousBotIds !== nextBotIds;
     const previous = viewer === sidebarViewer ? readState : null;
     assignSidebarViewer(viewer);
     assignReadState(new Map());
@@ -467,7 +496,16 @@ const refreshBots = coalescedRefresh(async () => {
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
     render();
-    await decisions.refresh();
+    let projectionRefresh = null;
+    if (permissionsChanged) {
+      invalidateCachedHistoryProjections();
+      if (view?.newestEvent != null) {
+        view.projectionRevision = (view.projectionRevision ?? 0) + 1;
+        view.reprojectLoadedHistory = true;
+        projectionRefresh = view.refresh();
+      }
+    }
+    await Promise.all([decisions.refresh(), projectionRefresh]);
   } catch (error) {
     if (revisionAtFetch !== rosterRevision) return;
     if (error.status === 401 || error.status === 403) {

@@ -102,7 +102,11 @@ std::string_view validate(const Decision& decision) {
     if (op.empty()) throw Conflict("Unknown Git operation");
     if (op != "read" && !validDecisionReason(decision.reason)) throw Conflict("Git changes require a brief reason");
     const auto& tool = decision.tool;
-    if (tool == "git_open_pr" || args.contains("title")) requireText("title");
+    const bool associating = tool == "git_open_pr" && args.value("associateExisting", false);
+    if ((tool == "git_open_pr" && !associating) || args.contains("title")) requireText("title");
+    if (associating && (!args.contains("prNumber") || args.contains("title") || args.contains("body") || args.contains("draft") ||
+                        args.contains("newIntent")))
+        throw Conflict("Associating a PR requires its number and exact branches");
     if (tool == "git_comment" || (tool == "git_submit_review" && args.at("verdict") != "approve")) requireText("body");
     if (tool == "git_request_review" && args.at("reviewers").empty()) throw Conflict("Choose at least one reviewer");
     if (tool == "git_update_pr" && !args.contains("title") && !args.contains("body") && !args.contains("baseRef") &&
@@ -243,7 +247,8 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     }
     const auto repo = GitRepository::parse(hostId, field(args, "repo"));
     if (!permits(repo, op)) throw Conflict("Repository access denied");
-    const bool selectingPr = decision.tool == "git_open_pr" && args.contains("prNumber");
+    const bool associating = decision.tool == "git_open_pr" && args.value("associateExisting", false);
+    const bool selectingPr = decision.tool == "git_open_pr" && args.contains("prNumber") && !associating;
     if (!selectingPr) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
@@ -266,12 +271,13 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
         const auto head = args.contains("headRepo") ? GitRepository::parse(hostId, field(args, "headRepo")) : repo;
         if (head != repo && (!permits(head, "read") || !policy.allows(bot, Action::repository_read, head.resource())))
             throw Conflict("Head repository read access denied");
-        auto result = openGitPr(host, context,
-                                {{repo, head, branch(args, "baseRef"), branch(args, "headRef")},
-                                 {},
-                                 field(args, "title"),
-                                 field(args, "body"),
-                                 args.value("draft", false)},
+        const GitPrTarget target{repo, head, branch(args, "baseRef"), branch(args, "headRef")};
+        if (associating) {
+            if (!permits(repo, "read") || !policy.allows(bot, Action::repository_read, repo.resource()))
+                throw Conflict("Repository read access denied");
+            return associateGitPr(host, context, target, args.at("prNumber").get<Id>(), decision.reason);
+        }
+        auto result = openGitPr(host, context, {target, {}, field(args, "title"), field(args, "body"), args.value("draft", false)},
                                 invocation, args.value("newIntent", false),
                                 selectingPr ? std::optional{args.at("prNumber").get<Id>()} : std::nullopt, decision.reason);
         result["ok"] = result.at("status") == "created";
@@ -314,6 +320,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     const auto key = Json::array({invocation, decision.tool, target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
     Id eventCursor = 0;
+    bool existingWatch = false;
     GitPrMutationClaim watchMutation(*this, gitPrMutationsInFlight);
     GitPrMutationClaim feedbackMutation(*this, gitFeedbackMutationsInFlight);
     {
@@ -330,6 +337,10 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
         if (watchPr) {
             const auto pr = args.at("prNumber").get<Id>();
             if (gitPrWatchUnavailable(repo, pr, taskId)) throw Conflict("This pull request belongs to another task");
+            existingWatch =
+                database
+                    .query("SELECT 1 FROM git_pr_watches WHERE (host,repo,pr_number,task_id)=(?,?,?,?)", {repo.host, repo.repo, pr, taskId})
+                    .next();
             watchMutation.acquire(repo, pr);
             eventCursor = latestGitWebhookId();
         }
@@ -361,7 +372,8 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     if (result.value("ok", false) && watchPr) {
         const auto pr = args.at("prNumber").get<Id>();
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
-        result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), eventCursor, repo, pr, url,
+        const auto headCursor = existingWatch ? latestGitWebhookId() : eventCursor;
+        result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), headCursor, repo, pr, url,
                                              field(result.at("data"), "headSha")) == GitWatchResult::attached;
     }
     database.exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"

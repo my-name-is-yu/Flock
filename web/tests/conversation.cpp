@@ -17,6 +17,7 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "../views.hpp"
 #include "flock/bot_change.hpp"
 #include "flock/command.hpp"
 #include "flock/decision.hpp"
@@ -778,43 +779,99 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         std::function<Decision(const ModelInput&)> script;
         ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
-    // The fixture has no display names, so each Bot is recognized by the one Bot it can reach.
-    const auto botOf = [](const ModelInput& input) {
-        return input.task.at("bots").at(0).at("botId") == "reviewer" ? std::string("Ernest") : std::string("Reviewer");
-    };
     model.script = [&](const ModelInput& input) -> Decision {
         check(input.event.at("kind") == "conversation_turn", "Bot messaging started a task decision");
-        const bool answered = !input.event.at("turn").empty();
+        const auto& steps = input.event.at("turn");
         const auto from = input.event.contains("botMessage") ? input.event.at("botMessage").at("fromBotId").get<std::string>() : "";
-        if (botOf(input) == "Ernest" && from.empty()) {
-            if (answered) return {"reply", {{"text", "Reviewer に聞いています。"}}, "Tell the person"};
-            check(input.task.at("bots") == Json::array({{{"botId", "reviewer"}, {"name", "Reviewer"}}}) &&
-                      std::ranges::find(input.tools, "message_bot") != input.tools.end() &&
-                      std::ranges::find(input.tools, "request_bot_change") != input.tools.end(),
-                  "the conversation could not see the Bot it may message");
-            return {"message_bot", {{"botId", "reviewer"}, {"text", "Can we ship today?"}}, "Ask Reviewer"};
+        const auto silent = [&]() -> Decision {
+            check(std::ranges::find(input.tools, "no_reply") != input.tools.end(), "The Bot could not finish silently");
+            return {"no_reply", Json::object(), {}};
+        };
+        if (from.empty()) {
+            if (steps.empty()) return {"message_bot", {{"botId", "reviewer"}, {"text", "Can we ship today?"}}, "Ask Reviewer"};
+            if (steps.size() == 1) return {"message_bot", {{"botId", "verifier"}, {"text", "Did the checks pass?"}}, "Ask Verifier"};
+            return silent();
         }
-        if (botOf(input) == "Reviewer") {
-            check(from == "ernest" && input.event.at("text") == "Can we ship today?" &&
-                      input.event.at("botMessage").at("fromName") == "ernest",
-                  "Reviewer did not receive Ernest's message as a Bot message");
+        if (from == "ernest") {
+            check(input.event.at("botMessage").at("fromName") == "ernest", "The receiving Bot lost the original sender");
             for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
                 check(std::ranges::find(input.tools, tool) == input.tools.end(), "another Bot's message was given the person's authority");
-            if (answered) return {"reply", {{"text", "Ernest に答えました。"}}, "Tell the person"};
-            return {"message_bot", {{"botId", "ernest"}, {"text", "Yes, ship it."}}, "Answer Ernest"};
+            if (!steps.empty()) return silent();
+            const auto answer = input.event.at("text") == "Can we ship today?" ? "Yes, ship it." : "All checks passed.";
+            return {"message_bot", {{"botId", "ernest"}, {"text", answer}}, "Answer Ernest"};
         }
-        check(from == "reviewer" && input.event.at("text") == "Yes, ship it." && input.event.at("botMessage").at("depth") == 2,
-              "Reviewer's answer did not reach Ernest");
+        check((from == "reviewer" || from == "verifier") && input.event.at("botMessage").at("depth") == 2,
+              "A Bot answer did not reach Ernest");
         check(std::ranges::any_of(input.history,
                                   [](const Json& entry) {
-                                      return entry.contains("actions") &&
-                                             entry.at("actions") == Json::array({{{"tool", "message_bot"},
-                                                                                  {"effect", "sent"},
-                                                                                  {"botId", "reviewer"},
-                                                                                  {"text", "Can we ship today?"}}});
+                                      return entry.contains("actions") && entry.at("actions").size() == 2 &&
+                                             entry.at("actions").at(0).at("text") == "Can we ship today?" &&
+                                             entry.at("actions").at(1).at("text") == "Did the checks pass?";
                                   }),
-              "Ernest's history lost the question that Reviewer answered");
-        return {"reply", {{"text", "Reviewer says we can ship today."}}, "Relay the answer"};
+              "Ernest's history lost the consultation after finishing silently");
+        if (!std::ranges::any_of(input.history, [&](const Json& entry) {
+                return entry.contains("botMessage") && entry.at("botMessage").at("fromBotId") != from;
+            }))
+            return silent();
+        return {"reply", {{"text", "Reviewer says we can ship. Verifier says the checks passed."}}, "Relay both answers"};
+    };
+
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "ernest")
+            return {{"Reviewer", {"reviewer", "", "local-env", "ernest"}}, {"Verifier", {"verifier", "", "local-env", "ernest"}}};
+        if (bot == "reviewer" || bot == "verifier") return {{"Ernest", {"ernest", "", "local-env", std::string(bot)}}};
+        return {};
+    };
+    auto web = callbacks();
+    web.bots = [] {
+        return Json::array({{{"id", "ernest"}, {"name", "Ernest"}},
+                            {{"id", "reviewer"}, {"name", "Reviewer"}},
+                            {{"id", "verifier"}, {"name", "Verifier"}}});
+    };
+    const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "local-env", ""};
+    };
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers, .intake = intake});
+    const auto server = startWeb(store, 0, web);
+    Browser browser(*server);
+
+    const Json consultation{{"botId", "ernest"}, {"clientMessageId", "ship"}, {"text", "Ask Reviewer and Verifier"}};
+    const auto admitted = browser.post("/api/messages", consultation, 201);
+    for (int i = 0; i < 6; ++i) runtime.runConversations();
+    const auto reviewer = browser.get("/api/view?bot=reviewer").at("events");
+    const auto inbound = std::ranges::find_if(
+        reviewer, [](const Json& event) { return event.at("kind") == "conversation_message" && event.at("data").contains("botMessage"); });
+    check(inbound != reviewer.end() && inbound->at("data").at("botMessage").at("fromBotId") == "ernest" &&
+              inbound->at("data").at("text") == "Can we ship today?",
+          "Reviewer's conversation did not show who sent the Bot message");
+    const auto ernest = browser.get("/api/view?bot=ernest");
+    check(std::ranges::count_if(ernest.at("events"), [](const Json& event) { return event.at("kind") == "conversation_reply"; }) == 1 &&
+              hasEvent(ernest.at("events"), "conversation_reply", "Reviewer says we can ship. Verifier says the checks passed.") &&
+              std::ranges::none_of(reviewer, [](const Json& event) { return event.at("kind") == "conversation_reply"; }),
+          "The consultation did not produce exactly one combined reply");
+    check(browser.post("/api/messages", consultation, 201) == admitted, "Retrying the silent turn changed its receipt");
+    check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
+}
+
+void silentBotSendKeepsTranscriptNavigation(const std::filesystem::path& path) {
+    struct ScriptedModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
+    } model;
+    model.script = [](const ModelInput& input) -> Decision {
+        check(input.event.at("kind") == "conversation_turn", "Bot messaging started a task decision");
+        if (input.event.contains("botMessage")) {
+            check(std::ranges::find(input.tools, "no_reply") != input.tools.end(), "A Bot message could not finish silently");
+            return {"no_reply", Json::object(), "Keep the handoff silent"};
+        }
+        if (input.event.at("turn").empty()) {
+            check(std::ranges::find(input.tools, "message_bot") != input.tools.end(), "The sender could not message its peer");
+            return {"message_bot", {{"botId", "reviewer"}, {"text", "Check the release."}}, "Send to Reviewer"};
+        }
+        check(std::ranges::find(input.tools, "no_reply") != input.tools.end(), "The sender could not finish silently after the send");
+        return {"no_reply", Json::object(), "Keep the handoff silent"};
     };
 
     Store store(path);
@@ -833,34 +890,66 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     const auto server = startWeb(store, 0, web);
     Browser browser(*server);
 
-    const auto asked = browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "ship"}, {"text", "Ask Reviewer"}}, 201);
-    for (int i = 0; i < 6; ++i) runtime.runConversations();
-    const auto reviewer = browser.get("/api/view?bot=reviewer").at("events");
-    const auto inbound = std::ranges::find_if(
-        reviewer, [](const Json& event) { return event.at("kind") == "conversation_message" && event.at("data").contains("botMessage"); });
-    check(inbound != reviewer.end() && inbound->at("data").at("botMessage").at("fromBotId") == "ernest" &&
-              inbound->at("data").at("text") == "Can we ship today?",
-          "Reviewer's conversation did not show who sent the Bot message");
-    const auto ernest = browser.get("/api/view?bot=ernest");
-    check(conversationReply(ernest, asked.at("messageId")).at("text") == "Reviewer に聞いています。" &&
-              hasEvent(ernest.at("events"), "conversation_reply", "Reviewer says we can ship today."),
-          "Ernest did not relay Reviewer's answer to the person");
+    browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "silent-handoff"}, {"text", "Ask Reviewer to check"}}, 201);
+    for (int i = 0; i < 8; ++i) runtime.runConversations();
+
+    const auto sender = browser.get("/api/view?bot=ernest");
+    const auto recipient = browser.get("/api/view?bot=reviewer");
+    const auto handoff =
+        std::ranges::find_if(sender.at("events"), [](const Json& event) { return event.at("kind") == "conversation_handoff"; });
+    check(handoff != sender.at("events").end() && handoff->at("data").at("peerBotId") == "reviewer" &&
+              handoff->at("data").at("messageId").is_number_integer() && !handoff->at("data").contains("text"),
+          "A silent Bot send did not preserve a text-free link to its transcript");
+    check(std::ranges::any_of(recipient.at("events"),
+                              [&](const Json& event) {
+                                  return event.at("kind") == "conversation_message" &&
+                                         event.at("id") == handoff->at("data").at("messageId") &&
+                                         event.at("data").at("botMessage").at("fromBotId") == "ernest";
+                              }),
+          "The transcript link did not point to the delivered Bot message");
+    check(std::ranges::none_of(sender.at("events"), [](const Json& event) { return event.at("kind") == "conversation_reply"; }) &&
+              std::ranges::none_of(recipient.at("events"), [](const Json& event) { return event.at("kind") == "conversation_reply"; }),
+          "A silent handoff created a chat reply");
+    const Person reader{"handoff-reader"};
+    BotAccess{store}.setMember(localOwner, "ernest", reader.id, true);
+    check(!Policy{store}.allows(reader, Action::bot_view, "reviewer"), "The synthetic reader unexpectedly has peer access");
+    const auto restricted = flockv0::web::conversation(store, "ernest", 0, &reader);
+    const auto restrictedHandoff =
+        std::ranges::find_if(restricted.at("events"), [](const Json& event) { return event.at("kind") == "conversation_handoff"; });
+    check(restrictedHandoff != restricted.at("events").end() && !restrictedHandoff->at("data").contains("peerBotId") &&
+              !restrictedHandoff->at("data").contains("messageId"),
+          "The sender-only projection exposed peer transcript metadata");
     check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
 }
 
-void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {
+void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path, std::string status, std::string report, bool failHandoff = false) {
     struct ScriptedModel final : Model {
         std::function<Decision(const ModelInput&)> script;
         ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
+    const bool canFinishSilently = status == "completed" && !report.empty();
+    const auto* replyText = status == "failed" ? "The release check failed." : "The release check has no readable result.";
     bool woke = false;
+    bool handoffAttempted = false;
     model.script = [&](const ModelInput& input) -> Decision {
         if (input.event.contains("sessionWake")) {
             woke = true;
             check(input.event.contains("task") && input.event.contains("botMessage"), "the task wake lost the Bot that asked for the work");
             for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
                 check(std::ranges::find(input.tools, tool) == input.tools.end(), "a Bot-started task woke with the person's authority");
-            return {"reply", {{"text", "Finished."}}, "Tell the person"};
+            const bool silentAvailable = std::ranges::find(input.tools, "no_reply") != input.tools.end();
+            if (failHandoff && handoffAttempted) {
+                check(!silentAvailable, "A failed Bot handoff still allowed the task wake to finish silently");
+                return {"reply", {{"text", "The report could not be delivered to the requesting Bot."}}, "Report the failed handoff"};
+            }
+            check(silentAvailable == canFinishSilently,
+                  "The silent tool was unavailable for a readable success or allowed for other results");
+            if (failHandoff) {
+                handoffAttempted = true;
+                return {"message_bot", {{"botId", "ernest"}, {"text", "The task completed."}}, "Return the result"};
+            }
+            if (!canFinishSilently) return {"reply", {{"text", replyText}}, {}};
+            return {"no_reply", Json::object(), {}};
         }
         if (!input.event.at("turn").empty()) return {"reply", {{"text", "Done."}}, "Tell the person"};
         if (input.event.contains("botMessage")) return {"start_task", {{"request", "Check the release"}}, "Do the work"};
@@ -888,9 +977,28 @@ void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {
         runtime.tick();
         if (t3.launches == 1)
             t3.observations["thread-release"] = {
-                .kind = Observation::Kind::Finished, .status = "completed", .report = "Checked.", .itemId = "report"};
+                .kind = Observation::Kind::Finished, .status = status, .report = report, .itemId = "report"};
     }
     check(woke, "the Bot-started task never woke its conversation");
+    const auto work = TaskList(store).tasks("reviewer");
+    const auto page = browser.get("/api/view?bot=reviewer");
+    if (failHandoff) {
+        check(work.size() == 1 && work.front().task.state == TaskState::completed &&
+                  conversationCompletion(page, work.front().task.id).at("data").at("text") == report &&
+                  hasEvent(page.at("events"), "conversation_reply", "The report could not be delivered to the requesting Bot."),
+              "The completed report or failed Bot handoff was not surfaced");
+        return;
+    }
+    if (!canFinishSilently) {
+        check(work.size() == 1 && work.front().task.state == TaskState::waiting &&
+                  hasEvent(page.at("events"), "conversation_reply", replyText),
+              "The failed or unreadable task result was silently closed");
+        return;
+    }
+    check(work.size() == 1 && work.front().task.state == TaskState::completed &&
+              conversationCompletion(page, work.front().task.id).at("data").at("text") == report &&
+              std::ranges::count_if(page.at("events"), [](const Json& event) { return event.at("kind") == "conversation_reply"; }) == 1,
+          "The silent wake did not retain the finished task report without posting a reply");
 }
 
 void botMessagesStopAtTheExchangeLimit(const std::filesystem::path& path) {
@@ -1921,7 +2029,11 @@ int main(int argc, char** argv) {
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         conversationMessagesAnotherBot(directory.path / "message-bot.sqlite");
-        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task.sqlite");
+        silentBotSendKeepsTranscriptNavigation(directory.path / "silent-handoff.sqlite");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task.sqlite", "completed", "Checked.");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-failed.sqlite", "failed", "Could not check.");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-empty.sqlite", "completed", "");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task-handoff-failed.sqlite", "completed", "Checked.", true);
         botMessagesStopAtTheExchangeLimit(directory.path / "message-bot-limit.sqlite");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");

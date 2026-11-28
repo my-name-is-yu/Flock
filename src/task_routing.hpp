@@ -61,6 +61,7 @@ public:
         : database(database), permissions(permissions), waitStorage(waitStorage), sessionReadStorage(sessionReadStorage) {}
 
     bool automationBeforeDispatch(Id task) const;
+    bool questionYieldsProjectSlot(const TaskData& task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
     bool projectRouteReady(Id task, std::string_view action) const;
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;

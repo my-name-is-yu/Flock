@@ -52,11 +52,13 @@ public:
     bool storedDiscoveryPermitted = true;
     GitLog log{"linker: missing symbol in build\nextra output the adapter failed to trim", false};
     Json result{{"headSha", sha}, {"status", "ok"}};
-    int createCalls = 0, lookupCalls = 0, logCalls = 0, hostCalls = 0, comments = 0, edits = 0;
+    std::string createHeadSha = sha;
+    int createCalls = 0, lookupCalls = 0, prReadCalls = 0, logCalls = 0, hostCalls = 0, comments = 0, edits = 0;
     std::vector<Entry> prs;
     std::map<Id, GitLog> jobLogs;
     std::vector<std::string> prStateUpdates;
     std::function<void(std::string_view)> onPrStateUpdate;
+    std::function<void()> onPrRead;
     std::function<void(const GitContext&)> beforeCall;
     std::function<Json(const GitRepository&, const Decision&)> responseForCall;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
@@ -80,10 +82,20 @@ public:
         if (create == Create::lostRequest) throw Conflict("No response");
         const auto number = static_cast<Id>(prs.size() + 1);
         GitPullRequest pr{request.target, number, "https://" + request.target.base.resource() + "/pull/" + std::to_string(number),
-                          request.operationId, sha};
+                          request.operationId, createHeadSha};
         prs.push_back({pr, request.title, state});
         if (create == Create::lostResponse) throw Conflict("Lost response");
         return pr;
+    }
+    std::optional<GitPullRequest> readPullRequest(const GitContext&, const GitRepository& repo, Id number) override {
+        ++prReadCalls;
+        if (onPrRead) {
+            auto hook = std::exchange(onPrRead, {});
+            hook();
+        }
+        for (const auto& entry : prs)
+            if (entry.state == State::open && entry.pr.target.base == repo && entry.pr.number == number) return entry.pr;
+        return std::nullopt;
     }
     std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget&) override {
         ++lookupCalls;

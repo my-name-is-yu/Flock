@@ -230,7 +230,7 @@ Conversations::ConversationChanges Conversations::conversationChangesSince(std::
 SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered')
+  AND j.kind IN ('conversation_reply','conversation_handoff','instruction_accepted','instruction_delivered')
 UNION ALL
 SELECT conversation_bot_id,json_extract(data,'$.eventId') FROM journal
 WHERE kind='bot_setup_undone' AND id>?1 AND id<=?2 AND (?3='' OR conversation_bot_id=?3)
@@ -407,6 +407,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (task.generation != generation) throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};
+    bool requeue = false;
     if (operation == "answer" && reason == WaitReason::user_question) {
         const auto owner = task.question ? task.question->target : waitQuestionTarget(*wait);
         if (owner != questionTarget(task, waitId)) throw RequestChanged{};
@@ -422,12 +423,13 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         if (field(updated, "kind") == "policy_outcome") updated["policyReply"] = {{"anchor", answerId}, {"personId", actor.id}};
         taskEvents.consumeEvent(task);
         taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
+        requeue = taskRouting.questionYieldsProjectSlot(task);
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
     waitStorage.clearWait(task, operation);
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
-    task.state = TaskState::deciding;
+    task.state = requeue ? TaskState::queued : TaskState::deciding;
     taskRecords.save(task);
     if (kind) inboxDecisions.record(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
