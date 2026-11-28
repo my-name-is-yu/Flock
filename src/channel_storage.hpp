@@ -19,6 +19,7 @@ namespace flockv0 {
 class ConversationStorage;
 class ConversationMessages;
 
+class ChannelDeliveryQueue;
 class Database;
 class JournalStorage;
 class Policy;
@@ -32,10 +33,11 @@ class PolicyApprovals;
 class ChannelStorage {
 public:
     ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const WebIdentityState& webIdentity,
-                   JournalStorage& journalStorage, ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
-                   PolicyApprovals& policyApprovals)
+                   JournalStorage& journalStorage, ChannelDeliveryQueue& channelDeliveries, ConversationStorage& conversationTurns,
+                   ConversationMessages& conversationMessages, PolicyApprovals& policyApprovals)
         : database(database), path(path), permissions(permissions), webIdentity(webIdentity), journalStorage(journalStorage),
-          conversationTurns(conversationTurns), conversationMessages(conversationMessages), policyApprovals(policyApprovals) {}
+          channelDeliveries(channelDeliveries), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
+          policyApprovals(policyApprovals) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
@@ -49,8 +51,6 @@ public:
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelApprovalNotice(Id source);
     std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
-    void queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions);
-    void queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions = {});
     bool channelDeliveryDue() const;
     void deliverChannels(std::stop_token = {});
     void dropPausedBotDeliveries(std::string_view bot);
@@ -67,6 +67,7 @@ private:
     const Policy& permissions;
     const WebIdentityState& webIdentity;
     JournalStorage& journalStorage;
+    ChannelDeliveryQueue& channelDeliveries;
     ConversationStorage& conversationTurns;
     ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;

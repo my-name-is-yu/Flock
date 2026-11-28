@@ -55,13 +55,10 @@ struct TaskChange {
     TaskRoute route;
 };
 class SessionReadStorage;
-class SessionParticipationStorage;
 class TaskRouting {
 public:
-    TaskRouting(Database& database, const Policy& permissions, WaitStorage& waitStorage, SessionReadStorage& sessionReadStorage,
-                SessionParticipationStorage& sessionParticipationStorage)
-        : database(database), permissions(permissions), waitStorage(waitStorage), sessionReadStorage(sessionReadStorage),
-          sessionParticipationStorage(sessionParticipationStorage) {}
+    TaskRouting(Database& database, const Policy& permissions, WaitStorage& waitStorage, SessionReadStorage& sessionReadStorage)
+        : database(database), permissions(permissions), waitStorage(waitStorage), sessionReadStorage(sessionReadStorage) {}
 
     bool automationBeforeDispatch(Id task) const;
     bool isUndispatchedNotesWait(const TaskData& task) const;
@@ -85,6 +82,5 @@ private:
     const Policy& permissions;
     WaitStorage& waitStorage;
     SessionReadStorage& sessionReadStorage;
-    SessionParticipationStorage& sessionParticipationStorage;
 };
 }

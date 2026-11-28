@@ -7,7 +7,7 @@
 
 namespace flockv0 {
 
-class ChannelStorage;
+class ChannelDeliveryQueue;
 class Database;
 struct AssignedRun;
 struct CompletionEntry;
@@ -31,7 +31,8 @@ enum class JournalKind;
 
 class JournalStorage {
 public:
-    JournalStorage(Database& database, ChannelStorage& channelStorage) : database(database), channelStorage(channelStorage) {}
+    JournalStorage(Database& database, ChannelDeliveryQueue& channelDeliveries)
+        : database(database), channelDeliveries(channelDeliveries) {}
 
     Id journal(Id, const Wait&);
     Id journal(Id, const CompletionEntry&);
@@ -55,6 +56,6 @@ private:
     Id writeRunReportJournal(Id, JournalKind, const RunReportEntry&);
 private:
     Database& database;
-    ChannelStorage& channelStorage;
+    ChannelDeliveryQueue& channelDeliveries;
 };
 }

@@ -5,6 +5,7 @@
 #include "bot_lifecycle_storage.hpp"
 #include "bot_settings_storage.hpp"
 #include "bot_setup_storage.hpp"
+#include "channel_delivery_queue.hpp"
 #include "channel_storage.hpp"
 #include "conversation_context_storage.hpp"
 #include "conversation_messages.hpp"
@@ -45,7 +46,8 @@ struct Store::Impl {
     BotAccess botAccess;
     SecretRequests secretRequests;
     ConversationMessages conversationMessages{database, permissions, webIdentity};
-    BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, sessionParticipationStorage, taskRouting};
+    ChannelDeliveryQueue channelDeliveries{database, permissions};
+    BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
     ConversationStorage conversationTurns{database,
                                           attachments,
                                           automationStorage,
@@ -72,7 +74,8 @@ struct Store::Impl {
                                           taskRouting,
                                           waitStorage,
                                           webIdentity,
-                                          conversationMessages};
+                                          conversationMessages,
+                                          channelDeliveries};
     ConversationTools conversationTools{database,           attachments, conversationTurns, conversationMessages, permissions,  path,
                                         botSettingsStorage, modelCalls,  policyApprovals,   sessionReadStorage,   secretStorage};
     SessionMessageStorage sessionMessageStorage{database,
@@ -94,10 +97,10 @@ struct Store::Impl {
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
     TaskOperations taskOperations{database,   botLifecycle, permissions, journalStorage, outboxStorage, secretStorage,
                                   taskEvents, taskRecords,  taskRouting, waitStorage,    inboxStorage};
-    TaskRouting taskRouting{database, permissions, waitStorage, sessionReadStorage, sessionParticipationStorage};
+    TaskRouting taskRouting{database, permissions, waitStorage, sessionReadStorage};
     TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage};
     OutboxStorage outboxStorage{database};
-    JournalStorage journalStorage{database, channelStorage};
+    JournalStorage journalStorage{database, channelDeliveries};
     TaskEvents taskEvents{database};
     WaitStorage waitStorage{database, journalStorage};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
@@ -111,8 +114,9 @@ struct Store::Impl {
     InboxStorage inboxStorage{database, secretStorage, taskRecords, waitStorage, permissions, taskOperations, policyApprovals};
     GitStorage gitStorage{database,    secretStorage,        taskRecords,  journalStorage,  webIdentity,
                           permissions, conversationMessages, botLifecycle, policyApprovals, sessionParticipationStorage};
-    ChannelStorage channelStorage{database,       path, permissions, webIdentity, journalStorage, conversationTurns, conversationMessages,
-                                  policyApprovals};
+    ChannelStorage channelStorage{
+        database,       path, permissions, webIdentity, journalStorage, channelDeliveries, conversationTurns, conversationMessages,
+        policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{database,    secretStorage,        webIdentity,  taskRecords,    waitStorage,
                                     permissions, conversationMessages, botLifecycle, channelStorage, inboxStorage};

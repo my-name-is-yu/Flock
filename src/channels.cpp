@@ -7,6 +7,7 @@
 #include "flock/policy.hpp"
 #include "flock/channels.hpp"
 #include "database.hpp"
+#include "channel_delivery_queue.hpp"
 #include "channel_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
@@ -406,7 +407,7 @@ WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','acce
     return ChannelResource{row.string(0), "text/html; charset=utf-8", row.string(1)};
 }
 
-void ChannelStorage::queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions) {
+void ChannelDeliveryQueue::reply(Id source, Id reply, std::string_view text, const Json& suggestions) {
     database.exec(R"SQL(
 INSERT INTO channel_deliveries(id,source_id,reply_id,operation,payload)
 SELECT ?,c.message_id,?,'reply',? FROM channel_messages c JOIN messages m ON m.id=c.message_id
@@ -415,12 +416,12 @@ ON CONFLICT(reply_id) DO NOTHING)SQL",
                   {"reply-" + std::to_string(reply) + "-" + actionId(), reply, Json{{"text", text}, {"suggestions", suggestions}}, source});
 }
 
-void ChannelStorage::queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
+void ChannelDeliveryQueue::taskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
     if (text.empty()) return;
     auto source = database.query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
     const auto scrub = permissions.secretRedactor(source.string(1));
-    queueChannelReply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
+    reply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
 void ChannelStorage::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
@@ -448,7 +449,7 @@ void ChannelStorage::channelNotice(Id source, std::string_view bot, std::string_
     std::string notice(reason);
     if (supportsReplies) notice += followUp;
     const auto reply = journalStorage.journalConversationReply(std::nullopt, bot, {.replyToMessageId = source, .text = notice});
-    if (supportsReplies) queueChannelReply(source, reply, notice, Json::array());
+    if (supportsReplies) channelDeliveries.reply(source, reply, notice, Json::array());
 }
 
 std::optional<Resource> ChannelStorage::channelToolPolicy(Id message, std::string_view tool) {

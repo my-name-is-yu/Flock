@@ -54,7 +54,6 @@ public:
                                          Id message = 0);
     void stopPausedBotParticipation(std::string_view bot);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
-    bool t3EnvironmentConnected(std::string_view environment);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, const PeerResolver&,
                           std::stop_token);
     bool leaveSession(SessionReadStorage&, const conversation::Message&, int, const Decision&, T3&, std::stop_token);

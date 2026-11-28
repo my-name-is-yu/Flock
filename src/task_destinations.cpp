@@ -1,4 +1,5 @@
 #include "wait_storage.hpp"
+#include "t3_connected_environments.hpp"
 #include "task_routing.hpp"
 #include "flock/types.hpp"
 #include "flock/t3.hpp"
@@ -37,7 +38,7 @@ ProjectCatalog TaskRouting::readProjectCatalog(T3& t3, std::string_view bot, con
     const auto& gateway = route.gatewayEnvironmentId.empty() ? environment : route.gatewayEnvironmentId;
     {
         std::lock_guard lock(database.mutex);
-        if (requireConnection && !sessionParticipationStorage.t3EnvironmentConnected(gateway))
+        if (requireConnection && !t3EnvironmentConnected(database, gateway))
             return "Connect this T3 environment under Connections in Flock settings.";
         if (!permissions.allows(bot, Action::environment_inspect, environment) ||
             permissions.forbidden(bot, Action::environment_launch, environment))

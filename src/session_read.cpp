@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "session_read_storage.hpp"
 #include "session_participation_storage.hpp"
@@ -309,7 +310,7 @@ public:
             std::lock_guard lock(store_.database.mutex);
             if (!permitted(*session) || !policy_.allows(store_.conversationMessages.actor(message_), Action::bot_decide, bot_) ||
                 !policy_.allows(bot_, Action::environment_inspect, target.environmentId) ||
-                !store_.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {target.environmentId}).next())
+                !t3EnvironmentConnected(store_.database, target.environmentId))
                 return {};
         }
         std::optional<SessionMetadata> metadata;

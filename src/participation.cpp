@@ -1,4 +1,5 @@
 #include "store_access.hpp"
+#include "t3_connected_environments.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
@@ -263,7 +264,7 @@ bool T3Connections::configured() const {
     return port() != 0;
 }
 
-bool SessionParticipationStorage::t3EnvironmentConnected(std::string_view environment) {
+bool t3EnvironmentConnected(const Database& database, std::string_view environment) {
     std::lock_guard lock(database.mutex);
     return database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next();
 }
@@ -302,8 +303,7 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
     };
     const auto fingerprint = sha256Hex(Json::array({bot, text, thread}).dump());
     const auto connected = [&](std::string_view environment) {
-        return storage.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next() &&
-               policy.allows(bot, Action::environment_inspect, environment);
+        return t3EnvironmentConnected(storage.database, environment) && policy.allows(bot, Action::environment_inspect, environment);
     };
     const auto replay = [&]() -> Id {
         auto row = storage.database.query(R"SQL(

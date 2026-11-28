@@ -1,4 +1,5 @@
 #include "session_dispatch_lock.hpp"
+#include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
@@ -499,7 +500,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     };
     const auto disconnected = [&] {
         const auto& connectionEnvironment = cmd.gatewayEnvironmentId.empty() ? cmd.environmentId : cmd.gatewayEnvironmentId;
-        return requireT3Connection && !sessionParticipationStorage.t3EnvironmentConnected(connectionEnvironment);
+        return requireT3Connection && !t3EnvironmentConnected(database, connectionEnvironment);
     };
     const auto connectionUnavailable = [&] {
         applyDelivery(id, action, {Delivery::Kind::Auth, {}, "Connect this T3 environment in Flock settings before sending work.", true});

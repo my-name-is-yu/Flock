@@ -2,7 +2,7 @@
   "include/flock/bot_change.hpp": 55,
   "include/flock/command.hpp": 85,
   "include/flock/decision.hpp": 106,
-  "include/flock/intake.hpp": 84,
+  "include/flock/intake.hpp": 82,
   "include/flock/json.hpp": 153,
   "include/flock/model.hpp": 48,
   "include/flock/outbox.hpp": 80,

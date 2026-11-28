@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "channel_delivery_queue.hpp"
 #include "conversation_messages.hpp"
 #include "flock/board_inbox.hpp"
 #include "web_identity_state.hpp"
@@ -887,7 +888,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
     if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
-        channelStorage.queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
+        channelDeliveries.reply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});

@@ -1,4 +1,5 @@
 #include "journal_git.hpp"
+#include "t3_connected_environments.hpp"
 #include "conversation_messages.hpp"
 #include "conversation_turns.hpp"
 #include "git_storage.hpp"
@@ -71,7 +72,7 @@ LIMIT 2
     }
     const auto& connectionEnvironment =
         destination.gatewayEnvironmentId.empty() ? destination.environmentId : destination.gatewayEnvironmentId;
-    if (pr.next() || !sessionParticipationStorage.t3EnvironmentConnected(connectionEnvironment) ||
+    if (pr.next() || !t3EnvironmentConnected(database, connectionEnvironment) ||
         sessionParticipationStorage.sessionParticipationStopped(message.bot, destination, message.id))
         return std::nullopt;
 
