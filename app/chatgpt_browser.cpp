@@ -1,4 +1,5 @@
 #include "chatgpt.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/model_error.hpp"
 
 #include <openssl/crypto.h>
@@ -34,19 +35,6 @@ using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 constexpr std::string_view callbackPath = "/auth/callback";
 constexpr std::string_view completePath = "/auth/complete";
-
-class Descriptor {
-public:
-    explicit Descriptor(int fd) : fd_(fd) {}
-    ~Descriptor() {
-        if (fd_ >= 0) close(fd_);
-    }
-    Descriptor(const Descriptor&) = delete;
-    Descriptor& operator=(const Descriptor&) = delete;
-    int get() const { return fd_; }
-private:
-    int fd_;
-};
 
 class BrowserProcess {
 public:
@@ -265,9 +253,9 @@ Authorization authorizeBrowser(const BrowserOpener& open, const std::string& end
                                bool printUrl, bool browserRequired, std::stop_token stop) {
     checkStop(stop);
 #ifdef __linux__
-    const Descriptor listener(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+    const FileDescriptor listener(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
 #else
-    const Descriptor listener(socket(AF_INET, SOCK_STREAM, 0));
+    const FileDescriptor listener(socket(AF_INET, SOCK_STREAM, 0));
     if (listener.get() < 0 || fcntl(listener.get(), F_SETFD, FD_CLOEXEC) != 0 || fcntl(listener.get(), F_SETFL, O_NONBLOCK) != 0)
         listenerFailure();
 #endif
@@ -307,7 +295,7 @@ Authorization authorizeBrowser(const BrowserOpener& open, const std::string& end
             }
             continue;
         }
-        const Descriptor client(acceptClient(listener.get()));
+        const FileDescriptor client(acceptClient(listener.get()));
         if (client.get() < 0) continue;
         const auto request = readHeaders(client.get(), completionDeadline, stop);
         const auto target = requestTarget(request, host);

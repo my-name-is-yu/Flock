@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/json.hpp"
 
 #include <nlohmann/json.hpp>
@@ -26,21 +27,6 @@
 namespace flockv0::t3detail {
 namespace {
 
-class Fd {
-public:
-    explicit Fd(int fd) : fd_(fd) {}
-    ~Fd() { close(); }
-    Fd(const Fd&) = delete;
-    Fd& operator=(const Fd&) = delete;
-    int get() const { return fd_; }
-    void close() {
-        if (fd_ >= 0) ::close(fd_);
-        fd_ = -1;
-    }
-private:
-    int fd_;
-};
-
 class SpawnActions {
 public:
     SpawnActions() : ready(posix_spawn_file_actions_init(&actions) == 0) {}
@@ -59,7 +45,7 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory, std
 #else
     if (pipe(pipes) != 0) return {};
 #endif
-    Fd reader(pipes[0]), writer(pipes[1]);
+    FileDescriptor reader(pipes[0]), writer(pipes[1]);
 #if !defined(__linux__)
     if (fcntl(reader.get(), F_SETFD, FD_CLOEXEC) != 0 || fcntl(writer.get(), F_SETFD, FD_CLOEXEC) != 0) return {};
 #endif

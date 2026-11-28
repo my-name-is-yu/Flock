@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/file_descriptor.hpp"
 #include "flock/percent_encoding.hpp"
 #include "flock/digest.hpp"
 #include "flock/json.hpp"
@@ -40,19 +41,6 @@ using Clock = std::chrono::steady_clock;
 constexpr std::string_view ReadScope = "orchestration:read";
 constexpr std::string_view OperateScope = "orchestration:operate";
 constexpr std::string_view CallbackPath = "/flock/oauth/callback";
-
-class Fd {
-public:
-    explicit Fd(int fd) : fd_(fd) {}
-    ~Fd() {
-        if (fd_ >= 0) close(fd_);
-    }
-    Fd(const Fd&) = delete;
-    Fd& operator=(const Fd&) = delete;
-    int get() const { return fd_; }
-private:
-    int fd_;
-};
 
 [[noreturn]] void privateStorage() {
     throw Failure(Failure::Kind::Settings, "T3 credentials require a private, owner-only directory and files");
@@ -131,7 +119,7 @@ bool writeAll(int fd, std::string_view text) {
 
 void saveCredential(int directory, const std::string& name, const std::string& environmentId, const Credential& credential) {
     const auto temporary = ".pending-" + randomValue();
-    Fd file(openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    FileDescriptor file(openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (file.get() < 0) privateStorage();
     try {
         const auto data = Json{{"environmentId", environmentId}, {"label", credential.label},           {"mcpUrl", credential.mcpUrl},
@@ -363,7 +351,7 @@ void callbackReply(int client, bool success) {
 std::string receiveCode(int listener, const std::string& state, const std::string& issuer, std::stop_token stop) {
     const auto deadline = Clock::now() + std::chrono::minutes(3);
     while (ready(listener, deadline, stop)) {
-        Fd client(accept(listener, nullptr, nullptr));
+        FileDescriptor client(accept(listener, nullptr, nullptr));
         if (client.get() < 0 || fcntl(client.get(), F_SETFD, FD_CLOEXEC) != 0) continue;
         const auto target = requestTarget(client.get(), deadline, stop);
         const auto query = target.find('?');
@@ -394,8 +382,8 @@ bool validToken(std::string_view token) {
 
 static Credential readCredential(const std::filesystem::path& path, const std::string& environmentId) {
     const auto name = credentialName(environmentId);
-    const Fd directory(openDirectory(path, false));
-    const Fd file(openat(directory.get(), name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+    const FileDescriptor directory(openDirectory(path, false));
+    const FileDescriptor file(openat(directory.get(), name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
     if (file.get() < 0 && errno == ENOENT) noCredential();
     verifyPrivate(file.get(), false);
     std::array<char, 4096> buffer{};
@@ -463,10 +451,10 @@ T3LoginResult loginT3(const std::filesystem::path& credentialDirectory, const st
     checkCancelled(stop);
     if (expectedEnvironmentId) (void)credentialName(*expectedEnvironmentId);
     const auto resource = checkedResource(mcpUrl);
-    const Fd directory(openDirectory(credentialDirectory, true));
+    const FileDescriptor directory(openDirectory(credentialDirectory, true));
     const auto oauth = discover(resource);
     checkCancelled(stop);
-    const Fd listener(listenOnLoopback());
+    const FileDescriptor listener(listenOnLoopback());
     sockaddr_in addr{};
     socklen_t size = sizeof(addr);
     if (getsockname(listener.get(), reinterpret_cast<sockaddr*>(&addr), &size) != 0) callbackFailure();
