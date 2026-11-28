@@ -909,10 +909,16 @@ FollowUp followUpReadiness(Client& client, const Command& command, const auto& s
     // Newer settled Runs, such as replies from Bots invited into the Session, do not block a follow-up.
     // The Session agent sees them, and Flock attributes the follow-up by the Run that the send returns.
     if (!member(info, "activeRunId").is_null() || position(member(info, "pendingRequestCount")) != 0) return FollowUp::Busy;
-    stageAttachments();
     // A held queue can exist even without an active Run.
-    const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
-    if (!array(queue, "items").empty()) return FollowUp::Busy;
+    const auto hasQueuedWork = [&] {
+        const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
+        return !array(queue, "items").empty();
+    };
+    if (hasQueuedWork()) return FollowUp::Busy;
+    if (!command.attachments.empty()) {
+        stageAttachments();
+        if (hasQueuedWork()) return FollowUp::Busy;
+    }
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
     const auto& current = checked.at("thread");

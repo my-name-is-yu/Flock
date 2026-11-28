@@ -101,6 +101,8 @@ class Fixture(BaseHTTPRequestHandler):
             upload["bytes"] = base64.b64encode(raw).decode()
             if state.get("moveThreadOnUpload"):
                 state["threadProjectId"] = "other-project"
+            if state.get("holdQueueOnUpload"):
+                state["heldQueue"] = True
             self.reply(code=201)
             return
         if self.path == "/token":
@@ -263,6 +265,7 @@ class Fixture(BaseHTTPRequestHandler):
         if state.get("attachmentTools"):
             if name == "t3_attachment_prepare_upload":
                 assert set(args) == {"upload"}
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
                 uploads = state.setdefault("uploads", {})
                 attachment_id = f"file-{len(uploads) + 1}"
                 uploads[attachment_id] = args["upload"]
@@ -426,7 +429,8 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["action"] == "list" and args["threadId"] == "thread"
             if state.get("moveThreadOnQueueList"):
                 state["threadProjectId"] = "other-project"
-            return {"items": [], "nextCursor": None}
+            items = [{"queuedRunId": "held-run", "text": "Held work", "truncated": False}] if state.get("heldQueue") else []
+            return {"items": items, "nextCursor": None}
         if name == "t3_thread_list":
             if args.get("allProjects") is True:
                 assert "projectId" not in args and not args["includeSubagents"]
