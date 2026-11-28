@@ -586,6 +586,12 @@ void responseContract() {
               !turnTool("start_task")["properties"]["environments"].contains("maxItems") &&
               turnTool("start_task")["properties"]["commit"]["type"] == "string" &&
               turnTool("start_task")["properties"]["projectId"]["type"] == "string" &&
+              turnTool("start_task")["properties"].contains("sessionModel") &&
+              turnTool("start_task")["properties"]["sessionModel"]["type"] == "object" &&
+              turnTool("start_task")["properties"]["sessionModel"]["properties"]["model"]["type"] == "string" &&
+              turnTool("start_task")["properties"]["sessionModel"]["properties"]["providerInstanceId"]["type"] == "string" &&
+              turnTool("start_task")["properties"]["sessionModel"]["required"] == Json::array({"model", "providerInstanceId"}) &&
+              turnTool("start_task")["properties"]["sessionModel"]["additionalProperties"] == false &&
               turnTool("change_task")["required"] == Json::array({"taskId", "generation", "revisionId", "instruction"}) &&
               turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
               turnTool("change_task")["properties"]["projectId"]["type"] == "string" &&

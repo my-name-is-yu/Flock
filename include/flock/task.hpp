@@ -90,6 +90,10 @@ struct TaskCriteriaProposal {
     std::optional<std::int64_t> sourceMessageId;
 };
 
+struct SessionModelSelection {
+    std::string model, providerInstanceId;
+};
+
 struct TaskData {
     std::int64_t id = 0, generation = 0;
     TaskState state = TaskState::queued;
@@ -113,6 +117,7 @@ struct TaskData {
     std::optional<std::string> launchWarning{};
     std::int64_t createdAt = 0;
     std::optional<TaskCriteriaProposal> criteriaProposal{};
+    std::optional<SessionModelSelection> requestedSessionModel{};
     std::optional<std::string> requestedCommit{};
     std::optional<std::string> waitingNote{};
     std::optional<std::int64_t> externalCheckAt{};

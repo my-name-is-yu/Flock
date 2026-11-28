@@ -144,6 +144,10 @@ Command runtime::OutboxDispatch::command(const TaskData& task, const Outbox& act
         c.config["session"]["workspaceStrategy"] = {{"type", "worktree"}, {"baseRef", commit}, {"startFromOrigin", false}};
         c.config["commitVerification"] = {{"expectedCommit", commit}, {"projectId", c.projectId}};
     }
+    if (c.tool == CommandTool::delegate && task.requestedSessionModel) {
+        c.config["session"]["model"] = task.requestedSessionModel->model;
+        c.config["session"]["providerInstanceId"] = task.requestedSessionModel->providerInstanceId;
+    }
     if (c.gatewayEnvironmentId.empty()) c.gatewayEnvironmentId = c.target.gatewayEnvironmentId;
     if (c.gatewayEnvironmentId.empty() && !action.destinationAction)
         c.gatewayEnvironmentId = task.gatewayEnvironmentId.value_or(c.environmentId);

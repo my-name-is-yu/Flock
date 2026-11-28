@@ -48,6 +48,7 @@
 #include "flock/model_error.hpp"
 #include "flock/decision.hpp"
 #include "flock/task.hpp"
+#include "flock/session_settings.hpp"
 #include "flock/wait.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "database.hpp"
@@ -688,6 +689,12 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
         const auto request = text(args, "request", maxBodyBytes, true);
         const auto doneWhen = text(args, "doneWhen", limits::session_prompt::maxDecisionTextBytes, false);
         const bool resume = args.value("resume", false);
+        std::optional<SessionModelSelection> requestedSessionModel;
+        if (const auto selected = args.find("sessionModel"); selected != args.end()) {
+            const auto session = normalizeSessionSettings(*selected);
+            requestedSessionModel = SessionModelSelection{session.at("model").get<std::string>(),
+                                                          session.at("providerInstanceId").get<std::string>()};
+        }
         auto [destination, targets, commit] = taskRouting.startDestinations(message, args, resume, selectedSession, linked);
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
@@ -704,6 +711,11 @@ Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision&
             if (!doneWhen.empty()) task.criteriaProposal = TaskCriteriaProposal{doneWhen, message.id};
             if (!targets.empty()) task.destinations = std::move(targets);
             if (!commit.empty()) task.requestedCommit = std::move(commit);
+            taskRecords.save(task);
+        }
+        if (requestedSessionModel) {
+            auto task = taskRecords.load(id);
+            task.requestedSessionModel = std::move(requestedSessionModel);
             taskRecords.save(task);
         }
         Json receipt{{"ok", true}, {"effect", "started"}, {"taskId", id}};
