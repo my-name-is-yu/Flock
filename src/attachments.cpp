@@ -3,11 +3,14 @@
 #include "conversation_storage.hpp"
 #include "workspace_internal.hpp"
 #include "flock/channels.hpp"
+#include "flock/conversations.hpp"
 #include "flock/limits.hpp"
 #include "image_headers.hpp"
 #include "flock/types.hpp"
 #include "flock/json.hpp"
 #include "flock/model.hpp"
+#include "flock/person.hpp"
+#include "flock/policy.hpp"
 #include "flock/secrets.hpp"
 
 #include <algorithm>
@@ -84,6 +87,17 @@ Json metadata(const Json& value) {
     result["kind"] = isImage ? "image" : (wav || mp3 ? "audio" : "file");
     return result;
 }
+
+AttachmentFile readFile(const Json& payload, const SecretRedactor& scrub, std::string_view label) {
+    auto name = field(payload, "name");
+    auto mime = field(payload, "mimeType");
+    auto bytes = decodeAttachment(payload.at("dataBase64").get_ref<const std::string&>(),
+                                  limits::messages::isAttachmentImage(mime) ? maxImageBytes : maxFileBytes);
+    if (scrub.containsProtectedText(name) || scrub.containsProtectedText(mime) || scrub.containsProtectedText(bytes))
+        throw Conflict(scrub.containsProtectedText(name) ? std::string(label) + " has a protected filename" :
+                                                           name + ": contains protected information");
+    return {std::move(name), std::move(mime), std::move(bytes)};
+}
 }
 
 void AttachmentStorage::saveAttachments(Id message, const Json& attachments) {
@@ -148,23 +162,37 @@ std::vector<TaskAttachmentRef> AttachmentStorage::selectForTask(const conversati
     return refs;
 }
 
-std::vector<TaskAttachment> AttachmentStorage::taskAttachments(
+std::vector<AttachmentFile> AttachmentStorage::taskAttachments(
     std::string_view bot, const std::vector<TaskAttachmentRef>& refs, const SecretRedactor& scrub) const {
-    std::vector<TaskAttachment> files;
+    std::vector<AttachmentFile> files;
     for (const auto& ref : refs) {
         auto row = scopedAttachment(bot, ref.messageId, {{"messageId", ref.messageId}, {"attachmentId", ref.attachmentId}});
         const auto label = "Attachment " + ref.attachmentId + " on message " + std::to_string(ref.messageId);
         if (!row.next()) throw Conflict(label + " is no longer available");
-        const auto payload = row.json(1);
-        auto name = field(payload, "name");
-        auto mime = field(payload, "mimeType");
-        auto bytes = decodeAttachment(payload.at("dataBase64").get_ref<const std::string&>(),
-                                      limits::messages::isAttachmentImage(mime) ? maxImageBytes : maxFileBytes);
-        if (scrub.containsProtectedText(name) || scrub.containsProtectedText(mime) || scrub.containsProtectedText(bytes))
-            throw Conflict(scrub.containsProtectedText(name) ? label + " has a protected filename" : name + ": contains protected information");
-        files.push_back({std::move(name), std::move(mime), std::move(bytes)});
+        files.push_back(readFile(row.json(1), scrub, label));
     }
     return files;
+}
+
+std::optional<AttachmentFile> Conversations::attachment(const Person& viewer, std::string_view bot, Id message, Id attachment) const {
+    Json payload;
+    SecretRedactor redactor({});
+    {
+        std::lock_guard lock(database_.mutex);
+        const Policy policy{store_};
+        if (viewer.id.empty() || !policy.allows(viewer, Action::bot_view, bot)) return std::nullopt;
+        auto row = database_.query("SELECT a.payload FROM message_attachments a JOIN messages m ON m.id=a.message_id "
+                                   "WHERE m.bot_id=? AND m.person_id=? AND a.message_id=? AND a.attachment_id=?",
+                                   {bot, viewer.id, message, std::to_string(attachment)});
+        if (!row.next()) return std::nullopt;
+        payload = row.json(0);
+        redactor = policy.secretRedactor(bot);
+    }
+    try {
+        return readFile(payload, redactor, "Attachment");
+    } catch (const Conflict&) {
+        return std::nullopt;
+    }
 }
 
 Json AttachmentStorage::inspectAttachment(std::string_view bot, Id throughMessage, const Json& args) {

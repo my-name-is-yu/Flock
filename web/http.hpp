@@ -20,4 +20,5 @@ void error(httplib::Response&, int status, std::string_view code, std::string_vi
 
 Person person(const WebCallbacks&, const httplib::Request&);
 bool hasWebIdentities(const WebCallbacks&);
+std::string_view conversationMediaKind(std::string_view mime);
 }

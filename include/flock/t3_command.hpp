@@ -17,7 +17,7 @@ struct Command : CommandPayload {
     Json config = Json::object();
     std::string authGeneration{}, ownerBotId{};
     std::optional<SessionOrigin> sessionOrigin{};
-    std::vector<TaskAttachment> attachments{};
+    std::vector<AttachmentFile> attachments{};
     std::size_t attachmentCount = 0;
 };
 }

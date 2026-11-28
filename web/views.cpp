@@ -2,6 +2,7 @@
 #include "flock/percent_encoding.hpp"
 #include "flock/task_list.hpp"
 #include "views.hpp"
+#include "http.hpp"
 #include "flock/conversations.hpp"
 #include "flock/markdown.hpp"
 #include "flock/policy.hpp"
@@ -191,6 +192,18 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         details["textHtml"] = markdown::toHtml(field(data, "text"), sensitive);
         if (kind == "conversation_message") {
             copyFields(details, data, {"attachmentCount", "imageAttachmentCount"});
+            if (const auto files = data.find("files"); files != data.end() && !files->empty()) {
+                auto& projected = details["files"] = Json::array();
+                for (const auto& file : *files) {
+                    Json item = Json::object();
+                    copyFields(item, file, {"id", "name"});
+            const auto mime = field(file, "mimeType");
+            const auto preview = conversationMediaKind(mime);
+            if (!preview.empty()) item["preview"] = preview;
+            if (preview == "image" && mime != "image/jpeg") item["mayAnimate"] = true;
+                    projected.push_back(std::move(item));
+                }
+            }
             if (const auto wake = data.find("sessionWake"); wake != data.end() && wake->is_object())
                 copyFields(details["sessionWake"] = Json::object(), *wake, {"threadId", "title", "reason", "sourceMessageId"});
             if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())

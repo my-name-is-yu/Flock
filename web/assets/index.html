@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/sidebar.css">
   <link rel="stylesheet" href="/conversation.css">
+  <link rel="stylesheet" href="/message-attachments.css">
   <link rel="stylesheet" href="/conversation-find.css">
   <link rel="stylesheet" href="/composer.css">
   <link rel="stylesheet" href="/dialog.css">
@@ -208,6 +209,24 @@
       </div>
     </main>
   </div>
+  <dialog id="attachment-preview" class="attachment-preview" aria-labelledby="attachment-preview-title">
+    <header class="attachment-preview-toolbar">
+      <h2 id="attachment-preview-title" dir="auto"></h2>
+      <a id="attachment-preview-download" class="icon-button" aria-label="Download">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg>
+      </a>
+      <button id="attachment-preview-close" class="icon-button" type="button" aria-label="Close photo preview" autofocus>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div id="attachment-preview-stage" class="attachment-preview-stage"></div>
+    <button id="attachment-preview-previous" class="icon-button attachment-preview-nav" type="button" aria-label="Previous photo" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
+    </button>
+    <button id="attachment-preview-next" class="icon-button attachment-preview-nav" type="button" aria-label="Next photo" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
+  </dialog>
   <dialog id="detail" class="detail" aria-labelledby="detail-title">
     <div class="dialog-head">
       <h2 id="detail-title"></h2>

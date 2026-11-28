@@ -10,7 +10,7 @@ struct TaskAttachmentRef {
     bool operator==(const TaskAttachmentRef&) const = default;
 };
 
-struct TaskAttachment {
+struct AttachmentFile {
     std::string name, mimeType, bytes;
 };
 }

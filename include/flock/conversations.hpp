@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/json.hpp"
+#include "flock/task_attachment.hpp"
 #include "flock/types.hpp"
 #include <map>
 #include <optional>
@@ -25,6 +26,7 @@ public:
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, ConversationEvents events = ConversationEvents::all,
                       const Person* viewer = nullptr) const;
+    std::optional<AttachmentFile> attachment(const Person&, std::string_view bot, Id message, Id attachment) const;
     struct ConversationChanges {
         Id through;
         std::map<std::string, std::vector<Id>> messages;
@@ -32,6 +34,7 @@ public:
     // Original messages affected by replies and instruction delivery since a journal cursor.
     ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
 private:
+    Store& store_;
     Database& database_;
     const ConversationContextStorage& context_;
     const MemoryStorage& memory_;
