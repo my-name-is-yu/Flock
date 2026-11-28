@@ -31,8 +31,9 @@ bool ownerOnly(int fd, bool directory) {
 bool replacePrivateFile(int directory, const std::string& temporary, const std::string& name, std::string_view bytes) {
     const FileDescriptor file(openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (file.get() < 0) return false;
-    const bool replaced = ownerOnly(file.get(), false) && writeAll(file.get(), bytes) && fsync(file.get()) == 0 &&
-                          renameat(directory, temporary.c_str(), directory, name.c_str()) == 0;
+    // The process umask can remove the owner's own access from the mode asked for above.
+    const bool replaced = ownerOnly(file.get(), false) && fchmod(file.get(), 0600) == 0 && writeAll(file.get(), bytes) &&
+                          fsync(file.get()) == 0 && renameat(directory, temporary.c_str(), directory, name.c_str()) == 0;
     if (!replaced) {
         unlinkat(directory, temporary.c_str(), 0);
         return false;
