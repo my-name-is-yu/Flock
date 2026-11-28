@@ -70,6 +70,31 @@ class ArchitectureTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("web/assets/settings.js: create elements with node from dom.js", result.stderr)
 
+    def test_storage_components_cycle_only_in_recorded_groups(self):
+        def wiring(extra=""):
+            return {
+                "src/storage.hpp": "struct Store::Impl {\n"
+                "    ConversationStorage conversationTurns{database, conversationTools, sessionMessageStorage};\n"
+                "    ConversationTools conversationTools{database, conversationTurns};\n"
+                "    SessionMessageStorage sessionMessageStorage{database, sessionParticipationStorage};\n"
+                "    SessionParticipationStorage sessionParticipationStorage{database, conversationTurns};\n"
+                "    ChannelStorage channelStorage{database, policyApprovals};\n"
+                "    PolicyApprovals policyApprovals{database, channelStorage" + extra + "};\n"
+                "    JournalStorage journalStorage{database};\n"
+                "    WaitStorage waitStorage{database, journalStorage" + (", policyApprovals" if extra else "") + "};\n"
+                "};\n"
+            }
+
+        self.assertEqual(self.check(wiring()).returncode, 0)
+        result = self.check(wiring(", waitStorage"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("channelStorage, policyApprovals, waitStorage refer to each other in a cycle", result.stderr)
+        smaller = wiring()
+        smaller["src/storage.hpp"] = smaller["src/storage.hpp"].replace("{database, channelStorage}", "{database}")
+        result = self.check(smaller)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the recorded cycle channelStorage, policyApprovals is smaller now", result.stderr)
+
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"
         self.assertEqual(self.check({"tests/support.hpp": define}).returncode, 0)
