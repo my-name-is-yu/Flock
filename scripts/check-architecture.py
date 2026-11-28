@@ -22,6 +22,7 @@ SINGLE_OWNERS = (
         "include/flock/environment.hpp",
         "name environment variables in flock/environment.hpp",
     ),
+    (re.compile(r"\bINTO journal\b"), "src/database.cpp", "write journal entries with Database::writeJournal"),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
 SCRIPT_OWNERS = (

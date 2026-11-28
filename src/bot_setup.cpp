@@ -56,16 +56,13 @@ Json BotSetupStorage::apply(std::string_view bot, std::string_view operation, co
               const auto scrub = secrets.redactor(bot);
               if (scrub.containsProtected(before) || scrub.containsProtected(after) || scrub.containsProtected(dependencies))
                   throw Conflict("Bot settings contain protected material");
-              database.exec("INSERT INTO journal(time,kind,data,conversation_bot_id,operation_id,task_id)"
-                            " VALUES(?,'bot_setup_updated',?,?,?,?)",
-                            {now,
-                             Json{{"before", before},
-                                  {"after", after},
-                                  {"dependencies", dependencies},
-                                  {"undone", false},
-                                  {"sourceMessageId", message}},
-                             bot, operation, task ? Json(task) : Json(nullptr)});
-              event = database.last();
+              event = database.writeJournal(
+                  {.bot = bot,
+                   .kind = "bot_setup_updated",
+                   .time = now,
+                   .task = task ? std::optional<Id>(task) : std::nullopt,
+                   .operationId = operation},
+                  {{"before", before}, {"after", after}, {"dependencies", dependencies}, {"undone", false}, {"sourceMessageId", message}});
           }},
          catalog);
     return {{"ok", true}, {"status", event ? "applied" : "unchanged"}, {"eventId", event}};
@@ -87,8 +84,7 @@ void BotSetupStorage::undo(const Person& actor, std::string_view bot, Id event) 
          {data.at("before"), operation,
           [&](const Json&, const Json&, const Json&) {
               database.exec("UPDATE journal SET data=json_set(data,'$.undone',json('true')) WHERE id=?", {event});
-              database.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'bot_setup_undone',?,?)",
-                            {unixTime(), Json{{"eventId", event}}, bot});
+              database.writeJournal({.bot = bot, .kind = "bot_setup_undone", .time = unixTime()}, {{"eventId", event}});
           },
           &expected},
          Json::array());

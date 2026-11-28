@@ -351,7 +351,7 @@ ORDER BY r.id DESC LIMIT 21
                     {"version", result.at("version")},
                     {"replyToMessageId", sourceMessage}};
         if (shared) notice["docId"] = id;
-        database_.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)", {now, notice, bot});
+        database_.writeJournal({.bot = bot, .kind = "memory_remembered", .time = now}, notice);
     }
     return result;
 }
