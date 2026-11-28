@@ -1,4 +1,5 @@
 #include "flock/task_history.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/task_list.hpp"
 #include "views.hpp"
 #include "flock/conversations.hpp"
@@ -55,21 +56,6 @@ void copyTrigger(Json& output, const Json& source) {
                 "source"});
 }
 
-std::string threadSegment(std::string_view id, std::string_view punctuation = "-_.~") {
-    constexpr std::string_view hex = "0123456789ABCDEF";
-    std::string segment;
-    for (const unsigned char c : id) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || punctuation.find(c) != punctuation.npos)
-            segment += static_cast<char>(c);
-        else {
-            segment += '%';
-            segment += hex[c >> 4];
-            segment += hex[c & 15];
-        }
-    }
-    return segment;
-}
-
 bool localThreadLink(std::string_view url, std::string_view path) {
     if (!url.starts_with("http://")) return false;
     url.remove_prefix(7);
@@ -89,7 +75,7 @@ bool localThreadLink(std::string_view url, std::string_view path) {
 
 std::string sessionPath(std::string_view environment, std::string_view thread, std::string_view punctuation = "-_.~") {
     if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..") return {};
-    return "/" + threadSegment(environment, punctuation) + "/" + threadSegment(thread, punctuation);
+    return "/" + percentEncode(environment, punctuation) + "/" + percentEncode(thread, punctuation);
 }
 
 std::string hostedSessionPath(std::string_view environment, std::string_view thread) {
@@ -123,7 +109,7 @@ Json avatarView(const Json& source, std::string_view botId) {
     copyFields(view, source, {"kind", "example", "icon", "color", "eyeColor", "filename", "version"});
     const auto version = field(source, "version");
     if (field(source, "kind") == "upload" && !version.empty() && !botId.empty()) {
-        view["imageUrl"] = "/api/bot-avatar?bot=" + threadSegment(botId) + "&v=" + threadSegment(version);
+        view["imageUrl"] = "/api/bot-avatar?bot=" + percentEncode(botId) + "&v=" + percentEncode(version);
     }
     if (const auto definition = source.find("definition"); definition != source.end() && definition->is_object()) {
         Json shape = Json::object();

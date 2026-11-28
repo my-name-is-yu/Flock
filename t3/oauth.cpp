@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/digest.hpp"
 #include "flock/json.hpp"
 #include "flock/t3_mcp.hpp"
@@ -150,7 +151,7 @@ std::string form(const Headers& parameters) {
     std::string result;
     for (const auto& [key, value] : parameters) {
         if (!result.empty()) result += '&';
-        result += encode(key) + '=' + encode(value);
+        result += percentEncode(key) + '=' + percentEncode(value);
     }
     return result;
 }

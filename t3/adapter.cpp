@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/commit_check.hpp"
 #include "flock/command.hpp"
 #include "flock/json.hpp"
@@ -515,7 +516,7 @@ void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_v
     // checkedUrl permits plaintext HTTP only on loopback. A local-only T3 environment
     // opens in its own browser client, where the user authorized this connection.
     if (origin.starts_with("http://") && !run.threadId.empty())
-        run.link = std::string(origin) + "/" + encode(environment) + "/" + encode(run.threadId);
+        run.link = std::string(origin) + "/" + percentEncode(environment) + "/" + percentEncode(run.threadId);
 }
 
 struct LaunchArguments {

@@ -1,4 +1,5 @@
 #include "bot_tools.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/detail/json_rpc.hpp"
 #include "flock/json.hpp"
@@ -156,21 +157,6 @@ Response http(const std::string& url, bool publicOnly, const std::vector<std::st
     return response;
 }
 
-std::string urlEncode(std::string_view value) {
-    constexpr std::string_view hex = "0123456789ABCDEF";
-    std::string encoded;
-    for (unsigned char c : value) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~')
-            encoded += static_cast<char>(c);
-        else {
-            encoded += '%';
-            encoded += hex[c >> 4];
-            encoded += hex[c & 15];
-        }
-    }
-    return encoded;
-}
-
 Json parse(std::string_view value) {
     constexpr int maxDepth = 24;
     const auto checkDepth = [](int depth, Json::parse_event_t, Json&) {
@@ -188,7 +174,7 @@ public:
     explicit PublicWeb(std::string token) : token_(std::move(token)) {}
     Json search(std::string_view query) override {
         if (token_.empty()) throw Conflict("Web search is not configured");
-        const auto url = "https://api.search.brave.com/res/v1/web/search?count=6&q=" + urlEncode(query);
+        const auto url = "https://api.search.brave.com/res/v1/web/search?count=6&q=" + percentEncode(query);
         const auto response = http(url, true, {"Accept: application/json", "X-Subscription-Token: " + token_});
         const auto json = SecretRedactor({token_}).payload(parse(response.body));
         const auto matches = json.value("web", Json::object()).value("results", Json::array());
