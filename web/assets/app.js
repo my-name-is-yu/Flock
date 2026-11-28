@@ -2150,7 +2150,7 @@ function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
   let summary = target.summary;
   if (!summary && target.messageId) {
     const source = events.get(target.messageId)?.data;
-    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
+    if (source) summary = answering ? waitText(source) : source.report ?? source.text;
   }
   elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
   elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
