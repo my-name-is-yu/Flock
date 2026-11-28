@@ -18,6 +18,7 @@
 #include "task_records.hpp"
 #include "wait_storage.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -89,8 +90,13 @@ void runtime::TaskDecisions::launch(const TaskData& task, const Json& event, con
 bool runtime::TaskDecisions::answerSessionQuestion(const TaskData& task, const Json& event) {
     if (!task.activeRun || !task.question || task.question->fields.size() != 1) return false;
     const auto& question = *task.question;
-    const Json args{{"requestId", question.target.requestId},
-                    {"answers", sessionQuestionAnswers(question.fields, {{question.fields.front().id, event.at("userAnswer")}})}};
+    const auto& asked = question.fields.front();
+    // The person picks from the labels Flock showed, and the Session expects the option's value.
+    auto answer = event.at("userAnswer").get<std::string>();
+    if (std::ranges::find(asked.options, answer, &QuestionOption::value) == asked.options.end())
+        if (const auto shown = std::ranges::find(asked.options, answer, &QuestionOption::label); shown != asked.options.end())
+            answer = shown->value;
+    const Json args{{"requestId", question.target.requestId}, {"answers", sessionQuestionAnswers(question.fields, {{asked.id, answer}})}};
     return updates.change(task, [&](TaskData& current) {
         if (!current.question || current.question->target.requestId != question.target.requestId) return false;
         updates.consumeEvent(current);
@@ -104,7 +110,9 @@ bool runtime::TaskDecisions::answerSessionQuestion(const TaskData& task, const J
 void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, const Json* launchDefaults) {
     updates.change(task, [&](TaskData& current) {
         const bool idle = current.actionId.empty() && !current.activeRun;
-        if (idle && !current.pendingInstructions.empty()) {
+        // A reply to a stopped task is the person's next instruction. The Session prompt carries its text.
+        const bool answered = event.contains("userAnswer") && (!current.projectId.empty() || current.selectedSession);
+        if (idle && (!current.pendingInstructions.empty() || answered)) {
             const auto tool =
                 RunReports::hasSettledRun(current) && !current.newSessionRequired ? CommandTool::follow_up : CommandTool::delegate;
             const TaskDecision decision{{std::string(commandToolName(tool)), Json::object(), "Send the person's new instructions"}};
@@ -116,13 +124,11 @@ void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, con
             return true;
         }
         const auto& kind = event.at("kind");
-        if (kind == "question" && current.question && !event.contains("userAnswer")) {
+        if (kind == "question" && current.question && current.question->fields.size() == 1 && !event.contains("userAnswer")) {
             // Show the Session's own question to the person. Their answer goes back to the Session.
-            const auto& fields = current.question->fields;
+            const auto& first = current.question->fields.front();
             std::vector<std::string> choices;
-            if (fields.size() == 1)
-                for (const auto& option : fields.front().options) choices.push_back(option.label);
-            const auto& first = fields.empty() ? QuestionField{} : fields.front();
+            for (const auto& option : first.options) choices.push_back(option.label);
             const auto text = !first.prompt.empty() ? first.prompt : !first.header.empty() ? first.header : "The Session needs an answer.";
             updates.consumeEvent(current);
             updates.recordDecision(current, event, {{"ask_user", {{"question", text}}, "Ask the person the Session's question"}},
@@ -133,7 +139,15 @@ void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, con
             return true;
         }
         updates.consumeEvent(current);
-        const auto reason = kind == "result"           ? (field(event, "status") == "completed" ? "finished" : "failed")
+        // Flock relays one field. Several fields, or an answer the Session refused, are answered in T3.
+        if (kind == "question" && current.question && current.activeRun) {
+            waitStorage.wait(current, SimpleWaitReason::t3_input, "Answer the Session's question in T3.");
+            return true;
+        }
+        const auto status = field(event, "status");
+        const auto reason = kind == "result"           ? (status == "completed"     ? "finished"
+                                                          : status == "interrupted" ? "interrupted"
+                                                                                    : "failed")
                             : kind == "question"       ? "waiting_for_person"
                             : kind == "external_check" ? "check_due"
                                                        : "unknown";

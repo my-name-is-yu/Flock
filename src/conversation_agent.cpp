@@ -243,6 +243,7 @@ WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND q.wait_reason='us
 const char* ConversationStorage::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
+    if (message.routing.contains("botMessage")) return "Another Bot's message cannot answer a question for the person";
     const auto asked = waitStorage.waitAnchor(task.id, wait->id);
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
@@ -884,6 +885,12 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                 artifacts.push_back(result.at("artifact"));
             if (!result.value("ok", false) || !result.contains("effect")) continue;
             Json action = {{"tool", calls.at(i).at("tool")}, {"effect", result.at("effect")}};
+            if (action.at("tool") == "message_bot") {
+                // The answer arrives in a later turn, where history is the only record of what was asked.
+                const auto& sent = calls.at(i).at("args");
+                action["botId"] = sent.at("botId");
+                action["text"] = bounded(secretStorage.redactor(message.bot).text(sent.at("text").get<std::string>()), 2000);
+            }
             if (result.contains("taskId")) {
                 action["taskId"] = result.at("taskId");
                 touched.insert(result.at("taskId").get<Id>());
@@ -897,6 +904,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         for (const auto& action : actions) {
             text += "\n- " + field(action, "effect") + ": ";
             if (action.contains("taskId")) text += requestName(taskRecords.load(action.at("taskId")));
+            if (action.contains("botId")) text += field(action, "botId");
         }
     }
     std::optional<Id> linked;
@@ -1239,7 +1247,9 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
                 if (peers) {
                     auto bots = Json::array();
+                    const auto actor = turnActor(message);
                     for (const auto& peer : peers(message.bot)) {
+                        if (!permissions.allows(actor, Action::bot_decide, peer.intake.botId)) continue;
                         Json bot{{"botId", peer.intake.botId}, {"name", peer.name}};
                         if (!peer.role.empty()) bot["role"] = peer.role;
                         bots.push_back(std::move(bot));

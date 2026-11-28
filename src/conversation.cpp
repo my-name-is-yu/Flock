@@ -40,7 +40,7 @@ using limits::messages::maxBodyBytes;
 namespace {
 bool reservedMessageId(std::string_view id) {
     return id.starts_with("channel:") || id.starts_with("session-wake:") || id.starts_with("session-ask:") ||
-           id.starts_with("session-invite:");
+           id.starts_with("session-invite:") || id.starts_with("bot-message:") || id.starts_with("task-wake:");
 }
 
 Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
@@ -200,7 +200,6 @@ Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry 
     const auto source = loadTurnMessage(sourceMessage);
     auto routing = source.routing;
     routing.erase("sessionInvitation");
-    routing.erase("botMessage");
     wake.sourceMessageId = source.id;
     return enqueueWake(source, std::move(routing), wake, clientId);
 }

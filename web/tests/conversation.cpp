@@ -817,6 +817,15 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         }
         check(from == "reviewer" && input.event.at("text") == "Yes, ship it." && input.event.at("botMessage").at("depth") == 2,
               "Reviewer's answer did not reach Ernest");
+        check(std::ranges::any_of(input.history,
+                                  [](const Json& entry) {
+                                      return entry.contains("actions") &&
+                                             entry.at("actions") == Json::array({{{"tool", "message_bot"},
+                                                                                  {"effect", "sent"},
+                                                                                  {"botId", "reviewer"},
+                                                                                  {"text", "Can we ship today?"}}});
+                                  }),
+              "Ernest's history lost the question that Reviewer answered");
         return {"reply", {{"text", "Reviewer says we can ship today."}}, "Relay the answer"};
     };
 
@@ -849,6 +858,51 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
               hasEvent(ernest.at("events"), "conversation_reply", "Reviewer says we can ship today."),
           "Ernest did not relay Reviewer's answer to the person");
     check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
+}
+
+void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {
+    struct ScriptedModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
+    } model;
+    bool woke = false;
+    model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.contains("sessionWake")) {
+            woke = true;
+            check(input.event.contains("task") && input.event.contains("botMessage"), "the task wake lost the Bot that asked for the work");
+            for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
+                check(std::ranges::find(input.tools, tool) == input.tools.end(), "a Bot-started task woke with the person's authority");
+            return {"reply", {{"text", "Finished."}}, "Tell the person"};
+        }
+        if (!input.event.at("turn").empty()) return {"reply", {{"text", "Done."}}, "Tell the person"};
+        if (input.event.contains("botMessage")) return {"start_task", {{"request", "Check the release"}}, "Do the work"};
+        return {"message_bot", {{"botId", "reviewer"}, {"text", "Check the release"}}, "Ask Reviewer"};
+    };
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "ernest") return {{"Reviewer", {"reviewer", "", "local-env", "ernest"}}};
+        return {};
+    };
+    auto web = callbacks();
+    web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
+    const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "local-env", ""};
+    };
+    Runtime runtime(store, model, t3, [](std::string_view) { return std::string{}; }, RuntimeOptions{.peers = peers, .intake = intake});
+    const auto server = startWeb(store, 0, web);
+    Browser browser(*server);
+    for (const auto* reserved : {"bot-message:1:0", "task-wake:1:1"})
+        browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", reserved}, {"text", "Hello"}}, 409);
+    browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "work"}, {"text", "Ask Reviewer to check"}}, 201);
+    for (int i = 0; i < 12 && !woke; ++i) {
+        runtime.runConversations();
+        runtime.tick();
+        if (t3.launches == 1)
+            t3.observations["thread-release"] = {
+                .kind = Observation::Kind::Finished, .status = "completed", .report = "Checked.", .itemId = "report"};
+    }
+    check(woke, "the Bot-started task never woke its conversation");
 }
 
 void botMessagesStopAtTheExchangeLimit(const std::filesystem::path& path) {
@@ -1879,6 +1933,7 @@ int main(int argc, char** argv) {
         parallelVerificationInView(directory.path / "parallel-verification.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         conversationMessagesAnotherBot(directory.path / "message-bot.sqlite");
+        botStartedTaskKeepsItsBotOrigin(directory.path / "message-bot-task.sqlite");
         botMessagesStopAtTheExchangeLimit(directory.path / "message-bot-limit.sqlite");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         botRolePreviewRedactsBeforeBounding(directory.path / "role-preview.db");

@@ -1146,10 +1146,17 @@ bool TaskOperations::acceptInstruction(TaskData& task, Id messageId, int step, s
     }
     journalStorage.journal(task.id, pending);
     task.pendingInstructions.push_back(std::move(pending));
-    if (task.state == TaskState::external_waiting) {
+    // A task that woke its conversation has no event left, so the instruction is the next one.
+    const auto parked = [&] {
+        if (conflicting || task.state != TaskState::deciding || !task.actionId.empty() || task.activeRun) return false;
+        const auto event = taskEvents.currentEvent(task);
+        return event.is_null() || event.at("consumed") == true;
+    };
+    const bool waiting = task.state == TaskState::external_waiting;
+    if (waiting || parked()) {
         const auto key = "instruction/" + std::to_string(messageId) + "/" + std::to_string(step);
         taskEvents.event(task, key, {{"kind", "user_instruction"}});
-        task.state = TaskState::queued;
+        if (waiting) task.state = TaskState::queued;
     }
     taskRecords.save(task);
     return conflicting;

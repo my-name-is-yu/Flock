@@ -1495,6 +1495,7 @@ function eventCard(event, context, place, report) {
     const wakeText = {
       finished: `Work finished in ${name}`,
       failed: `Work stopped before finishing in ${name}`,
+      interrupted: `Work was interrupted in ${name}`,
       waiting_for_person: `Work in ${name} needs your input`,
       unknown: `Flock couldn’t check the status of work in ${name}`,
       check_due: `Time to check on work in ${name}`,

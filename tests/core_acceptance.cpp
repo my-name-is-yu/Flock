@@ -1005,6 +1005,58 @@ void conversationTaskLaunchesItsRequest() {
           "the conversation task did not launch its request with the saved criterion and source");
 }
 
+void wakeTurnInstructionBecomesOneFollowUp() {
+    Fixture f;
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work", "Check the release");
+    Id task = 0;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.contains("sessionWake")) return converse(input, "send_to_task", task, {{"instruction", "Run the tests too"}});
+        return converse(input, "start_task", 0, {});
+    };
+    f.runtime->runConversations();
+    task = TaskList(*f.store).tasks("alpha").at(0).task.id;
+    f.reach(task, "running");
+    int refusals = 3;
+    f.t3.rejectWork = [&](const Command& cmd) { return cmd.tool == CommandTool::follow_up && refusals-- > 0; };
+    f.t3.finish("run-1");
+    for (int i = 0; i < 20 && f.t3.follows == 0; ++i) {
+        f.now += 5;
+        f.runtime->tick();
+        f.runtime->runConversations();
+    }
+    check(f.t3.follows == 1 && refusals < 0 && f.task(task)["state"] == "running" &&
+              f.t3.seen.back().instruction.find("Run the tests too") != std::string::npos,
+          "an instruction sent from the wake turn did not reach the Session as one follow-up");
+    check(f.logs(task, "send_started") == 2, "each retry of a refused follow-up wrote another send_started entry");
+}
+
+void sessionQuestionAcceptsTheShownChoice() {
+    Fixture f;
+    const auto id = f.submit();
+    f.reach(id, "running");
+    f.t3.question("run-1");
+    const auto asked = f.wait(id, "user_question");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, asked), "answer", {{"text", "Main branch"}});
+    f.reach(id, "running");
+    check(f.t3.replies == 1, "the choice Flock showed was not sent to the Session as its value");
+
+    f.t3.runs.at("run-1").kind = Observation::Kind::Question;
+    f.t3.runs.at("run-1").question = {"two-fields", {{.id = "branch", .prompt = "Which branch?"}, {.id = "tag", .prompt = "Which tag?"}}};
+    f.wait(id, "t3_input");
+}
+
+void replyToInterruptedTaskContinuesIt() {
+    Fixture f;
+    const auto id = f.submit();
+    f.reach(id, "running");
+    f.t3.finish("run-1", "interrupted");
+    const auto asked = f.wait(id, "user_question");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, asked), "answer", {{"text", "Carry on"}});
+    f.reach(id, "running");
+    check(f.t3.follows == 1 && f.t3.seen.back().instruction.find("Carry on") != std::string::npos,
+          "the reply to an interrupted task did not reach its Session");
+}
+
 void recoveredRunAcceptsQuestion() {
     Fixture f;
     const auto id = TaskIntake(*f.store).submit({"alpha", "Recover and answer", "e", "p"});
@@ -1052,6 +1104,9 @@ int main() {
              {"project owners on task pages", taskPagesShowProjectOwners},
              {"Conversation task launches its request", conversationTaskLaunchesItsRequest},
              {"Recovered Run accepts its original question", recoveredRunAcceptsQuestion},
+             {"wake turn instruction becomes one follow-up", wakeTurnInstructionBecomesOneFollowUp},
+             {"Session question accepts the shown choice", sessionQuestionAcceptsTheShownChoice},
+             {"reply to an interrupted task continues it", replyToInterruptedTaskContinuesIt},
              {"Pending conversation approval leaves an unrelated task free to complete",
               [] {
                   Fixture f;

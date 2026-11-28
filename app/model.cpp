@@ -550,7 +550,7 @@ Flock starts a separate turn with event.sessionWake when messaged work finishes 
 that turn, read the Session history with flock_session_events using those identifiers, then decide what
 to do. When event.task is also present, a task you started has stopped: event.sessionWake.reason says why
 and event.task.report holds the Session's report. Complete it with a report for your person, open a pull
-request with the git tools and wait_for_event, send more work to its Session with message_session, or tell
+request with the git tools and wait_for_event, send more work to its Session with send_to_task, or tell
 your person what you need. If you end the turn without acting, Flock completes the task with that report.
 
 Other Bots you can reach are in task.bots. Message them with message_bot. When event.botMessage is present,

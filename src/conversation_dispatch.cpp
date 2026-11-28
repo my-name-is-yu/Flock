@@ -206,14 +206,14 @@ CallOutcome ConversationStorage::executeMessageBot(const Message& message, int s
         const auto key = "bot-message:" + std::to_string(message.id) + ":" + std::to_string(step);
         auto sent = database.query("SELECT id FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?", {bot, actor.id, key});
         if (sent.next()) {
-            result = {{"ok", true}, {"messageId", sent.number(0)}, {"depth", depth}};
+            result = {{"ok", true}, {"effect", "sent"}, {"messageId", sent.number(0)}, {"depth", depth}};
         } else {
             if (!ctx.intake) throw Conflict("Bot intake is unavailable");
             const auto routing = ctx.intake(bot, body);
             if (routing.botId != bot) throw Conflict("The destination Bot is unavailable");
             const ConversationBotMessageEntry origin{message.bot, message.routing.at("config").value("botDisplayName", message.bot), depth};
             const auto id = enqueueConversation(actor, routing, message.principalSource, key, body, 0, nullptr, nullptr, &origin);
-            result = {{"ok", true}, {"messageId", id}, {"depth", depth}};
+            result = {{"ok", true}, {"effect", "sent"}, {"messageId", id}, {"depth", depth}};
         }
     } catch (const Conflict& error) {
         result = toolFailure(error.what());
