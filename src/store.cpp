@@ -201,7 +201,9 @@ TaskControl::TaskControl(Store& store) : database_(Database::of(store)), operati
 
 TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords) {}
 
-Channels::Channels(Store& store) : channels_(StoreAccess::get(store).channelStorage) {}
+Channels::Channels(Store& store)
+    : database_(Database::of(store)), channels_(StoreAccess::get(store).channelStorage), turns_(StoreAccess::get(store).conversationTurns) {
+}
 
 LocalMachines::LocalMachines(Store& store) : machines_(StoreAccess::get(store).localMachineStorage) {}
 

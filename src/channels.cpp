@@ -203,8 +203,7 @@ bool ChannelStorage::permitsChannel(std::string_view bot, const ChannelOrigin& o
             !permissions.forbidden(bot, operation == "read" ? Action::channel_read : Action::channel_post, channelPolicyTarget(origin)));
 }
 
-Json ChannelStorage::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event,
-                                    const std::function<Intake(std::string_view, std::string_view)>& routing) {
+AdmittedChannelMessage ChannelStorage::admitChannelMessage(ChannelKind kind, std::string_view credential, const Json& event) {
     std::lock_guard lock(database.mutex);
     const auto found = connectors.find(kind);
     if (found == connectors.end()) throw ChannelAccessDenied("Channel is not connected");
@@ -249,9 +248,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     }
     auto text = field(event, "text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return conversationTurns.receive(
-        {sender->personId, false}, sender->botId, origin.key(), text, replyTo, conversation::PrincipalSource::channel, &message,
-        [&] { return routing(sender->botId, text); }, Json::array());
+    return {sender->botId, replyTo, std::move(text), std::move(message)};
 }
 
 void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
@@ -740,7 +737,12 @@ void Channels::artifactBaseUrl(std::string url) {
 }
 
 Json Channels::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event, const IntakeResolver& routing) {
-    return channels_.receiveChannel(kind, credential, event, routing);
+    std::lock_guard lock(database_.mutex);
+    const auto admitted = channels_.admitChannelMessage(kind, credential, event);
+    const auto& message = admitted.message;
+    return turns_.receive(
+        {message.personId, false}, admitted.botId, message.origin.key(), admitted.text, admitted.replyTo,
+        conversation::PrincipalSource::channel, &message, [&] { return routing(admitted.botId, admitted.text); }, Json::array());
 }
 
 std::optional<ChannelResource> Channels::attachment(const Person& person, Id id) const {

@@ -84,6 +84,8 @@ std::string decodeAttachment(std::string_view, std::size_t maxBytes);
 
 class Store;
 class ChannelStorage;
+class ConversationStorage;
+class Database;
 struct Person;
 
 class Channels {
@@ -96,7 +98,9 @@ public:
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
 private:
+    Database& database_;
     ChannelStorage& channels_;
+    ConversationStorage& turns_;
 };
 
 }

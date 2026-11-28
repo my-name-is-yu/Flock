@@ -116,9 +116,8 @@ struct Store::Impl {
                               permissions, taskOperations, policyApprovals, inboxDecisions};
     GitStorage gitStorage{database,    secretStorage,        taskRecords,  journalStorage,  webIdentity,
                           permissions, conversationMessages, botLifecycle, policyApprovals, sessionParticipationStorage};
-    ChannelStorage channelStorage{
-        database,       path, permissions, webIdentity, journalStorage, channelDeliveries, conversationTurns, conversationMessages,
-        policyApprovals};
+    ChannelStorage channelStorage{database,       path, permissions, webIdentity, journalStorage, channelDeliveries, conversationMessages,
+                                  policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{database,    secretStorage,        webIdentity,  taskRecords,    waitStorage,
                                     permissions, conversationMessages, botLifecycle, channelStorage, inboxDecisions};
