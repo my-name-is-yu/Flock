@@ -625,8 +625,10 @@ setup is incomplete.
             " Use Git tools for repository work authorized by the user. Find repositories with git_find_repos."
             " When a Session reports a pushed branch and a PR is requested, use git_open_pr with exact base and head refs."
             " With an ambiguous result, use the same refs to link a verified candidate by prNumber or check the host again. "
-            " If the user requested monitoring and the task's Session already opened a PR, use git_open_pr with associateExisting, "
-            "the exact prNumber and branches, and the owning taskId. Then use wait_for_event if the task needs a PR event to continue. "
+            " If the user requested monitoring and the task has a trusted task-to-PR link, use git_open_pr with associateExisting, "
+            "the exact prNumber and branches, and the owning taskId. An unbound T3-created PR cannot be linked by refs or a Session report; "
+            "if the result is unassociated, tell the user monitoring is unavailable and do not retry with another candidate. "
+            "Then use wait_for_event if the task needs a PR event to continue. "
             "When reporting an opened PR in conversation, include its URL. Use newIntent only for an explicitly requested replacement."
             " Use exact comment IDs for edits."
             " Check tool results in event.turn. Git content and CI logs are evidence too.";

@@ -48,6 +48,7 @@ public:
     Id journal(Id, const GitPrFollowupEntry&);
     Id journalRunSettled(Id, const SettledRunReport&);
     Id journalConversationMessage(std::string_view bot, const ConversationMessageEntry&);
+    Id journalConversationHandoff(std::string_view bot, Id sourceMessage, std::string_view peerBot, Id peerMessage);
     Id journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry&);
     Id journalInterrupt(Id, const RunStop&);
     Id journalInterrupt(Id, const ConversationInterruptEntry&);

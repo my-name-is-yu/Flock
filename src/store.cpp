@@ -230,7 +230,7 @@ Conversations::ConversationChanges Conversations::conversationChangesSince(std::
 SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN j.reply_to_message_id ELSE j.message_id END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered')
+  AND j.kind IN ('conversation_reply','conversation_handoff','instruction_accepted','instruction_delivered')
 UNION ALL
 SELECT conversation_bot_id,json_extract(data,'$.eventId') FROM journal
 WHERE kind='bot_setup_undone' AND id>?1 AND id<=?2 AND (?3='' OR conversation_bot_id=?3)

@@ -73,6 +73,20 @@ assert.equal(loaded.events.has(1), false);
 assert.equal(loaded.olderBefore, 2);
 await refreshEventHistory(loaded, { ...latestAfterAnswer, changedMessageIds: [] }, noPage, current);
 
+const restrictedHandoff = { id: 43, kind: 'conversation_handoff', data: {} };
+const authorizedHandoff = { id: 43, kind: 'conversation_handoff', data: { peerBotId: 'recipient', messageId: 42 } };
+const projectionHistory = { events: new Map([[43, restrictedHandoff], [44, { id: 44 }]]), olderBefore: 42, newestEvent: 44 };
+await refreshEventHistory(projectionHistory, page([44], 44), before => {
+  assert.equal(before, 44);
+  return { events: [authorizedHandoff], olderBefore: 42 };
+}, current, true);
+assert.deepEqual(projectionHistory.events.get(43), authorizedHandoff);
+await refreshEventHistory(projectionHistory, page([44], 44), before => {
+  assert.equal(before, 44);
+  return { events: [restrictedHandoff], olderBefore: 42 };
+}, current, true);
+assert.deepEqual(projectionHistory.events.get(43), restrictedHandoff);
+
 const report = {
   id: 6, kind: 'report', time: 100, taskId: 1,
   data: { report: 'Full report', status: 'completed', truncated: false, revisionId: 2, resultRunId: 'result',

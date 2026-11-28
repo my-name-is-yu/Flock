@@ -846,21 +846,22 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 }
 
 bool ConversationTurns::allowsSilentFinish(const Message& message) const {
+    auto sends = database.query(R"SQL(
+SELECT count(*),count(*) FILTER (WHERE json_extract(result,'$[0].effect')='sent')
+FROM conversation_steps WHERE message_id=? AND json_extract(decision,'$[0].tool')='message_bot'
+)SQL",
+                                {message.id});
+    sends.next();
+    const bool sendsSucceeded = sends.number(0) == sends.number(1);
     const auto wake = message.routing.find("sessionWake");
     if (wake != message.routing.end()) {
         if (field(*wake, "reason") != "finished") return false;
         const auto task = wokenTask(message);
         const auto report = task ? currentWakeReport(database, *task) : std::nullopt;
-        return report && report->second.status == "completed";
+        return sendsSucceeded && report && report->second.status == "completed";
     }
     if (!message.channelScope.empty() || message.routing.contains("sessionOrigin")) return false;
-    auto sends = database.query(R"SQL(
-SELECT count(*),count(*) FILTER (WHERE json_extract(result,'$[0].effect')='sent')
-FROM conversation_steps WHERE message_id=? AND json_extract(decision,'$[0].tool')='message_bot' AND result IS NOT NULL
-)SQL",
-                                {message.id});
-    sends.next();
-    return sends.number(0) == sends.number(1) && (sends.number(0) > 0 || message.routing.contains("botMessage"));
+    return sendsSucceeded && (sends.number(0) > 0 || message.routing.contains("botMessage"));
 }
 
 void ConversationTurns::finishTurn(const Message& message, std::optional<std::string> text, const Json& suggestions,
@@ -908,7 +909,27 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         turnResults.discardUnpersisted(message.id);
         if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
     };
-    if (!text) return close(nullptr);
+    if (!text) {
+        if (message.channelScope.empty()) {
+            auto steps = database.query(
+                "SELECT decision,result FROM conversation_steps WHERE message_id=? AND result IS NOT NULL ORDER BY step", {message.id});
+            while (steps.next()) {
+                const auto calls = steps.json(0);
+                const auto results = steps.json(1);
+                for (std::size_t i = 0; i < calls.size() && i < results.size(); ++i) {
+                    const auto& call = calls.at(i);
+                    const auto& result = results.at(i);
+                    if (field(call, "tool") != "message_bot" || !result.value("ok", false) || field(result, "effect") != "sent" ||
+                        !result.contains("messageId"))
+                        continue;
+                    const auto& args = call.at("args");
+                    journalStorage.journalConversationHandoff(message.bot, message.id, field(args, "botId"),
+                                                              result.at("messageId").get<Id>());
+                }
+            }
+        }
+        return close(nullptr);
+    }
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();

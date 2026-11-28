@@ -45,8 +45,8 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
         {"git_open_pr",
          {"Open or recover the task's PR using repository:pr and repository:read on a separate head repository. "
           "If the result is ambiguous, call again with the same branches and a verified candidate's prNumber to link it, "
-          "or omit prNumber to check for candidates again. Set associateExisting and prNumber to monitor an open PR "
-          "already created for the task by its T3 Session.",
+          "or omit prNumber to check for candidates again. Set associateExisting and prNumber only to reuse a trusted "
+          "task-owned PR link; an unbound T3-created PR is left unassociated.",
           "pr",
           {{"baseRef", "string", "Exact base branch."},
            {"headRepo", "string", "Head owner/repo. Omit for the base repository.", false},
@@ -55,7 +55,7 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
            {"body", "string", "Pull request description.", false},
            {"draft", "boolean", "Open as a draft.", false},
            {"prNumber", "integer", "Exact PR to associate, or a verified candidate from the previous result.", false},
-           {"associateExisting", "boolean", "Verify the exact PR and monitor it without creating or editing a PR.", false},
+           {"associateExisting", "boolean", "Reuse a trusted task-owned PR link; unbound PRs are left unassociated.", false},
            {"newIntent", "boolean", "Set only when explicitly asked to create a replacement after the previous PR closed.", false}}}},
         {"git_update_pr",
          {"Update title, body, base branch or open/closed state using repository:pr.",

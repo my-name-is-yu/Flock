@@ -320,6 +320,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     const auto key = Json::array({invocation, decision.tool, target}).dump();
     const Json dedupe = createComment ? Json(target.dump()) : Json(nullptr);
     Id eventCursor = 0;
+    bool existingWatch = false;
     GitPrMutationClaim watchMutation(*this, gitPrMutationsInFlight);
     GitPrMutationClaim feedbackMutation(*this, gitFeedbackMutationsInFlight);
     {
@@ -336,6 +337,10 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
         if (watchPr) {
             const auto pr = args.at("prNumber").get<Id>();
             if (gitPrWatchUnavailable(repo, pr, taskId)) throw Conflict("This pull request belongs to another task");
+            existingWatch =
+                database
+                    .query("SELECT 1 FROM git_pr_watches WHERE (host,repo,pr_number,task_id)=(?,?,?,?)", {repo.host, repo.repo, pr, taskId})
+                    .next();
             watchMutation.acquire(repo, pr);
             eventCursor = latestGitWebhookId();
         }
@@ -367,7 +372,8 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     if (result.value("ok", false) && watchPr) {
         const auto pr = args.at("prNumber").get<Id>();
         const auto url = "https://" + repo.resource() + "/pull/" + std::to_string(pr);
-        result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), eventCursor, repo, pr, url,
+        const auto headCursor = existingWatch ? latestGitWebhookId() : eventCursor;
+        result["watchAttached"] = watchGitPr(taskRecords.load(taskId), runJson(context.run), headCursor, repo, pr, url,
                                              field(result.at("data"), "headSha")) == GitWatchResult::attached;
     }
     database.exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"

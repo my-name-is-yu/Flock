@@ -124,6 +124,11 @@ Id JournalStorage::journalConversationMessage(std::string_view bot, const Conver
     return database.writeJournal(std::nullopt, JournalKind::conversation_message, data, {}, bot);
 }
 
+Id JournalStorage::journalConversationHandoff(std::string_view bot, Id sourceMessage, std::string_view peerBot, Id peerMessage) {
+    return database.writeJournal(std::nullopt, JournalKind::conversation_handoff, {{"peerBotId", peerBot}, {"messageId", peerMessage}},
+                                 {.messageId = sourceMessage}, bot);
+}
+
 Id JournalStorage::journalConversationReply(std::optional<Id> task, std::string_view bot, const ConversationReplyEntry& entry) {
     const auto status = enumName(replyStatuses, entry.status);
     Json data{{"replyToMessageId", entry.replyToMessageId}, {"text", entry.text}, {"status", status}};

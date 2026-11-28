@@ -58,6 +58,7 @@ const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit'
 const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
 const readingPositions = new Map();
 const timelineKey = (botId) => JSON.stringify([botId]);
+let cachedProjectionRevision = 0;
 
 const participant = (id) => bots.find((bot) => bot.id === id) ?? { id, name: id };
 
@@ -280,7 +281,7 @@ export async function showConversationMessage(context, id, { bot, signal, prefer
     target = conversationMessageRow(id);
   } else if (!target) {
     // Only the newest jump in this conversation can apply its page.
-    const request = context.pendingSource = { id };
+    const request = context.pendingSource = { id, projectionRevision: context.projectionRevision ?? 0 };
     let page;
     try {
       page = await api(botQuery('conversation', context.id, id + 1), undefined, { signal });
@@ -288,6 +289,8 @@ export async function showConversationMessage(context, id, { bot, signal, prefer
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
     if (signal?.aborted) return;
+    if ((context.projectionRevision ?? 0) !== request.projectionRevision)
+      return showConversationMessage(context, id, { bot, signal, preferLoaded: false });
     if (!page) {
       error.textContent = 'Couldn’t load that message.';
       return;
@@ -443,6 +446,20 @@ function eventCard(event, context, place, report) {
     });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
+  if (event.kind === 'conversation_handoff') {
+    const peer = bots.find(({ id }) => id === data.peerBotId);
+    const note = node('article', 'system-note session-event', `${peer ? `Message sent to ${peer.name}` : 'Bot message sent'} · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    if (peer && Number.isSafeInteger(data.messageId) && data.messageId > 0) {
+      const params = new URLSearchParams({ bot: peer.id, message: String(data.messageId) });
+      const open = node('a', 'text-button', 'Open conversation');
+      open.href = `/?${params}`;
+      note.append(' · ', open);
+    }
+    return note;
+  }
   if (data.botMessage) {
     const note = node('article', 'system-note session-event', `From ${data.botMessage.fromName} · `);
     note.id = `event-${event.id}`;
@@ -752,6 +769,7 @@ export function rememberReadingPosition(keepAtBottom = false) {
   readingPositions.set(timelineKey(context.id), {
     // Retain loaded pages so an older message is available when its conversation reopens.
     history: { events, olderBefore, newestEvent, historyCursor: context.data?.historyCursor },
+    projectionRevision: cachedProjectionRevision,
     top, atBottom,
     anchorId: anchor?.id,
     offset: anchor ? anchor.getBoundingClientRect().top - viewportTop : 0,
@@ -774,7 +792,14 @@ export function eventHistoryForRefresh(context) {
   // Reopen saved pages only after a successful read of the current conversation.
   if (context.newestEvent != null) return context;
   const cached = readingPositions.get(timelineKey(context.id));
-  return cached ? { ...cached.history } : context;
+  return cached ? {
+    ...cached.history,
+    reprojectLoadedHistory: cached.projectionRevision !== cachedProjectionRevision,
+  } : context;
+}
+
+export function invalidateCachedHistoryProjections() {
+  cachedProjectionRevision++;
 }
 
 export function updateJumpToLatest() {

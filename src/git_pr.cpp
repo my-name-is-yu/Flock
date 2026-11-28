@@ -60,6 +60,23 @@ LIMIT 1
 )SQL",
                                              {repo.host, repo.repo, pr, deliveryCursor})
                                       .next();
+    std::optional<std::string> priorHead;
+    {
+        auto observedHead = database.query(R"SQL(
+SELECT event_cursor,head_sha FROM git_pr_heads
+WHERE (host,repo,pr_number)=(?1,?2,?3) AND event_cursor<=?4
+ORDER BY event_cursor DESC LIMIT 1
+)SQL",
+                                           {repo.host, repo.repo, pr, deliveryCursor});
+        if (observedHead.next() && observedHead.number(0) < deliveryCursor) priorHead = observedHead.string(1);
+    }
+    if (priorHead) {
+        database.exec(R"SQL(
+INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
+ DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
+)SQL",
+                      {repo.host, repo.repo, pr, deliveryCursor, *priorHead});
+    }
     const auto headObservedAt = priorObservation ? latestGitWebhookId() : deliveryCursor;
     database.exec(R"SQL(
 INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
@@ -200,13 +217,46 @@ Json GitStorage::associateGitPr(GitHost& host, const GitContext& context, const 
     if (context.run.threadId.empty()) throw Conflict("Select the task whose T3 Session created the PR");
     const auto& base = target.base;
     const auto& head = target.head;
+    const auto url = "https://" + base.resource() + "/pull/" + std::to_string(number);
     Id cursor;
     {
         std::lock_guard lock(database.mutex);
+        Transaction transaction(database.db);
+        if (botLifecycle.botPaused(context.botId)) throw BotPaused{};
+        if (permissions.forbidden(context.botId, Action::repository_pr, base.resource()) ||
+            !permissions.allows(context.botId, Action::repository_read, base.resource()) ||
+            (head != base && !permissions.allows(context.botId, Action::repository_read, head.resource())))
+            throw Conflict("Repository access denied");
+        const auto task = taskRecords.load(context.taskId);
+        const auto& run = task.activeRun ? task.activeRun : task.lastRun;
+        if (task.botId != context.botId || !run || run->ref != context.run || run->assignment.revisionId != task.currentRevision)
+            throw Conflict("The task's Session changed before the PR could be associated");
+        if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("The task already ended");
+        if (gitPrWatchUnavailable(base, number, task.id)) throw Conflict("The PR already belongs to another task");
+        auto watch =
+            database.query("SELECT task_id,url FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)", {base.host, base.repo, number});
+        if (watch.next()) {
+            if (watch.number(0) != task.id || watch.string(1) != url) throw Conflict("The PR already belongs to another task");
+            transaction.commit();
+            return {{"ok", true}, {"status", "associated"}, {"prNumber", number}, {"url", url}, {"reused", true}};
+        }
+        auto operation = database.query(R"SQL(
+SELECT 1 FROM git_pr_operations WHERE host=? AND base_repo=? AND base_ref=? AND head_repo=? AND head_ref=?
+ AND task_id=? AND bot_id=? AND pr_number=? AND status='created' LIMIT 1
+)SQL",
+                                        {base.host, base.repo, target.baseRef, head.repo, target.headRef, task.id, task.botId, number});
+        if (!operation.next()) {
+            transaction.commit();
+            return {{"ok", false},
+                    {"status", "unassociated"},
+                    {"prNumber", number},
+                    {"url", url},
+                    {"error", "No trusted task-to-PR link exists; this PR was left unassociated."}};
+        }
         cursor = latestGitWebhookId();
+        transaction.commit();
     }
     const auto pr = host.readPullRequest(context, base, number);
-    const auto url = "https://" + base.resource() + "/pull/" + std::to_string(number);
     if (!pr || pr->number != number || pr->target != target || pr->url != url || pr->headSha.empty())
         throw Conflict("The open PR does not match the selected repository and branches");
 
@@ -223,6 +273,19 @@ Json GitStorage::associateGitPr(GitHost& host, const GitContext& context, const 
         throw Conflict("The task's Session changed before the PR could be associated");
     if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("The task already ended");
     if (gitPrWatchUnavailable(base, number, task.id)) throw Conflict("The PR already belongs to another task");
+    auto operation = database.query(R"SQL(
+SELECT 1 FROM git_pr_operations WHERE host=? AND base_repo=? AND base_ref=? AND head_repo=? AND head_ref=?
+ AND task_id=? AND bot_id=? AND pr_number=? AND status='created' LIMIT 1
+)SQL",
+                                    {base.host, base.repo, target.baseRef, head.repo, target.headRef, task.id, task.botId, number});
+    if (!operation.next()) {
+        transaction.commit();
+        return {{"ok", false},
+                {"status", "unassociated"},
+                {"prNumber", number},
+                {"url", url},
+                {"error", "No trusted task-to-PR link exists; this PR was left unassociated."}};
+    }
 
     const auto scrub = secretStorage.sharedRedactor();
     Json result{{"ok", true}, {"status", "associated"}, {"prNumber", number}, {"url", url}};
