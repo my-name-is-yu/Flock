@@ -279,14 +279,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         }
     };
     std::atomic<bool> skillsChanged = false;
-    Store store(home / "flock.sqlite3",
-                {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
-                 .saveBotSetup = [&](Store& target, std::string_view id, const BotSetupEdit& edit,
-                                     const Json& catalog) {
-                     bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog);
-                     skillsChanged = true;
-                 },
-                 .botSetupCatalog = loadSetupModelCatalog});
+    Store store(home / "flock.sqlite3", {.memorySeed = [&](std::string_view id) { return bots.initialMemory(id); },
+                                         .saveBotSetup =
+                                             [&](Store& target, std::string_view id, const BotSetupEdit& edit, const Json& catalog) {
+                                                 bots.saveSetup(&target, id, edit, options.clock(), reportSchedule, catalog);
+                                                 skillsChanged = true;
+                                             },
+                                         .botSetupCatalog = loadSetupModelCatalog});
     SettingsSystem system(home, port);
     SettingsConnections connections(home);
     SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
@@ -431,7 +430,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
     while (!stopRequested) {
-        // Runtime callbacks can run inside a database transaction.
         if (skillsChanged.exchange(false)) syncBotSkills();
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));

@@ -54,6 +54,12 @@ fs::path userPath(const char* overrideName, std::string_view relative) {
     return fs::path(directory) / relative;
 }
 
+fs::path claudeSkillsRoot() {
+    const auto directory = setting("CLAUDE_CONFIG_DIR");
+    return directory.empty() ? userPath("FLOCK_CLAUDE_SKILLS_DIR", ".claude/skills")
+                             : fs::path(setting("FLOCK_CLAUDE_SKILLS_DIR", (fs::path(directory) / "skills").string()));
+}
+
 bool installed(const std::string& command) {
     if (command.find('/') != command.npos) return access(command.c_str(), X_OK) == 0;
     auto paths = setting("PATH");
@@ -352,11 +358,20 @@ bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
     return installed(setting(environment::claudeCli, "claude")) && !ownsClaudeServer(readClaudeServer(), owns);
 }
 
+template <typename Root> void removeProviderSkills(Root&& root, std::string_view provider) noexcept {
+    try {
+        exportBotSkills(root(), Json::array());
+    } catch (const std::exception& error) {
+        std::cerr << "Could not remove " << provider << " Bot skills: " << error.what() << '\n';
+    }
+}
+
 void removeT3Providers(const OwnsBearer& owns) {
     const auto codex = editCodex({}, {}, owns);
     const auto claude = setting(environment::claudeCli, "claude");
     // Without Claude Code there is no registration to remove, and its leftover file must not block Codex cleanup.
     const bool removeRegistration = installed(claude) && ownsClaudeServer(readClaudeServer(), owns);
+    const bool removeCodexSkills = codex.changed();
     codex.apply();
     try {
         if (removeRegistration) removeClaude(claude);
@@ -364,21 +379,19 @@ void removeT3Providers(const OwnsBearer& owns) {
         codex.restore();
         throw;
     }
+    if (removeCodexSkills) removeProviderSkills([] { return userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"); }, "Codex");
+    if (removeRegistration) removeProviderSkills([] { return claudeSkillsRoot(); }, "Claude Code");
 }
 
 void syncT3ProviderSkills(const OwnsBearer& owns, const Json& bots) {
     try {
-        if (editCodex({}, {}, owns).changed())
-            exportBotSkills(userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"), bots);
+        if (editCodex({}, {}, owns).changed()) exportBotSkills(userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"), bots);
     } catch (const std::exception& error) {
         std::cerr << "Could not synchronize Codex Bot skills: " << error.what() << '\n';
     }
     try {
         if (ownsClaudeServer(readClaudeServer(), owns)) {
-            const auto directory = setting("CLAUDE_CONFIG_DIR");
-            const auto root = directory.empty() ? userPath("FLOCK_CLAUDE_SKILLS_DIR", ".claude/skills")
-                                                : fs::path(setting("FLOCK_CLAUDE_SKILLS_DIR", (fs::path(directory) / "skills").string()));
-            exportBotSkills(root, bots);
+            exportBotSkills(claudeSkillsRoot(), bots);
         }
     } catch (const std::exception& error) {
         std::cerr << "Could not synchronize Claude Code Bot skills: " << error.what() << '\n';

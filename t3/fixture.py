@@ -1315,10 +1315,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]
+            assert all(file.is_file() for file in reviewer_skills)
             subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 401
             assert codex_config.read_text() == original and claude_config.read_bytes() == original_claude
+            assert not any(file.exists() for file in reviewer_skills), "Disconnect left stale Flock Bot skills"
 
             connect("env-1", ["--port", str(port)], restart=True)
             second = [flock, "--home", str(directory / "second-flock")]

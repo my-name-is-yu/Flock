@@ -31,15 +31,17 @@ constexpr std::size_t suffixLength = 12;
 std::string skillName(std::string_view id, std::string_view name) {
     std::string slug;
     for (const unsigned char ch : name) {
-        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) slug += static_cast<char>(ch);
-        else if (ch >= 'A' && ch <= 'Z') slug += static_cast<char>(ch - 'A' + 'a');
-        else if (!slug.empty() && slug.back() != '-') slug += '-';
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+            slug += static_cast<char>(ch);
+        else if (ch >= 'A' && ch <= 'Z')
+            slug += static_cast<char>(ch - 'A' + 'a');
+        else if (!slug.empty() && slug.back() != '-')
+            slug += '-';
         if (slug.size() == 45) break;
     }
     if (!slug.empty() && slug.back() == '-') slug.pop_back();
     if (slug.empty()) slug = "bot";
 
-    // Reserve suffixed names for the Bot whose ID created the suffix. A cached name must never select another Bot.
     const bool reserved = slug.size() > suffixLength && slug[slug.size() - suffixLength - 1] == '-' &&
                           slug.find_last_not_of("0123456789abcdef") == slug.size() - suffixLength - 1;
     if (slug != id || reserved) slug += '-' + sha256Hex(id).substr(0, suffixLength);
@@ -50,7 +52,9 @@ std::string skillText(std::string_view skill, std::string_view name, std::string
     return "---\nname: " + std::string(skill) + "\ndescription: " + Json("Ask " + std::string(name) + " in Flock.").dump() +
            "\n---\n\nUse the text after the skill invocation as the request for this Bot. Ask for the request if it is missing.\n"
            "Get the current thread ID from `t3_thread_list`. If there is no current thread, ask the person to open a T3 Session.\n"
-           "Call `flock_ask` with `bot` set to `" + std::string(id) + "`, the request as `text`, the current `threadId`, and a fresh `requestId`. "
+           "Call `flock_ask` with `bot` set to `" +
+           std::string(id) +
+           "`, the request as `text`, the current `threadId`, and a fresh `requestId`. "
            "For a retry, reuse the same request ID and arguments. If Flock reports that the Bot is unavailable, tell the person.\n"
            "The Bot's reply arrives in the same Session.\n";
 }
@@ -76,7 +80,11 @@ void exportBotSkills(const fs::path& root, const Json& bots) {
         if (!files.emplace(skill, skillText(skill, name, id)).second) throw Conflict("Duplicate Flock Bot skill name");
     }
 
-    fs::create_directories(root);
+    if (files.empty()) {
+        if (!fs::is_directory(root)) return;
+    } else {
+        fs::create_directories(root);
+    }
     fs::path blocked;
     for (const auto& [name, contents] : files) {
         const auto directory = root / name;
@@ -104,7 +112,6 @@ void exportBotSkills(const fs::path& root, const Json& bots) {
         if ((name != "flock" && !name.starts_with("flock-")) || files.contains(name) || !managed(entry.path())) continue;
         fs::remove(entry.path() / "SKILL.md");
         fs::remove(entry.path() / marker);
-        // A person may have added other files to this directory.
         std::error_code ignored;
         fs::remove(entry.path(), ignored);
     }
