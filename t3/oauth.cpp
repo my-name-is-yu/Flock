@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/private_files.hpp"
 #include "flock/text.hpp"
 #include "flock/file_descriptor.hpp"
 #include "flock/percent_encoding.hpp"
@@ -84,10 +85,7 @@ std::string credentialName(const std::string& environmentId) {
 }
 
 void verifyPrivate(int fd, bool directory) {
-    struct stat st{};
-    if (fd < 0 || fstat(fd, &st) != 0 || st.st_uid != geteuid() || (st.st_mode & 0077) ||
-        (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode) || st.st_nlink != 1))
-        privateStorage();
+    if (!ownerOnly(fd, directory)) privateStorage();
 }
 
 int openDirectory(const std::filesystem::path& path, bool create) {
@@ -108,32 +106,12 @@ int openDirectory(const std::filesystem::path& path, bool create) {
     return fd;
 }
 
-bool writeAll(int fd, std::string_view text) {
-    while (!text.empty()) {
-        const auto n = write(fd, text.data(), text.size());
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
-        text.remove_prefix(static_cast<std::size_t>(n));
-    }
-    return true;
-}
-
 void saveCredential(int directory, const std::string& name, const std::string& environmentId, const Credential& credential) {
-    const auto temporary = ".pending-" + randomValue();
-    FileDescriptor file(openat(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
-    if (file.get() < 0) privateStorage();
-    try {
-        const auto data = Json{{"environmentId", environmentId}, {"label", credential.label},           {"mcpUrl", credential.mcpUrl},
-                               {"token", credential.token},      {"generation", credential.generation}, {"expiresAt", credential.expiresAt},
-                               {"operate", credential.operate}}
-                              .dump();
-        if (!writeAll(file.get(), data) || fsync(file.get()) != 0 || renameat(directory, temporary.c_str(), directory, name.c_str()) != 0)
-            privateStorage();
-        if (fsync(directory) != 0 && errno != EINVAL && errno != ENOTSUP) privateStorage();
-    } catch (...) {
-        unlinkat(directory, temporary.c_str(), 0);
-        throw;
-    }
+    const auto data = Json{{"environmentId", environmentId}, {"label", credential.label},           {"mcpUrl", credential.mcpUrl},
+                           {"token", credential.token},      {"generation", credential.generation}, {"expiresAt", credential.expiresAt},
+                           {"operate", credential.operate}}
+                          .dump();
+    if (!replacePrivateFile(directory, ".pending-" + randomValue(), name, data)) privateStorage();
 }
 
 std::string form(const Headers& parameters) {

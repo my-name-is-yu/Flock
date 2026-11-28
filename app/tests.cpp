@@ -13,6 +13,7 @@
 #include "flock/secret_ref.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "settings_file.hpp"
 #include "tests/fixtures.hpp"
 #include "../tests/task_history.hpp"
 #include "flock/tasks.hpp"
@@ -44,6 +45,8 @@
 #include "flock/task_target.hpp"
 
 #include <nlohmann/json.hpp>
+
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <exception>
@@ -1228,6 +1231,20 @@ void pullRequestSettings() {
     write(folder / "config.json", expected.dump());
     rejects<Conflict>([&] { bots.get("release"); }, "a non-boolean PR setting was accepted");
 }
+
+void savedSettingsStayReadableUnderARestrictiveUmask() {
+    TemporaryDirectory temp;
+    const auto path = temp.path / "settings.json";
+    const auto inherited = umask(0477);
+    try {
+        app::writeSettingsFile(path, {{"port", 4100}});
+    } catch (...) {
+        umask(inherited);
+        throw;
+    }
+    umask(inherited);
+    check(app::readSettingsFile(path).at("port") == 4100, "settings saved under a restrictive umask could not be read back");
+}
 }
 
 int main() {
@@ -1257,6 +1274,7 @@ int main() {
         conversationCreatedBotAvatars();
         botProfilesAndAvatars();
         pullRequestSettings();
+        savedSettingsStayReadableUnderARestrictiveUmask();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

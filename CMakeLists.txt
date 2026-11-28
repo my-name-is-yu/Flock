@@ -121,6 +121,7 @@ add_library(flock_core STATIC
   src/percent_encoding.cpp
   src/policy.cpp
   src/policy_approval.cpp
+  src/private_files.cpp
   src/project_slots.cpp
   src/run_reports.cpp
   src/runtime.cpp

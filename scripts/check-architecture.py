@@ -23,6 +23,11 @@ SINGLE_OWNERS = (
         "name environment variables in flock/environment.hpp",
     ),
     (re.compile(r"\bINTO journal\b"), "src/database.cpp", "write journal entries with Database::writeJournal"),
+    (
+        re.compile(r"st_mode & 0(077|7777)\b"),
+        "src/private_files.cpp",
+        "check that a file is private with ownerOnly from flock/private_files.hpp",
+    ),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
 SCRIPT_OWNERS = (
