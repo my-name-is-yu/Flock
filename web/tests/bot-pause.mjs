@@ -3,6 +3,23 @@ import { dumpDom, readAsset, requirePass, withAssetServer } from './dom-harness.
 function fixtures() {
   window.EventSource = undefined;
   const bot = { id: 'release', name: 'Release', model: 'demo', paused: false, canDelete: true, presence: 'idle' };
+  const time = Math.floor(Date.now() / 1000) - 600;
+  window.reportUnavailableSentinel = 'FLOCK_REPORT_UNAVAILABLE_SYNTHETIC_7C69A4D2';
+  const events = [
+    { id: 301, kind: 'report', taskId: 17, time, data: {
+      report: 'Visible report body', textHtml: '<p>Visible report body</p>', status: 'completed', truncated: false,
+      revisionId: 1, resultRunId: 'final',
+      run: { link: `${location.origin}/run`, environmentId: 'local', threadId: 'thread', runId: 'launch' },
+    } },
+    { id: 302, kind: 'completed', taskId: 17, time: time + 1, data: {
+      text: 'Visible report body', revisionId: 1,
+      run: { environmentId: 'local', threadId: 'thread', runId: 'final' },
+    } },
+    { id: 303, kind: 'report', taskId: 18, time: time + 2, data: {
+      evidenceStatus: 'report_unavailable', report: window.reportUnavailableSentinel,
+      textHtml: `<p>${window.reportUnavailableSentinel}</p>`,
+    } },
+  ];
   window.pauseChanges = [];
   window.sentMessages = [];
   window.sharePausedBot = () => {
@@ -22,7 +39,7 @@ function fixtures() {
     if (path === '/api/inbox') return Response.json({ items: [] });
     if (path.startsWith('/api/schedules?')) return Response.json({ active: [], history: [], canManage: bot.canDelete });
     if (path.startsWith('/api/view?')) return Response.json({
-      bot, events: [], olderBefore: 0, presence: 'idle', activeSessions: [], sessionTasks: [], sessionsBefore: 0,
+      bot, events, olderBefore: 0, presence: 'idle', activeSessions: [], sessionTasks: [], sessionsBefore: 0,
       sessionCursor: 0, waits: [], canDecide: true, composerPerson: 'local-owner',
       limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 },
     });
@@ -59,7 +76,27 @@ async function exercise() {
   const message = $('#message');
   const menuItems = () => [...document.querySelectorAll('#bot-menu [role="menuitem"]')];
 
-  await waitFor(() => !composer.hidden && !$('#composer-container').hidden, 'The active Bot had no composer');
+  await waitFor(() => !composer.hidden && !$('#composer-container').hidden && $('#event-302 .event-text') && $('#event-303 .event-text'),
+    'The active Bot or rendered reports were missing');
+  const visibleReport = $('#event-302 .event-text');
+  const unavailableReport = $('#event-303 .event-text');
+  check(visibleReport.textContent.includes('Visible report body'), 'An available report body was not displayed');
+  check(!document.body.innerText.includes(window.reportUnavailableSentinel) &&
+    !unavailableReport.textContent.includes(window.reportUnavailableSentinel),
+    'An unavailable report body appeared in the rendered conversation');
+  const reportText = $('#event-302 .event-text');
+  const point = (type) => {
+    const event = new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch',
+      pointerId: 1, isPrimary: true, clientX: 10, clientY: 10 });
+    Object.defineProperty(event, 'timeStamp', { value: 100 });
+    return reportText.dispatchEvent(event);
+  };
+  point('pointerdown');
+  point('pointerup');
+  reportText.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+  const reportTime = $('#event-302 > time');
+  check(reportTime && !reportTime.getAttribute('aria-description').includes('#17'),
+    'A report exposed its internal Task number to assistive technology');
   const menu = $('.row-menu');
   message.value = 'Draft for after resume';
   message.dispatchEvent(new Event('input'));

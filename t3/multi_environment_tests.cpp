@@ -854,11 +854,11 @@ void single(const Endpoint& local, const Endpoint& mini, const std::filesystem::
           "existing start_task must use only the default environment");
 }
 
-void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
+void cancelledRunWaitsForMultipleDelegatedChildren(Scenario& fixture) {
     fixture.start(false);
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::running; }, "single Run did not start");
     const auto next = TaskIntake(fixture.store).submit({bot, "Work after cancellation", fixture.local.id(), fixture.local.project()});
-    fixture.local.configure({{"multiStatus", "cancelled"}, {"multiHoldSettlement", true}});
+    fixture.local.configure({{"multiStatus", "cancelled"}, {"multiDelegatedChildStatuses", {"completed", "running"}}});
     fixture.cancel();
     fixture.advanceUntil(
         [](const TaskView& task) {
@@ -867,9 +867,9 @@ void cancelledRunWaitsForDelegatedWork(Scenario& fixture) {
         },
         "Flock did not observe the cancelled parent Run");
     check(fixture.task().task.state == TaskState::cancelling && Tasks(fixture.store).task(next).blockedBy.value().id == fixture.taskId,
-          "a cancelled parent freed the project's slot before its delegated work settled");
+          "a completed child let the cancelled parent free the project's slot while another child was running");
 
-    fixture.local.configure({{"multiHoldSettlement", false}});
+    fixture.local.configure({{"multiDelegatedChildStatuses", {"completed", "completed"}}});
     fixture.advanceUntil([](const TaskView& task) { return task.task.state == TaskState::cancelled; },
                          "the project should be released once delegated work settles");
     check(!Tasks(fixture.store).task(next).blockedBy, "settled cancellation kept the next request blocked");
@@ -981,7 +981,7 @@ int main(int argc, char** argv) {
             single(local, mini, directory, commit, true);
             {
                 Scenario fixture(local, mini, directory, commit, "delegated-stop");
-                cancelledRunWaitsForDelegatedWork(fixture);
+                cancelledRunWaitsForMultipleDelegatedChildren(fixture);
             }
         } else {
             Scenario fixture(local, mini, directory, commit, "recovery");

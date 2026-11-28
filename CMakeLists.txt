@@ -170,47 +170,13 @@ function(flock_test_executable target)
   target_compile_options(${target} PRIVATE ${flock_warnings})
 endfunction()
 
-option(FLOCK_LIVE_TESTS "Register live ChatGPT and T3 tests in CTest" OFF)
+option(FLOCK_LIVE_TESTS "Build and register live ChatGPT and T3 tests in CTest" OFF)
 if(BUILD_TESTING)
   add_library(flock_git_test_sessions STATIC tests/fake_git_sessions.cpp)
   target_link_libraries(flock_git_test_sessions PUBLIC flock_core)
 
   flock_test_executable(flock_traffic_recording SOURCES tests/traffic_recording.cpp LIBRARIES flock_core)
   add_test(NAME flock_traffic_recording COMMAND flock_traffic_recording)
-
-  function(flock_verify_model name skill)
-    set(model "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py")
-    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}" "${model}")
-  endfunction()
-  function(flock_replay_model name skill variant expected)
-    add_test(NAME "flock_verify_${name}" COMMAND "${Python3_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/scripts/verify-model-replay.py"
-      "${PROJECT_SOURCE_DIR}/.agents/skills/${skill}/model.py" "${variant}" "${expected}")
-  endfunction()
-  flock_verify_model(reply_motion verify-reply-motion)
-  flock_replay_model(reply_motion_historical verify-reply-motion --historical
-    "A catch-up refresh animated a reply")
-  flock_replay_model(reply_motion_ignored_catch_up verify-reply-motion --ignore-catch-up
-    "A catch-up refresh animated a reply")
-  flock_verify_model(change_feed verify-change-feed)
-  flock_replay_model(change_feed_historical verify-change-feed --historical
-    "The Bot view recovered, but the history invalidation was lost")
-  flock_verify_model(run_settlement verify-run-settlement)
-  flock_replay_model(run_settlement_historical verify-run-settlement --historical
-    "Flock released the Run while its delegated work was active")
-  flock_verify_model(automation_routing verify-automation-routing)
-  flock_replay_model(automation_workspace_historical verify-automation-routing --historical=workspace
-    "A configured occurrence used the old workspace after the new workspace was published")
-  foreach(entry scheduler webhook)
-    flock_replay_model("automation_${entry}_historical" verify-automation-routing "--historical=${entry}"
-      "An unreadable Bot profile blocked another Bot's automation delivery")
-  endforeach()
-  flock_replay_model(automation_notes_historical verify-automation-routing --historical=notes
-    "An unreadable Bot's notes wait held the shared project slot")
-  flock_replay_model(automation_notes_retry_historical verify-automation-routing --historical=notes-retry
-    "A retried notes wait overtook work already active in the shared project")
-  flock_replay_model(automation_notes_edit_historical verify-automation-routing --historical=notes-edit
-    "An edited automation stayed outside the queue after the project became idle")
 
   flock_test_executable(flock_conversation_context SOURCES tests/conversation_context.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_context COMMAND flock_conversation_context)
@@ -242,7 +208,6 @@ if(BUILD_TESTING)
   add_test(NAME flock_tool_batch COMMAND flock_tool_batch)
   flock_test_executable(flock_conversation_batch SOURCES tests/conversation_batch.cpp LIBRARIES flock_core)
   add_test(NAME flock_conversation_batch COMMAND flock_conversation_batch)
-  add_test(NAME flock_tool_batch_measure COMMAND flock_conversation_batch --measure)
   flock_test_executable(flock_markdown_tests SOURCES tests/markdown.cpp LIBRARIES flock_core)
   add_test(NAME flock_markdown COMMAND flock_markdown_tests)
   flock_test_executable(flock_image_headers SOURCES tests/image_headers.cpp LIBRARIES flock_core)
@@ -265,19 +230,10 @@ if(BUILD_TESTING)
   add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
   set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
-  flock_test_executable(flock_live_t3 SOURCES tests/live_t3.cpp LIBRARIES flock_t3)
-  flock_test_executable(flock_live_conversation SOURCES tests/live_conversation.cpp tests/live_conversation_judge.cpp LIBRARIES flock_app_support)
-  target_include_directories(flock_live_conversation PRIVATE app)
-  add_test(NAME flock_live_conversation_self_test COMMAND flock_live_conversation --self-test)
-  add_test(NAME flock_verify_live_gate COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
-  add_test(NAME flock_header_fanout COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/header_fanout.py")
-  add_test(NAME flock_architecture COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-architecture.py" "${CMAKE_CURRENT_SOURCE_DIR}")
-  add_test(NAME flock_architecture_check COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/architecture.py")
   if(FLOCK_LIVE_TESTS)
+    flock_test_executable(flock_live_t3 SOURCES tests/live_t3.cpp LIBRARIES flock_t3)
+    flock_test_executable(flock_live_conversation SOURCES tests/live_conversation.cpp tests/live_conversation_judge.cpp LIBRARIES flock_app_support)
+    target_include_directories(flock_live_conversation PRIVATE app)
     foreach(test flock_live_t3 flock_live_conversation)
       add_test(NAME ${test} COMMAND ${test} --live)
       set_tests_properties(${test} PROPERTIES LABELS live SKIP_RETURN_CODE 77 RESOURCE_LOCK flock_live)

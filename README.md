@@ -15,8 +15,12 @@ cmake --build --preset release -j
 ```
 
 Install with `cmake --install build/release`. Run `./scripts/verify.sh` for the
-full test suite. It requires Python 3.10+, Node.js, Chrome or Chromium, and the
-OpenSSL CLI.
+minimal common gate: build `flock` and the `flock_protected_input` and
+`flock_supervised_policy` test targets, then run both tests. It requires
+Python 3.10+. Run direct tests for the
+changed area; the common gate is not the full test suite. The opt-in
+`./scripts/verify-live.sh` requires configured T3/ChatGPT credentials and test
+projects.
 
 C++ formatting uses clang-format 21: run `./scripts/format.sh` to apply it.
 `git config blame.ignoreRevsFile .git-blame-ignore-revs` skips the formatting

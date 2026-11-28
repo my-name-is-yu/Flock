@@ -3,6 +3,7 @@
 #include "flock/json.hpp"
 #include "flock/types.hpp"
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
