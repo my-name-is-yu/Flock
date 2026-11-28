@@ -1,4 +1,6 @@
 #include "flock/identity.hpp"
+#include "flock/file_descriptor.hpp"
+#include "flock/private_files.hpp"
 #include "database.hpp"
 #include "local_machine_storage.hpp"
 #include "web_identity_state.hpp"
@@ -36,16 +38,10 @@ void WebIdentity::setWebOrigin(std::string origin) {
 }
 
 ConfiguredIdentities loadIdentities(Store& store, const std::filesystem::path& path) {
-    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    struct Close {
-        int fd;
-        ~Close() {
-            if (fd >= 0) close(fd);
-        }
-    } closeFile{fd};
+    const FileDescriptor file(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    const int fd = file.get();
     struct stat info{};
-    if (fd < 0 || fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_uid != geteuid() || (info.st_mode & 07777) != 0600 ||
-        info.st_size <= 0 || info.st_size > 65536)
+    if (!ownerOnly(fd, false) || fstat(fd, &info) || info.st_size <= 0 || info.st_size > 65536)
         throw Conflict("Web identities require an owner-only regular file");
     std::string data(info.st_size, '\0');
     size_t offset = 0;

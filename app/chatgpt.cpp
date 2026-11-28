@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "flock/private_files.hpp"
 #include "flock/file_descriptor.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
@@ -38,10 +39,6 @@ void checkStop(std::stop_token stop) {
     if (stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled", true);
 }
 
-bool privateFile(int fd, struct stat& info) {
-    return fd >= 0 && fstat(fd, &info) == 0 && info.st_uid == getuid() && (info.st_mode & 0077) == 0;
-}
-
 int openDirectory(const std::filesystem::path& directory) {
     std::error_code error;
     if (directory.has_parent_path()) std::filesystem::create_directories(directory.parent_path(), error);
@@ -51,9 +48,7 @@ int openDirectory(const std::filesystem::path& directory) {
 }
 
 int openLock(int directory) {
-    struct stat info{};
-    if (!privateFile(directory, info) || !S_ISDIR(info.st_mode))
-        throw ModelError("Flock's ChatGPT credential directory and lock must be owner-only", false);
+    if (!ownerOnly(directory, true)) throw ModelError("Flock's ChatGPT credential directory and lock must be owner-only", false);
     return openat(directory, "lock", O_CREAT | O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
@@ -61,9 +56,7 @@ class ProfileLock {
 public:
     explicit ProfileLock(const std::filesystem::path& directory, std::stop_token stop = {}, bool wait = true)
         : dir_(openDirectory(directory)), lock_(openLock(dir_.get())) {
-        struct stat info{};
-        if (!privateFile(lock_.get(), info) || !S_ISREG(info.st_mode))
-            throw ModelError("Flock's ChatGPT credential directory and lock must be owner-only", false);
+        if (!ownerOnly(lock_.get(), false)) throw ModelError("Flock's ChatGPT credential directory and lock must be owner-only", false);
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (::flock(lock_.get(), LOCK_EX | LOCK_NB) != 0) {
             const auto error = errno;
@@ -80,7 +73,7 @@ public:
         const FileDescriptor file(openat(dir_.get(), "profile.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
         if (file.get() < 0 && errno == ENOENT) return Json::object();
         struct stat info{};
-        if (!privateFile(file.get(), info) || !S_ISREG(info.st_mode) || info.st_size < 0 ||
+        if (!ownerOnly(file.get(), false) || fstat(file.get(), &info) != 0 || info.st_size < 0 ||
             static_cast<std::uintmax_t>(info.st_size) > maxProfile)
             throw ModelError("ChatGPT credential file must be a private regular file", false);
         std::string bytes(static_cast<std::size_t>(info.st_size), '\0');
@@ -103,22 +96,7 @@ public:
         if (RAND_bytes(random.data(), random.size()) != 1) saveFailed();
         auto temporary = ".profile-" + encodeBase64(std::string_view(reinterpret_cast<const char*>(random.data()), random.size()));
         std::ranges::replace(temporary, '/', '_');
-        const FileDescriptor file(openat(dir_.get(), temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
-        if (file.get() < 0) saveFailed();
-        try {
-            std::string_view remaining(bytes);
-            while (!remaining.empty()) {
-                const auto count = write(file.get(), remaining.data(), remaining.size());
-                if (count < 0 && errno == EINTR) continue;
-                if (count <= 0) saveFailed();
-                remaining.remove_prefix(static_cast<std::size_t>(count));
-            }
-            if (fsync(file.get()) != 0 || renameat(dir_.get(), temporary.c_str(), dir_.get(), "profile.json") != 0) saveFailed();
-        } catch (...) {
-            unlinkat(dir_.get(), temporary.c_str(), 0);
-            throw;
-        }
-        if (fsync(dir_.get()) != 0 && errno != EINVAL && errno != ENOTSUP) saveFailed();
+        if (!replacePrivateFile(dir_.get(), temporary, "profile.json", bytes)) saveFailed();
     }
 private:
     [[noreturn]] static void saveFailed() { throw ModelError("Unable to save Flock's ChatGPT credentials", false); }

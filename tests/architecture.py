@@ -90,6 +90,15 @@ class ArchitectureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("conversationTools, conversationTurns, journalStorage refer to each other in a cycle", result.stderr)
 
+    def test_private_file_check_has_one_implementation(self):
+        check = "if (info.st_mode & 0077) return false;\n"
+        self.assertEqual(self.check({"src/private_files.cpp": check, "src/workspace.cpp": "mode = info.st_mode & 0777;\n"}).returncode, 0)
+        for copy in (check, "if ((info.st_mode & 07777) != 0600) return false;\n"):
+            with self.subTest(copy=copy):
+                result = self.check({"src/private_files.cpp": check, "app/settings_file.cpp": copy})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("app/settings_file.cpp: check that a file is private with ownerOnly", result.stderr)
+
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"
         self.assertEqual(self.check({"tests/support.hpp": define}).returncode, 0)

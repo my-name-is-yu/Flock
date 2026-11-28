@@ -1,4 +1,5 @@
 #include "secret_storage.hpp"
+#include "flock/private_files.hpp"
 #include "flock/file_descriptor.hpp"
 #include "database.hpp"
 #include "flock/types.hpp"
@@ -25,10 +26,7 @@ namespace {
 constexpr std::string_view redactionPlaceholder = "[redacted]";
 
 void verify(int fd, bool directory) {
-    struct stat info{};
-    if (fstat(fd, &info) || info.st_uid != geteuid() || (info.st_mode & 07777) != (directory ? 0700 : 0600) ||
-        !(directory ? S_ISDIR(info.st_mode) : S_ISREG(info.st_mode) && info.st_nlink == 1))
-        throw Conflict("Unsafe secret vault permissions");
+    if (!ownerOnly(fd, directory)) throw Conflict("Unsafe secret vault permissions");
 }
 FileDescriptor openDirectory(int stateDirectory, bool create) {
     if (create) {
@@ -70,25 +68,7 @@ SecretStorage::~SecretStorage() {
 void SecretStorage::insert(const SecretRef& ref, std::string_view value) {
     if (!ref.valid() || value.empty() || value.size() > 65536) throw Conflict("Invalid secret name or size");
     auto directory = openDirectory(stateDirectory_, true);
-    const auto staging = ".pending-" + actionId();
-    FileDescriptor temp(openat(directory.get(), staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
-    if (temp.get() < 0) throw Conflict("Cannot store secret");
-    struct Cleanup {
-        int directory;
-        const std::string& name;
-        ~Cleanup() { unlinkat(directory, name.c_str(), 0); }
-    } cleanup{directory.get(), staging};
-    verify(temp.get(), false);
-    auto bytes = value;
-    while (!bytes.empty()) {
-        auto count = write(temp.get(), bytes.data(), bytes.size());
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) throw Conflict("Cannot store secret");
-        bytes.remove_prefix(count);
-    }
-    if (fsync(temp.get())) throw Conflict("Cannot persist secret");
-    if (renameat(directory.get(), staging.c_str(), directory.get(), ref.name.c_str())) throw Conflict("Cannot publish secret");
-    if (fsync(directory.get())) throw Conflict("Cannot persist secret directory");
+    if (!replacePrivateFile(directory.get(), ".pending-" + actionId(), ref.name, value)) throw Conflict("Cannot store secret");
 }
 
 std::string SecretStorage::read(const SecretRef& ref) const {
