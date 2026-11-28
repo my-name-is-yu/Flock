@@ -203,6 +203,7 @@ struct FakeMcp : McpTools {
 };
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     fs::path home;
     std::unique_ptr<Store> store;
     Provider model;
@@ -215,10 +216,7 @@ struct Fixture {
     Id lastMessage = 0;
 
     Fixture() {
-        char pattern[] = "/tmp/flock-workspace-XXXXXX";
-        const auto name = mkdtemp(pattern);
-        check(name != nullptr, "Could not create test workspace");
-        home = fs::canonical(name);
+        home = fs::canonical(scratch.path);
         tools->web = web;
         tools->mcp = mcp;
         restart();
@@ -226,7 +224,6 @@ struct Fixture {
     ~Fixture() {
         runtime.reset();
         store.reset();
-        fs::remove_all(home);
     }
     void restart() {
         runtime.reset();

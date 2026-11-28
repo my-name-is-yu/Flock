@@ -1,4 +1,5 @@
 #include "flock/task_control.hpp"
+#include "support.hpp"
 #include "flock/task_history.hpp"
 #include "flock/tasks.hpp"
 #include "flock/person.hpp"
@@ -100,7 +101,7 @@ int runSmoke() {
 
     auto t3 = makeT3Mcp(directory);
     t3->authGeneration(environmentId, Json::object());
-    ScratchDirectory scratch;
+    flockv0::test::TemporaryDirectory scratch;
     Store store(scratch.path / "state.db");
     const auto id = submit(store, environmentId, projectId, "smoke");
     if (const auto status = pump(store, *t3, id, "completed"); status != 0) return status;

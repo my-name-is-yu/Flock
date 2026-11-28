@@ -136,6 +136,7 @@ struct FakeMcp : McpTools {
 };
 
 struct Fixture {
+    flockv0::test::TemporaryDirectory scratch;
     fs::path home;
     FixedModel model;
     FakeT3 t3;
@@ -148,17 +149,13 @@ struct Fixture {
     std::function<void(std::string_view)> contention;
 
     Fixture() {
-        char pattern[] = "/tmp/flock-conversation-batch-XXXXXX";
-        const auto* directory = mkdtemp(pattern);
-        check(directory != nullptr, "Could not create batch fixture");
-        home = fs::canonical(directory);
+        home = fs::canonical(scratch.path);
         tools->mcp = mcp;
         restart();
     }
     ~Fixture() {
         runtime.reset();
         store.reset();
-        fs::remove_all(home);
     }
     void restart() {
         runtime.reset();

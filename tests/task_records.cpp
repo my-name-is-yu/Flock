@@ -40,17 +40,7 @@ constexpr Id id = 47, generation = 12;
 using flockv0::test::check;
 
 struct SavedTask {
-    struct Directory {
-        std::filesystem::path path;
-        Directory() {
-            char pattern[] = "/tmp/flock-task-record-XXXXXX";
-            if (const auto* created = mkdtemp(pattern))
-                path = created;
-            else
-                throw std::runtime_error("Cannot create task test directory");
-        }
-        ~Directory() { std::filesystem::remove_all(path); }
-    } directory;
+    flockv0::test::TemporaryDirectory directory;
     Store store{directory.path / "state.db"};
     Id task = TaskIntake(store).submit({.botId = "bot", .request = "Original request", .environmentId = "net", .projectId = "project"});
 

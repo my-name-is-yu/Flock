@@ -1,57 +1,24 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { environmentWithoutFlock, startFlock } from './daemon.mjs';
 
 const executable = process.argv[2];
 const home = mkdtempSync(join(tmpdir(),'flock-system-settings-'));
 const systemSettingsFile = join(home,'system-settings.json');
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('FLOCK_')));
+const env = environmentWithoutFlock();
 const occupied = createServer();
 let daemon;
 
-async function start(...flags) {
-  const child = spawn(executable,['--home',home,'run','--fixed',...flags],{
-    env, stdio: ['ignore','pipe','pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data',text => { stderr += text; });
-  const closed = new Promise(resolve => child.once('close',resolve));
-  const ready = new Promise((resolve,reject) => {
-    child.stdout.on('data',text => {
-      stdout += text;
-      const match = stdout.match(/Flock Web UI at (http:\/\/127\.0\.0\.1:\d+)/);
-      if (match) resolve(match[1]);
-    });
-    child.once('error',reject);
-    child.once('close',code => reject(new Error(`Flock exited before startup (${code}): ${stderr}`)));
-  });
-  let timer;
-  const timeout = new Promise((_,reject) => {
-    timer = setTimeout(() => reject(new Error(`Flock did not start: ${stderr}`)),5000);
-  });
-  try {
-    const origin = await Promise.race([ready,timeout]);
-    return { child, closed, origin };
-  } catch (error) {
-    child.kill();
-    await closed;
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const start = (...flags) => startFlock(executable, home, { env, flags });
+
 
 async function stop() {
   if (!daemon) return;
-  daemon.child.kill();
-  await daemon.closed;
+  await daemon.stop();
   daemon = undefined;
 }
 

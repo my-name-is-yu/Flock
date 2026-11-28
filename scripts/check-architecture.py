@@ -29,6 +29,7 @@ SINGLE_OWNERS = (
         "check that a file is private with ownerOnly from flock/private_files.hpp",
     ),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
+    (re.compile(r"\bmkdtemp\("), "tests/support.hpp", "use TemporaryDirectory from tests/support.hpp"),
 )
 SCRIPT_OWNERS = (
     (re.compile(r"\bfunction (node|element)\(tag\b"), "web/assets/dom.js", "create elements with node from dom.js"),

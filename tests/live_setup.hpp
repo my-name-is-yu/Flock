@@ -41,24 +41,4 @@ inline bool hasT3Credentials(const std::filesystem::path& directory) {
     }
     return false;
 }
-
-class ScratchDirectory {
-public:
-    ScratchDirectory() : path(create()) {}
-    ScratchDirectory(const ScratchDirectory&) = delete;
-    ScratchDirectory& operator=(const ScratchDirectory&) = delete;
-    ~ScratchDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-
-    const std::filesystem::path path;
-private:
-    static std::filesystem::path create() {
-        auto pattern = (std::filesystem::temp_directory_path() / "flock-live-XXXXXX").string();
-        const auto* created = mkdtemp(pattern.data());
-        if (!created) throw std::runtime_error("Cannot create a live test directory");
-        return created;
-    }
-};
 }
