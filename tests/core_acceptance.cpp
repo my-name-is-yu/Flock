@@ -133,7 +133,7 @@ struct SimulatedT3 : T3 {
     bool delayLaunchRunId = false;
     bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
-    std::optional<Delivery> nextAnswerOutcome, nextWorkOutcome;
+    std::optional<Delivery> nextAnswerOutcome, nextWorkOutcome, reconciledAnswerOutcome;
     Delivery unconfirmedDelivery;
     std::string expectedBranch = "main";
     std::map<std::string, Observation> runs;
@@ -198,8 +198,10 @@ struct SimulatedT3 : T3 {
     Delivery reconcile(const Command& cmd) override {
         ++reconciles;
         recovery.push_back(cmd);
-        if (cmd.tool == CommandTool::answer_session_question && runs.at(cmd.target.runId).kind == Observation::Kind::Running)
-            return {Delivery::Kind::Accepted, {}, {}};
+        if (cmd.tool == CommandTool::answer_session_question) {
+            if (reconciledAnswerOutcome) return *reconciledAnswerOutcome;
+            if (runs.at(cmd.target.runId).kind == Observation::Kind::Running) return {Delivery::Kind::Accepted, {}, {}};
+        }
         if (!hasReconciledRun || !assignments.contains(cmd.actionId)) return unconfirmedDelivery;
         return {Delivery::Kind::Accepted, assignments.at(cmd.actionId), {}};
     }
@@ -898,8 +900,11 @@ void busyFollowUpWaitsForItsOwnDelivery() {
           "Late follow-up delivery did not attach exactly one Run to the saved action");
 }
 
-void rejectedAnswerKeepsItsRun() {
-    for (const auto kind : {Delivery::Kind::QuestionGone, Delivery::Kind::NotAccepted}) {
+void rejectedOrUnconfirmedAnswerKeepsItsRun() {
+    using enum Delivery::Kind;
+    for (const auto& outcome : {Delivery{QuestionGone, {}, "The question was closed before sending", true},
+                                Delivery{NotAccepted, {}, "The saved answer no longer applies", true},
+                                Delivery{QuestionGone, {}, "The question closed during sending"}}) {
         Fixture f;
         const auto id = f.submit();
         f.reach(id, "running");
@@ -907,12 +912,17 @@ void rejectedAnswerKeepsItsRun() {
         const auto asked = f.wait(id, "user_question");
         TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, asked), "answer", {{"text", "main"}});
         f.reach(id, "sending");
-        f.t3.nextAnswerOutcome = Delivery{kind, {}, "The saved answer no longer applies", true};
+        f.t3.nextAnswerOutcome = outcome;
         f.runtime->tick();
+        const auto actionId = f.t3.seen.back().actionId;
+        const auto expectedUnconfirmed = outcome.definitelyUnsent ? 0 : 1;
         const auto rejected = Tasks(*f.store).task(id);
         check(!rejected.pendingAction && rejected.task.activeRun && rejected.task.activeRun->ref.runId == "run-1" &&
-                  f.logs(id, "session_answered") == 0,
-              "A rejected answer stayed dispatchable or lost the assigned Run");
+                  f.logs(id, "session_answered") == 0 && f.logs(id, "answer_delivery_unconfirmed") == expectedUnconfirmed,
+              "The answer lost its delivery outcome or the assigned Run");
+        if (expectedUnconfirmed)
+            check(lastTaskEvent(*f.store, id, "answer_delivery_unconfirmed").at("data").at("actionId") == actionId,
+                  "The question closed during sending and lost the original answer action");
         f.t3.runs.at("run-1").question.requestId = "updated-question";
         f.restart();
         f.now += 5;
@@ -922,7 +932,8 @@ void rejectedAnswerKeepsItsRun() {
               "The rejected answer was retried while observing the next question");
         f.t3.finish("run-1");
         f.reach(id, "completed");
-        check(f.logs(id, "report") == 1, "The original Run did not finish after its answer was rejected");
+        check(f.logs(id, "report") == 1 && f.logs(id, "answer_delivery_unconfirmed") == expectedUnconfirmed,
+              "Run completion lost or duplicated the saved answer outcome");
     }
 }
 
@@ -977,7 +988,8 @@ void cancelDuringDelivery() {
 }
 
 void settleWhileAnswerDeliveryIsUnknown() {
-    for (const bool cancel : {false, true}) {
+    enum class Settlement { finished, cancelled, resolvedInT3 };
+    for (const auto settlement : {Settlement::finished, Settlement::cancelled, Settlement::resolvedInT3}) {
         Fixture f;
         const auto id = f.submit();
         f.reach(id, "running");
@@ -987,9 +999,11 @@ void settleWhileAnswerDeliveryIsUnknown() {
         TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, asked), "answer", {{"text", "main"}});
         f.reach(id, "sending");
         f.runtime->tick();
+        const auto actionId = f.t3.seen.back().actionId;
         f.t3.question("run-1");
         f.restart();
 
+        const bool cancel = settlement == Settlement::cancelled;
         if (cancel) {
             TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, 0), "cancel");
             for (int i = 0; i < 12 && f.t3.interruptedRuns.empty(); ++i) f.runtime->tick();
@@ -997,9 +1011,26 @@ void settleWhileAnswerDeliveryIsUnknown() {
                       f.t3.interruptedRuns[0].threadId == "thread-1" && f.t3.interruptedRuns[0].runId == "run-1",
                   "unknown answer delivery blocked interruption of the known Run");
         }
+        if (settlement == Settlement::resolvedInT3) {
+            f.t3.runs.at("run-1") = {};
+            f.t3.reconciledAnswerOutcome = Delivery{Delivery::Kind::QuestionGone};
+            f.now += 5;
+            f.reach(id, "running");
+            check(f.t3.reconciles == 1 && f.t3.recovery.back().actionId == actionId && f.logs(id, "answer_delivery_unconfirmed") == 1,
+                  "a question resolved in T3 lost the original unconfirmed answer");
+        }
         f.t3.finish("run-1", cancel ? "interrupted" : "completed");
         f.reach(id, cancel ? "cancelled" : "completed");
-        check(f.logs(id, "report") == 1 && f.t3.replies == 1 && f.t3.launches == 1, "settled Run duplicated its answer or report");
+        f.restart();
+        f.now += 10;
+        f.runtime->tick();
+        const auto receipt = lastTaskEvent(*f.store, id, "answer_delivery_unconfirmed");
+        const auto conversation = Conversations(*f.store).conversation("alpha");
+        check(f.logs(id, "report") == 1 && f.t3.replies == 1 && f.t3.launches == 1 && f.logs(id, "session_answered") == 0 &&
+                  f.logs(id, "answer_delivery_unconfirmed") == 1 && receipt.at("data").at("actionId") == actionId &&
+                  !Tasks(*f.store).task(id).pendingAction &&
+                  std::ranges::any_of(conversation, [&](const auto& event) { return event.at("id") == receipt.at("id"); }),
+              "Run settlement lost the unconfirmed answer or left it dispatchable");
     }
 }
 
@@ -1280,7 +1311,7 @@ int main() {
              {"denied follow-up requires new person input", deniedFollowUpRequiresNewPersonInput},
              {"new launch uses the current Bot profile after denial", approvedNewLaunchUsesCurrentProfileAfterDenial},
              {"busy follow-up waits for its own delivery", busyFollowUpWaitsForItsOwnDelivery},
-             {"rejected answer keeps its Run", rejectedAnswerKeepsItsRun},
+             {"rejected or unconfirmed answer keeps its Run", rejectedOrUnconfirmedAnswerKeepsItsRun},
              {"launch receipt recovery", launchReceiptSurvivesRecovery},
              {"retry unsent Session answer", unsentAnswerRecoversAutomatically},
              {"cancel during delivery", cancelDuringDelivery},

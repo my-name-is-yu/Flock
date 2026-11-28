@@ -146,6 +146,7 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeTurn;
     std::function<void(const ModelInput&)> beforeComplete;
     std::function<Decision(const ModelInput&)> onResult;
+    std::function<Decision(const ModelInput&)> onWake;
     std::vector<ModelInput> turnInputs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
@@ -154,6 +155,7 @@ struct Script : Model {
             turnInputs.push_back(input);
             if (beforeTurn) beforeTurn(input);
             if (input.event.contains("sessionWake")) {
+                if (onWake) return onWake(input);
                 // A finished task wakes its conversation. Reuse the result hook with the woken task's report.
                 if (onResult && input.event.contains("task") && input.event.at("turn").empty()) {
                     auto woken = input;
@@ -190,6 +192,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string, T3EnvironmentLinks> linksByGateway;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
     bool queueNextMessage = false, waitForSessionRuns = false;
+    bool failNextSessionCatalog = false;
     std::string loseSendForEnvironment;
     bool deferNextRunId = false;
     std::string login = "original-login";
@@ -214,6 +217,7 @@ struct SimulatedT3 : T3 {
     std::pair<std::vector<std::string>, std::optional<Id>> projectSessions(std::string_view environment, std::string_view project, Id,
                                                                            SessionReadDeadline) override {
         std::lock_guard lock(stateMutex);
+        if (std::exchange(failNextSessionCatalog, false)) throw std::runtime_error("Session catalog unavailable");
         std::vector<std::string> threads;
         for (const auto& [target, metadata] : sessions)
             if (target.first == environment && (project.empty() || project == metadata.projectId)) threads.push_back(target.second);
@@ -565,7 +569,7 @@ void followUpCarriesTheReferencedReport() {
     check(f.t3.sent.back().tool == CommandTool::follow_up && f.t3.sent.back().target.threadId == "session-1" &&
               f.t3.sent.back().instruction.find("案2を実装") != std::string::npos &&
               f.t3.sent.back().instruction.find("Capture a fixture trace") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "the Session did not receive the referenced result");
 }
 
@@ -614,7 +618,7 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.t3.finish("run-1", "Measured with Quartz-717");
     f.advanceUntil([&] { return f.t3.sent.size() == 3; }, "the additional instruction did not continue the Session");
     check(f.t3.sent.back().target.threadId == "session-1" && f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
-              f.conversationMessage(added["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(added["messageId"]).contains("instructionDeliveredAt"),
           "continuation lost the additional instruction");
 }
 
@@ -1564,7 +1568,7 @@ void appendWaitsForSafeBoundary() {
     check(f.receive("format", "補足として表をCSV形式で出して") == message, "retry changed a durable receipt");
     f.tick(3);
     check(f.task(next)["state"] == "queued" && f.t3.sent.size() == 1 && f.t3.interrupted.empty() &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == false,
+              !f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "non-conflicting instruction ran before the safe boundary");
     f.restart();
     f.t3.finish("run-1", "Baseline evidence");
@@ -1574,7 +1578,7 @@ void appendWaitsForSafeBoundary() {
     check(work["runs"].size() == 2 && work["runs"][0]["threadId"] == work["runs"][1]["threadId"],
           "same-Session continuation changed Task provenance");
     check(f.t3.sent.back().instruction.find("CSV形式で") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true && f.task(next)["state"] == "queued",
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt") && f.task(next)["state"] == "queued",
           "continuation lost the user instruction or the project gate");
     f.t3.finish("run-2", "Latest CSV evidence");
     f.reach(id, "completed");
@@ -1599,7 +1603,7 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
     f.reach(id, "running");
     check(f.t3.sent.back().instruction.find("Export the table as CSV") != std::string::npos &&
               f.t3.sent.back().instruction.find("Add a chart") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "the instructions were not both delivered");
 }
 
@@ -1638,12 +1642,18 @@ void deliveryWaitsForEveryTarget() {
     constexpr auto text = "Include CPU time in both measurements";
     f.script(text, {send(running), send(queued)});
     const Id message = f.receive("both-measurements", text).at("messageId");
+    const auto acceptedAt = lastTaskEvent(*f.store, running, "instruction_accepted").at("time");
+    check(f.conversationMessage(message).at("instructionAcceptedAt") == acceptedAt &&
+              !f.conversationMessage(message).contains("instructionDeliveredAt"),
+          "the accepted instruction did not show its acceptance time");
     f.t3.finish("run-1", "First measurement reached a safe point");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the first direction did not reach T3");
-    check(f.conversationMessage(message)["deliveredToT3"] == false, "the first delivery marked the whole message as sent");
+    check(!f.conversationMessage(message).contains("instructionDeliveredAt"), "the first delivery marked the whole message as sent");
     f.t3.finish(f.task(running).at("activeRun").at("runId").get<std::string>(), "First measurement complete");
     f.reach(queued, "running");
-    check(f.t3.sent.back().instruction.find(text) != std::string::npos && f.conversationMessage(message)["deliveredToT3"] == true,
+    const auto delivered = f.conversationMessage(message);
+    check(f.t3.sent.back().instruction.find(text) != std::string::npos && delivered.at("instructionAcceptedAt") == acceptedAt &&
+              delivered.at("instructionDeliveredAt") == lastTaskEvent(*f.store, queued, "instruction_delivered").at("time"),
           "the message was not marked as sent after the second delivery");
 }
 
@@ -1698,7 +1708,7 @@ void unknownSendThenScopeChange() {
               f.t3.sent.back().tool == CommandTool::follow_up &&
               f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
               f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
-              f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(change["messageId"]).contains("instructionDeliveredAt"),
           "the replacement did not reconcile as one delivery for the new revision");
     const auto runs = f.task(id)["runs"];
     check(runs[0]["revisionId"] == before["currentRevision"] && runs[1]["revisionId"] == f.task(id)["currentRevision"] &&
@@ -1724,6 +1734,125 @@ std::string settleLearningTask(Fixture& f, Id task, std::string report) {
     f.t3.finish(runId, std::move(report));
     f.reach(task, "completed");
     return runId;
+}
+
+void failedReviewStepDoesNotAutoComplete() {
+    enum class Review { failed, unrelatedRead, recovered, successful };
+    for (const auto review : {Review::failed, Review::unrelatedRead, Review::recovered, Review::successful}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release and its dependency");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        const auto report = lastTaskEvent(*f.store, task, "report").at("id");
+        const auto dependency = task + 1;
+        f.model.onWake = [&, report](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                if (review == Review::successful) return {"read_result", {{"messageId", report}}, "Read the current release report"};
+                return {"find_tasks", {{"taskId", dependency}}, "Check a release dependency"};
+            }
+            if (review == Review::successful) {
+                check(turn.front().at("result").at("ok") == true, "the release report was not readable");
+                return {"reply", {{"text", "I verified the release."}}, "Report the review result"};
+            }
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the dependency read did not fail");
+                if (review == Review::recovered) {
+                    check(TaskIntake(*f.store).submit(f.routing("Release dependency")) == dependency,
+                          "the dependency did not become available");
+                    return {"find_tasks", {{"taskId", dependency}}, "Retry the dependency check"};
+                }
+                if (review == Review::unrelatedRead) return {"read_result", {{"messageId", report}}, "Read the current release report"};
+                return {"reply", {{"text", "I couldn't verify the dependency."}}, "Report the blocked review"};
+            }
+            check(turn.back().at("result").at("ok") == true, "the second evidence read failed");
+            return {"reply", {{"text", "I finished my review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the review did not settle");
+        const bool canComplete = review == Review::recovered || review == Review::successful;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its dependency check");
+    }
+}
+
+void failedReviewSearchDoesNotAutoComplete() {
+    enum class Retry { none, otherQuery, otherPage, correctedCursor };
+    for (const auto retry : {Retry::none, Retry::otherQuery, Retry::otherPage, Retry::correctedCursor}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        const auto dependency = TaskIntake(*f.store).submit(f.routing("Release dependency"));
+        const auto other = TaskIntake(*f.store).submit(f.routing("Other dependency"));
+        f.model.onWake = [&](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                if (retry == Retry::none) return {"find_tasks", {{"query", std::string(401, 'x')}}, "Search for the blocker"};
+                return {"find_tasks", {{"query", "Release dependency"}, {"before", "invalid"}}, "Search for the release dependency"};
+            }
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the task search did not fail");
+                if (retry == Retry::otherQuery) return {"find_tasks", {{"query", "Other dependency"}}, "Check a different dependency"};
+                if (retry == Retry::otherPage)
+                    return {"find_tasks", {{"query", "Release dependency"}, {"before", dependency}}, "Read a different page"};
+                if (retry == Retry::correctedCursor)
+                    return {"find_tasks", {{"query", "Release dependency"}}, "Retry the search with a valid cursor"};
+                return {"reply", {{"text", "The search failed."}}, "Report the failed search"};
+            }
+            const auto& result = turn.back().at("result");
+            check(result.at("ok") == true, "the second task search failed");
+            const auto& matches = result.at("tasks");
+            if (retry == Retry::otherPage)
+                check(matches.empty(), "the other page unexpectedly found the dependency");
+            else
+                check(matches.size() == 1 && matches.at(0).at("taskId") == (retry == Retry::otherQuery ? other : dependency),
+                      "the second search found the wrong dependency");
+            return {"reply", {{"text", "I finished my review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the search review did not settle");
+        const bool canComplete = retry == Retry::correctedCursor;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its task search");
+    }
+}
+
+void failedReviewSessionSearchDoesNotAutoComplete() {
+    enum class Retry { none, unrelated, sameSearch };
+    for (const auto retry : {Retry::none, Retry::unrelated, Retry::sameSearch}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release against other Sessions");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        f.t3.sessions[{"desktop", "dependency"}] = {"Release dependency", "Fixture Project",      "project",
+                                                    "completed",          "2026-11-23T00:00:00Z", "2026-11-23T00:00:00Z"};
+        f.t3.sessions[{"desktop", "other"}] = {"Other Session", "Fixture Project",      "project",
+                                               "completed",     "2026-11-23T00:00:00Z", "2026-11-23T00:00:00Z"};
+        f.t3.failNextSessionCatalog = true;
+        f.model.onWake = [&](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            const auto* retryQuery = retry == Retry::unrelated ? "Other Session" : "Release dependency";
+            if (turn.empty()) return {"flock_session_search", {{"query", "Release dependency"}}, "Find the dependency Session"};
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the Session search did not fail");
+                if (retry != Retry::none) return {"flock_session_search", {{"query", retryQuery}}, "Search the recovered catalog"};
+            } else {
+                const auto& result = turn.back().at("result");
+                check(result.at("ok") == true && result.at("sessions").size() == 1 && result.at("sessions").at(0).at("title") == retryQuery,
+                      "the second Session search did not find its Session");
+            }
+            return {"reply", {{"text", "Here is my release review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the Session search review did not settle");
+        const bool canComplete = retry == Retry::sameSearch;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its Session search");
+    }
 }
 
 Decision completeWithLearnings(const ModelInput& input, Json learnings) {
@@ -4455,6 +4584,9 @@ int main(int argc, char** argv) {
         queuedTurnsSeeEarlierReplies();
         requestsOfOneKindShareAPromptCacheScope();
         finishedTurnDoesNotHoldCompletion();
+        failedReviewStepDoesNotAutoComplete();
+        failedReviewSearchDoesNotAutoComplete();
+        failedReviewSessionSearchDoesNotAutoComplete();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();

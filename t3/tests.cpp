@@ -461,9 +461,11 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "question"}});
         check(adapter->reconcile(answer).kind == Delivery::Kind::Unknown, "reconciliation reports the pending question");
         check(effects("t3_pending_request").empty(), "T3 receives no reply for an invalid option, ambiguous ownership or unknown delivery");
-        check(adapter->send(answer).kind == Delivery::Kind::Accepted && restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone &&
-                  restarted->send(answer).kind == Delivery::Kind::QuestionGone,
+        check(adapter->send(answer).kind == Delivery::Kind::Accepted && restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone,
               "answer uses original request once");
+        const auto expiredAnswer = restarted->send(answer);
+        check(expiredAnswer.kind == Delivery::Kind::QuestionGone && expiredAnswer.definitelyUnsent,
+              "an already closed question was treated as possibly sent");
         const auto replies = effects("t3_pending_request");
         check(replies.size() == 1, "T3 receives exactly one reply across restart and retry");
         check(replies.at(0).at("threadId") == "thread" && replies.at(0).at("requestId") == "request" &&
@@ -471,7 +473,10 @@ int main(int argc, char** argv) {
                       Json{{"color", Json::array({"green", "blue"})}, {"note", ""}, {"message", ""}, {"tag", ""}},
               "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
-        check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
+        const auto racingAnswer = adapter->send(answer);
+        check(racingAnswer.kind == Delivery::Kind::QuestionGone && !racingAnswer.definitelyUnsent &&
+                  effects("t3_pending_request").size() == replies.size() + 1,
+              "a question that closed during the answer request lost its ambiguous send outcome");
 
         const auto submittedAnswers = effects("t3_pending_request").size();
         fixture({{"scenario", "question"}, {"failAnswerRecheck", true}});
@@ -587,7 +592,32 @@ int main(int argc, char** argv) {
               "a follow-up to an archived Session was retried and not shown to the person");
         fixture({{"threadArchived", false}});
         check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy, unrelated or archived Run");
-        fixture({{"scenario", "settled"}});
+        fixture({{"scenario", "settled"}, {"moveThreadOnQueueList", true}});
+        const auto moved = adapter->send(follow);
+        check(moved.kind == Delivery::Kind::Settings && moved.definitelyUnsent && effects("t3_thread_send").empty(),
+              "T3 received a follow-up after the Session moved projects during readiness checks");
+        fixture({{"moveThreadOnQueueList", false}, {"threadProjectId", "project"}, {"attachmentTools", true}, {"heldQueue", true}});
+        auto followWithFile = follow;
+        followWithFile.attachments = {{"report.txt", "text/plain", "Report"}};
+        followWithFile.attachmentCount = followWithFile.attachments.size();
+        const auto uploadsBefore = effects("t3_attachment_prepare_upload").size();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const auto held = adapter->send(followWithFile);
+            check(held.kind == Delivery::Kind::Busy && held.definitelyUnsent && effects("t3_thread_send_attachments").empty(),
+                  "T3 received a follow-up while the queue was held");
+        }
+        check(effects("t3_attachment_prepare_upload").size() == uploadsBefore, "a retry staged files while the queue was held");
+        fixture({{"heldQueue", false}, {"holdQueueOnUpload", true}});
+        const auto heldDuringUpload = adapter->send(followWithFile);
+        check(heldDuringUpload.kind == Delivery::Kind::Busy && heldDuringUpload.definitelyUnsent &&
+                  effects("t3_thread_send_attachments").empty(),
+              "T3 received a follow-up after the queue was held during attachment upload");
+        fixture({{"heldQueue", false}, {"holdQueueOnUpload", false}, {"moveThreadOnUpload", true}});
+        const auto movedDuringUpload = adapter->send(followWithFile);
+        check(movedDuringUpload.kind == Delivery::Kind::Settings && movedDuringUpload.definitelyUnsent &&
+                  effects("t3_thread_send_attachments").empty(),
+              "T3 received a follow-up after the Session moved projects during attachment upload");
+        fixture({{"moveThreadOnUpload", false}, {"attachmentTools", false}, {"threadProjectId", "project"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" && delivery.run.runId == "follow",
               "follow-up starts a new Run in the original thread");

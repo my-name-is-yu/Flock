@@ -30,6 +30,7 @@ public:
     void insertOutbox(Id task, const Outbox&);
     bool saveOutbox(const Outbox&, std::optional<OutboxPhase> expected = {});
     bool setOutboxPhase(std::string_view id, OutboxPhase, std::optional<OutboxPhase> expected = {});
+    void recordUnconfirmedAnswer(Id task, const Outbox&);
     bool startOutbox(const Outbox&, std::string_view authGeneration);
     bool prepareOutbox(const Outbox&);
 private:

@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace flockv0 {
-enum class OutboxPhase { ready, started, accepted, closed, superseded };
+enum class OutboxPhase { ready, started, accepted, closed, superseded, unconfirmed };
 
 struct OutboxRunIdentity {
     std::string threadId, runId;

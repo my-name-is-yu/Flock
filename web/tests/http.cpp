@@ -1261,7 +1261,7 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
     const auto changesPath = viewPath + "&changesAfter=" + baseline.at("historyCursor").dump();
     baseline.erase("historyCursor");
     check(baseline.at("events").front().at("id").get<Id>() > message &&
-              browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == false,
+              !browser.get(olderPath).at("events").back().at("data").contains("instructionDeliveredAt"),
           "expected an undelivered message outside the newest view");
 
     bool initial = true;
@@ -1279,9 +1279,9 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
                 check(opened == SQLITE_OK, "could not open the fixture writer");
                 sqlite3_busy_timeout(db.get(), 2000);
                 std::string write;
-                for (const auto* kind : {"instruction_accepted", "instruction_delivered"})
+                for (const auto& [kind, time] : {std::pair{"instruction_accepted", "100"}, std::pair{"instruction_delivered", "160"}})
                     write += "INSERT INTO journal(task_id,time,kind,data,message_id,instruction_step) VALUES(" + std::to_string(task) +
-                             ",CAST(strftime('%s','now') AS INTEGER),'" + kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1)," +
+                             "," + time + ",'" + kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1)," +
                              std::to_string(message) + ",1);";
                 check(sqlite3_exec(db.get(), write.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
                       "could not record the historical delivery");
@@ -1291,8 +1291,9 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             auto current = browser.get(viewPath);
             current.erase("historyCursor");
             check(current == baseline, "the history-only write changed the newest view");
+            const auto details = browser.get(olderPath).at("events").back().at("data");
             check(browser.get(changesPath).at("changedMessageIds") == Json::array({message}) &&
-                      browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == true,
+                      details.at("instructionAcceptedAt") == 100 && details.at("instructionDeliveredAt") == 160,
                   "the recovered notification did not expose the updated historical message");
             return false;
         },
@@ -1349,7 +1350,7 @@ void retryOneBotProjection(const std::filesystem::path& path) {
     releaseAvailable = true;
     expectBot(release, "release");
     check(Conversations(store).conversation("release", 0, 1) == latest, "history invalidation unexpectedly changed the latest page");
-    check(Conversations(store).conversation("release", message + 1, 1).back().at("data").at("deliveredToT3") == true,
+    check(Conversations(store).conversation("release", message + 1, 1).back().at("data").contains("instructionDeliveredAt"),
           "the recovered Bot skipped the historical change");
     feed.release(release);
     feed.release(triage);

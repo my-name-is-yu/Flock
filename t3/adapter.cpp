@@ -895,7 +895,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
 
 enum class FollowUp { Ready, Busy, SessionUnavailable };
 
-FollowUp followUpReadiness(Client& client, const Command& command) {
+FollowUp followUpReadiness(Client& client, const Command& command, const auto& stageAttachments) {
     const auto settled = waitForDelegatedWork(client, command.target, 1);
     const auto& effective = settled.parent.runId;
     const auto& resultRun = settled.resultRunId;
@@ -910,12 +910,19 @@ FollowUp followUpReadiness(Client& client, const Command& command) {
     // The Session agent sees them, and Flock attributes the follow-up by the Run that the send returns.
     if (!member(info, "activeRunId").is_null() || position(member(info, "pendingRequestCount")) != 0) return FollowUp::Busy;
     // A held queue can exist even without an active Run.
-    const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
-    if (!array(queue, "items").empty()) return FollowUp::Busy;
+    const auto hasQueuedWork = [&] {
+        const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
+        return !array(queue, "items").empty();
+    };
+    if (hasQueuedWork()) return FollowUp::Busy;
+    if (!command.attachments.empty()) {
+        stageAttachments();
+        if (hasQueuedWork()) return FollowUp::Busy;
+    }
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
     const auto& current = checked.at("thread");
-    if (boolean(current, "archived")) return FollowUp::SessionUnavailable;
+    if (field(current, "projectId") != command.projectId || boolean(current, "archived")) return FollowUp::SessionUnavailable;
     const bool unchanged = member(current, "activeRunId").is_null() && field(current, "latestRunId") == field(info, "latestRunId") &&
                            position(member(current, "pendingRequestCount")) == 0;
     return unchanged ? FollowUp::Ready : FollowUp::Busy;
@@ -923,7 +930,7 @@ FollowUp followUpReadiness(Client& client, const Command& command) {
 
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
-    if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
+    if (!pending(client, thread).contains(command.questionId)) return {Outcome::QuestionGone, {}, {}, true};
     const auto watching = waitForRun(client, command.target);
     // Codex's Run projection can stay "running" while its input activity
     // is "waiting". Attribution below checks the actual owned question.
@@ -931,7 +938,7 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
         return result(Outcome::NotAccepted, "Use T3 to answer this question because the assigned Run is not waiting for input");
     auto attribution =
         attribute(client, {thread, watching.runId, command.target.link, command.target.gatewayEnvironmentId}, command.questionId);
-    if (attribution.kind == Attribution::Kind::Resolved) return result(Outcome::QuestionGone);
+    if (attribution.kind == Attribution::Kind::Resolved) return {Outcome::QuestionGone, {}, {}, true};
     if (attribution.kind != Attribution::Kind::Owned)
         return result(Outcome::NotAccepted, "Answer in T3 because the question could not be attributed to the assigned Run");
     Json answers;
@@ -949,7 +956,7 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
         position(member(responded, "sequence"));
         return result(Outcome::Accepted, {}, command.target);
     } catch (const Failure& error) {
-        if (error.reason == Failure::Reason::QuestionGone) return result(Outcome::QuestionGone);
+        if (error.reason == Failure::Reason::QuestionGone) return {Outcome::QuestionGone, {}, {}, !invoked};
         throw;
     }
 }
@@ -1182,6 +1189,7 @@ public:
                 if (field(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 Json previous;
+                Json files;
                 if (selected) {
                     if (gateway == command.environmentId) {
                         const auto environment = client.call("t3_environment_read", Json::object());
@@ -1193,14 +1201,14 @@ public:
                         return {Outcome::Settings, {}, "The selected T3 Session moved projects or was archived", true};
                     if (!command.attachments.empty() && !member(previous, "activeRunId").is_null())
                         return {Outcome::Busy, {}, "The selected T3 Session is still active", true};
+                    files = stage();
                 } else {
-                    const auto readiness = followUpReadiness(client, command);
+                    const auto readiness = followUpReadiness(client, command, [&] { files = stage(); });
                     if (readiness == FollowUp::SessionUnavailable)
                         return {Outcome::Settings, {}, "The T3 Session moved projects or was archived", true};
                     if (readiness == FollowUp::Busy)
                         return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                 }
-                const auto files = stage();
                 invoked = true;
                 reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto delivery = field(reply, "delivery");

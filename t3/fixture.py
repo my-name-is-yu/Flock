@@ -99,6 +99,10 @@ class Fixture(BaseHTTPRequestHandler):
                 return
             assert len(raw) == upload["sizeBytes"]
             upload["bytes"] = base64.b64encode(raw).decode()
+            if state.get("moveThreadOnUpload"):
+                state["threadProjectId"] = "other-project"
+            if state.get("holdQueueOnUpload"):
+                state["heldQueue"] = True
             self.reply(code=201)
             return
         if self.path == "/token":
@@ -261,6 +265,7 @@ class Fixture(BaseHTTPRequestHandler):
         if state.get("attachmentTools"):
             if name == "t3_attachment_prepare_upload":
                 assert set(args) == {"upload"}
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
                 uploads = state.setdefault("uploads", {})
                 attachment_id = f"file-{len(uploads) + 1}"
                 uploads[attachment_id] = args["upload"]
@@ -270,6 +275,7 @@ class Fixture(BaseHTTPRequestHandler):
                 state["uploads"].pop(args["attachmentId"])
                 return {}
             if name == "t3_thread_send_attachments" or (name == "t3_thread_launch" and "attachments" in args):
+                state.setdefault("effects", {}).setdefault(name, []).append(args)
                 thread = args.get("threadId", "thread")
                 assert thread == "thread"
                 assert "clientRequestId" not in args or name == "t3_thread_launch"
@@ -421,7 +427,10 @@ class Fixture(BaseHTTPRequestHandler):
                     return {"items": [entry], "nextCursor": None}
                 return {"items": [], "nextCursor": None}
             assert args["action"] == "list" and args["threadId"] == "thread"
-            return {"items": [], "nextCursor": None}
+            if state.get("moveThreadOnQueueList"):
+                state["threadProjectId"] = "other-project"
+            items = [{"queuedRunId": "held-run", "text": "Held work", "truncated": False}] if state.get("heldQueue") else []
+            return {"items": items, "nextCursor": None}
         if name == "t3_thread_list":
             if args.get("allProjects") is True:
                 assert "projectId" not in args and not args["includeSubagents"]
@@ -585,6 +594,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state.get("personFinished") and state["botRunStatus"] == "queued":
                 active = None
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest,
+                                             "projectId": state.get("threadProjectId", "project"),
                                              "archived": state.get("threadArchived", False),
                                              "pendingRequestCount": count}
         if state.get("sessionWakeFixture"):

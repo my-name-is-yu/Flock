@@ -261,6 +261,22 @@ std::optional<std::pair<Id, RunReportEntry>> currentWakeReport(Database& databas
         return std::nullopt;
     return std::pair{id, std::move(report)};
 }
+
+std::optional<std::pair<std::string, Json>> wakeEvidenceLookup(const Json& call) {
+    const auto tool = field(call, "tool");
+    const auto& args = call.at("args");
+    if (!args.is_object()) return std::nullopt;
+    if (tool == "find_tasks") {
+        auto task = args.value("taskId", Json{});
+        if (!task.is_null()) return std::pair{tool, Json{{"taskId", std::move(task)}}};
+        auto query = args.value("query", Json{});
+        if (query.is_null() || (query.is_string() && !conversation_storage::hasText(query.get_ref<const std::string&>()))) query = "";
+        return std::pair{tool, Json{{"query", std::move(query)}, {"before", std::max<Id>(0, integer(args, "before"))}}};
+    }
+    if (tool == "read_result" && args.contains("messageId")) return std::pair{tool, args.at("messageId")};
+    if (tool == "flock_session_search" || tool == "flock_session_events") return std::pair{tool, args};
+    return std::nullopt;
+}
 }
 
 std::optional<TurnRunner::WorkLearningSource> TurnRunner::wokenLearningSource(const TaskData& task) {
@@ -865,20 +881,8 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                                        {"delivery", "not_accepted"},
                                                        {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
-    if (auto woken = wokenTask(message)) {
-        const auto reason = field(message.routing.at("sessionWake"), "reason");
-        const auto report = route == reply && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
-        if (report && report->second.status == "completed") {
-            taskRecords.completeWithReport(*woken, report->second.evidence.report, "Nobody asked for more work after the Session finished");
-        } else {
-            const auto note = route != reply         ? "Flock could not finish reviewing this task."
-                              : reason == "failed"   ? "The Session failed."
-                              : reason == "finished" ? "The Session finished without a readable report for this request."
-                                                     : "This task stopped before its work finished.";
-            waitStorage.wait(*woken, ModelQuestionWait{}, std::string(note) + " Reply with what to do next, or cancel it.");
-            taskRecords.save(*woken);
-        }
-    }
+    auto woken = wokenTask(message);
+    std::set<std::pair<std::string, Json>> unresolvedEvidence;
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -890,13 +894,23 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         const auto results = steps.json(1);
         for (std::size_t i = 0; i < results.size(); ++i) {
             const auto& result = results.at(i);
+            const bool ok = result.value("ok", false);
+            if (woken && route == reply && i < calls.size() && !result.value("notRun", false))
+                if (const auto evidence = wakeEvidenceLookup(calls.at(i))) {
+                    const auto& outcome = result.contains("result") ? result.at("result") : result;
+                    if (outcome.value("ok", false))
+                        unresolvedEvidence.erase(*evidence);
+                    else
+                        unresolvedEvidence.insert(*evidence);
+                }
             if (result.contains("artifact") && channelStorage.channelToolStatus(message.id, message.bot, result).value("ok", false))
                 artifacts.push_back(result.at("artifact"));
-            if (!result.value("ok", false) || !result.contains("effect")) continue;
-            Json action = {{"tool", calls.at(i).at("tool")}, {"effect", result.at("effect")}};
+            if (!ok || !result.contains("effect")) continue;
+            const auto& call = calls.at(i);
+            Json action = {{"tool", call.at("tool")}, {"effect", result.at("effect")}};
             if (action.at("tool") == "message_bot") {
                 // The answer arrives in a later turn, where history is the only record of what was asked.
-                const auto& sent = calls.at(i).at("args");
+                const auto& sent = call.at("args");
                 action["botId"] = sent.at("botId");
                 action["text"] = bounded(secretStorage.redactor(message.bot).text(sent.at("text").get<std::string>()), 2000);
             }
@@ -905,6 +919,21 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                 touched.insert(result.at("taskId").get<Id>());
             }
             actions.push_back(std::move(action));
+        }
+    }
+    if (woken) {
+        const auto reason = field(message.routing.at("sessionWake"), "reason");
+        const bool reviewed = route == reply && unresolvedEvidence.empty();
+        const auto report = reviewed && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
+        if (report && report->second.status == "completed") {
+            taskRecords.completeWithReport(*woken, report->second.evidence.report, "Nobody asked for more work after the Session finished");
+        } else {
+            const auto note = !reviewed              ? "Flock could not finish reviewing this task."
+                              : reason == "failed"   ? "The Session failed."
+                              : reason == "finished" ? "The Session finished without a readable report for this request."
+                                                     : "This task stopped before its work finished.";
+            waitStorage.wait(*woken, ModelQuestionWait{}, std::string(note) + " Reply with what to do next, or cancel it.");
+            taskRecords.save(*woken);
         }
     }
     if (route == error && !actions.empty()) {

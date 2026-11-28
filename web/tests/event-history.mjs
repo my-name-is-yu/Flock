@@ -60,7 +60,7 @@ assert.deepEqual(loaded.events.get(4), questionReply);
 const latestAfterAnswer = { ...page([100, 101], 100), changedMessageIds: [2, 4, 91, 92] };
 const corrected = { ...oldMessage, data: { status: 'received' } };
 const resolved = { ...questionReply, data: { replyToMessageId: 2, status: 'done' } };
-const delivered = { id: 91, kind: 'conversation_message', data: { deliveredToT3: true } };
+const delivered = { id: 91, kind: 'conversation_message', data: { instructionAcceptedAt: 100, instructionDeliveredAt: 160 } };
 await refreshEventHistory(loaded, latestAfterAnswer, cursor => {
   if (cursor === 92) return { events: [delivered], olderBefore: 91 };
   if (cursor === 5) return { events: [{ id: 1 }, corrected, resolved], olderBefore: 0 };

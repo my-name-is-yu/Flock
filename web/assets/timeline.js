@@ -57,6 +57,11 @@ import {
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
+const instructionTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'medium', hourCycle: 'h23' });
+const instructionStamp = (value) => {
+  const date = new Date(value * 1000);
+  return `${shortDay.format(date)} ${clock.format(date)}`;
+};
 const readingPositions = new Map();
 const timelineKey = (botId) => JSON.stringify([botId]);
 
@@ -444,6 +449,13 @@ function eventCard(event, context, place, report) {
     });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
+  if (event.kind === 'answer_delivery_unconfirmed') {
+    const note = node('article', 'system-note session-event', 'T3 did not confirm receipt of the answer · ');
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    return note;
+  }
   if (data.botMessage) {
     const note = node('article', 'system-note session-event', `From ${data.botMessage.fromName} · `);
     note.id = `event-${event.id}`;
@@ -618,7 +630,21 @@ function eventCard(event, context, place, report) {
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
-    if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    if (data.instructionAcceptedAt != null || data.instructionDeliveredAt != null) {
+      const acceptedAt = data.instructionAcceptedAt;
+      const deliveredAt = data.instructionDeliveredAt;
+      const currentTime = deliveredAt ?? acceptedAt;
+      const currentState = deliveredAt != null ? 'T3 accepted for next Run' : 'Flock accepted';
+      const note = node('p', 'msg-note', `${currentState} · ${instructionStamp(currentTime)}`);
+      const details = [];
+      if (acceptedAt != null) details.push(`Flock accepted ${instructionTime.format(new Date(acceptedAt * 1000))}`);
+      if (deliveredAt != null)
+        details.push(`T3 accepted this instruction for the next Run ${instructionTime.format(new Date(deliveredAt * 1000))}`);
+      const description = details.join(' · ');
+      note.title = description;
+      note.append(node('span', 'sr-only', `Full delivery timing: ${description}`));
+      extras.push(note);
+    }
     if (['request', 'conversation_message'].includes(event.kind)) {
       for (const run of context.parallelTasks.get(event.taskId) ?? []) {
         bubble.append(verificationLine(run, true));

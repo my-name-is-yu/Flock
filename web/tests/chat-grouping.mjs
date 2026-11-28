@@ -23,7 +23,7 @@ assert.equal(messagePlacement(lastNight, midnight, null).timeBreak, false);
 assert.equal(messagePlacement(second, first, null).groupStart, true);
 
 const shortlyAfter = localTime(10, 1);
-for (const kind of ['memory_remembered', 'memory_learned', 'bot_setup_updated']) {
+for (const kind of ['memory_remembered', 'memory_learned', 'bot_setup_updated', 'answer_delivery_unconfirmed']) {
   const notice = message(shortlyAfter, kind);
   assert.equal(messagePlacement(first, notice, later).side, 'system');
   assert.equal(messagePlacement(null, first, notice).groupEnd, true);

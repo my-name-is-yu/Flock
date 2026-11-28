@@ -58,6 +58,7 @@ constexpr std::array kinds{
     std::pair{JournalKind::run_id_pending, std::string_view{"run_id_pending"}},
     std::pair{JournalKind::run_started, std::string_view{"run_started"}},
     std::pair{JournalKind::session_answered, std::string_view{"session_answered"}},
+    std::pair{JournalKind::answer_delivery_unconfirmed, std::string_view{"answer_delivery_unconfirmed"}},
     std::pair{JournalKind::session_destination_changed, std::string_view{"session_destination_changed"}},
     std::pair{JournalKind::session_lineage_unavailable, std::string_view{"session_lineage_unavailable"}},
     std::pair{JournalKind::session_participation_stop, std::string_view{"session_participation_stop"}},

@@ -5,7 +5,7 @@ export function isMemoryNotice(event) {
 }
 
 export function isSystemNotice(event) {
-  return isMemoryNotice(event) || event.kind === 'bot_setup_updated';
+  return isMemoryNotice(event) || event.kind === 'bot_setup_updated' || event.kind === 'answer_delivery_unconfirmed';
 }
 
 export function messageSide(event) {
