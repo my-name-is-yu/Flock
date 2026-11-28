@@ -36,6 +36,16 @@
   --shadow-color: light-dark(rgb(32 28 44 / .12), rgb(0 0 0 / .55));
   --shadow-sm: 0 4px 16px var(--shadow-color);
   --shadow-lg: 0 20px 56px var(--shadow-color);
+  --shadow-floating: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
+  --decision-shade: light-dark(rgb(255 255 255 / .64), rgb(10 10 12 / .60));
+  --shade-1: rgb(0 0 0 / .06);
+  --shade-2: rgb(0 0 0 / .12);
+  --shade-3: rgb(0 0 0 / .25);
+  --shade-4: rgb(0 0 0 / .44);
+  --tint-1: rgb(255 255 255 / .08);
+  --tint-2: rgb(255 255 255 / .16);
+  --tint-3: rgb(255 255 255 / .3);
+  --tint-4: rgb(255 255 255 / .45);
 
   --font-sans: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -137,7 +147,7 @@ svg { display: block; }
 .avatar-icon-glyph {
   display: grid; place-items: center; width: 82%; height: 82%; border-radius: 30%;
   background: var(--avatar-color, #69c9ac); color: var(--avatar-ink, #14121c);
-  box-shadow: inset 0 -2px 0 rgb(0 0 0 / .14);
+  box-shadow: inset 0 -2px 0 var(--shade-2);
 }
 .avatar-icon-glyph > svg { width: 54%; height: 54%; }
 /* Pale avatars need an edge against light surfaces. Animated avatars wrap their canvas in a div. */
@@ -185,10 +195,10 @@ svg { display: block; }
   display: flex; align-items: center; gap: .32rem; width: max-content; max-width: min(20rem, calc(100vw - 1rem));
   padding: .26rem .5rem; border-radius: var(--radius-md);
   background: light-dark(#1f1e24, #262629);
-  border: 1px solid light-dark(rgb(0 0 0 / .12), rgb(255 255 255 / .09));
+  border: 1px solid var(--border-floating);
   color: light-dark(#ffffff, #ececec);
   font-size: var(--text-xs); font-weight: 500; letter-spacing: .01em; line-height: 1.35;
-  box-shadow: 0 8px 22px rgb(0 0 0 / .28);
+  box-shadow: 0 8px 22px var(--shade-3);
   pointer-events: none;
   opacity: 0; transition: opacity .12s ease-out, display .12s allow-discrete, overlay .12s allow-discrete;
 }
@@ -200,8 +210,8 @@ svg { display: block; }
 .tooltip kbd {
   display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 .24rem; flex: none;
   border-radius: var(--radius-sm);
-  background: light-dark(rgb(255 255 255 / .14), rgb(255 255 255 / .08));
-  border: 1px solid light-dark(rgb(255 255 255 / .12), rgb(255 255 255 / .07));
+  background: light-dark(var(--tint-2), var(--tint-1));
+  border: 1px solid light-dark(var(--tint-2), var(--tint-1));
   color: light-dark(rgb(255 255 255 / .86), var(--text-2));
   font-family: inherit; font-size: .68rem; font-weight: 500; line-height: 1;
 }
@@ -231,7 +241,7 @@ svg { display: block; }
 .settings-row-switch::before {
   content: ""; position: absolute; inset-block-start: 2px; inset-inline-start: 2px;
   inline-size: calc(var(--switch-size) - 4px); block-size: calc(var(--switch-size) - 4px); border-radius: 50%;
-  background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .25);
+  background: var(--on-accent); box-shadow: 0 1px 3px var(--shade-3);
   transition: translate var(--dur-medium) cubic-bezier(0.2, 0.9, 0.25, 1);
 }
 .settings-row-switch:checked { background: var(--accent); }
