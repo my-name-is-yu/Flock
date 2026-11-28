@@ -77,6 +77,7 @@ const icons = {
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
   resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
+  sent: '<path d="M7 17 17 7"/><path d="M9 7h8v8"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
 };
@@ -413,23 +414,22 @@ function memoryNotice(event, canUndo, context) {
   return note;
 }
 
-function botMessageRow(event, sender, link) {
-  const { fromBotId, fromName } = event.data.botMessage;
-  const row = node(link ? 'a' : 'article', 'bot-message-row');
-  row.id = `event-${event.id}`;
+function botMessageRow({ id, event, peer, text, link, sent }) {
+  const row = node(link ? 'a' : 'article', `bot-message-row${sent ? ' sent' : ''}`);
+  row.id = id;
   if (link) {
     row.href = link;
     row.dataset.botThread = '';
     row.dataset.timelineAction = 'open-bot-thread';
   } else row.tabIndex = -1;
-  const face = avatar(sender ?? { id: fromBotId, name: fromName || fromBotId }, 'bot-message-avatar');
-  const name = node('span', 'bot-message-name', sender?.name ?? (fromName || fromBotId));
+  if (sent) row.append(icon('sent', 'glyph bot-message-direction'), node('span', 'sr-only', 'To '));
+  const name = node('span', 'bot-message-name', peer.name);
   name.dir = 'auto';
-  const preview = node('span', 'bot-message-preview', event.data.text ?? '');
+  const preview = node('span', 'bot-message-preview', text ?? '');
   preview.dir = 'auto';
   const time = eventTime(event);
   time.classList.add('sr-only');
-  row.append(face, name, preview, time);
+  row.append(avatar(peer, 'bot-message-avatar'), name, preview, time);
   return row;
 }
 
@@ -451,7 +451,11 @@ function eventCard(event, context, place, report, dmLink, sender) {
     });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
-  if (data.botMessage) return botMessageRow(event, sender, dmLink);
+  if (data.botMessage) {
+    const { fromBotId, fromName } = data.botMessage;
+    return botMessageRow({ id: `event-${event.id}`, event, peer: sender ?? { id: fromBotId, name: fromName || fromBotId },
+      text: data.text, link: dmLink });
+  }
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 thread “${session.title || session.threadId}”`;
@@ -1014,6 +1018,16 @@ function conversationRows(data, events, keep, source) {
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
+    if (event.kind === 'conversation_reply' && bot) {
+      for (const [index, action] of (event.data.actions ?? []).entries()) {
+        if (action.tool !== 'message_bot') continue;
+        const peer = bots.find(({ id }) => id === action.botId);
+        const link = peer ? botThreadUrl(bot.id, peer.id, action.messageId) : null;
+        rows.push(keep(`event-${event.id}-sent-${index}`, [action, peer && [peer.name, peer.avatar], link], () =>
+          botMessageRow({ id: `event-${event.id}-sent-${index}`, event, peer: peer ?? { id: action.botId, name: action.botId },
+            text: action.text, link, sent: true })));
+      }
+    }
     for (const item of approvals) {
       if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
         rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));

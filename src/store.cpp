@@ -452,28 +452,6 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
-std::vector<std::string> Conversations::botDmPeers(std::string_view bot, const std::vector<std::string>& candidates) const {
-    std::lock_guard lock(database_.mutex);
-    auto rows = database_.query(R"SQL(
-WITH inbound AS (
-  SELECT json_extract(data,'$.botMessage.fromBotId') AS sender,max(id) AS latest
-  FROM journal WHERE conversation_bot_id=?1 AND kind='conversation_message' AND sender IS NOT NULL
-  GROUP BY sender
-), peers AS (
-  SELECT peer.value AS bot,max(coalesce(inbound.latest,0),coalesce((
-    SELECT id FROM journal WHERE conversation_bot_id=peer.value AND kind='conversation_message'
-      AND json_extract(data,'$.botMessage.fromBotId')=?1 ORDER BY id DESC LIMIT 1
-  ),0)) AS latest
-  FROM json_each(?2) peer LEFT JOIN inbound ON inbound.sender=peer.value
-)
-SELECT bot FROM peers WHERE latest>0 ORDER BY latest DESC
-)SQL",
-                                {bot, Json(candidates).dump()});
-    std::vector<std::string> result;
-    while (rows.next()) result.push_back(rows.string(0));
-    return result;
-}
-
 Json Conversations::botDmMessages(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from) const {
     std::lock_guard lock(database_.mutex);
     // Wake turns can inherit Bot-message routing, but only deliveries have a Bot origin in the journal.

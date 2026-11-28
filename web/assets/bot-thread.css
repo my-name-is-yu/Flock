@@ -11,23 +11,13 @@
 .bot-thread-open .header-menu:not(.bot-thread-close) { display: none; }
 .bot-thread-open > .jump-to-latest,
 .bot-thread-open #conversation-find { display: none; }
-.bot-thread-open #conversation { visibility: hidden; }
+.bot-thread-covered #conversation { visibility: hidden; }
 
 .conversation-frame > #conversation { grid-area: 1 / 1; }
 .bot-thread { grid-area: 1 / 1; background: var(--canvas); outline: none; overflow-anchor: none; }
 .bot-thread-latest { grid-area: 1 / 1; }
 .bot-thread-status { margin: 1rem 0; color: var(--text-2); text-align: center; }
 .bot-thread-status:empty { display: none; }
-
-.bot-thread-peers { display: grid; gap: .1rem; width: min(100%, 30rem); margin: 0 auto auto; padding: 0; list-style: none; }
-.bot-thread-peer {
-  display: flex; align-items: center; gap: .75rem; min-height: 3.25rem; padding: .4rem .75rem;
-  border-radius: var(--radius-md); color: var(--text); text-decoration: none; overflow-wrap: anywhere;
-  transition: background-color var(--dur-fast) ease;
-}
-.bot-thread-peer:hover { background: var(--hover); }
-.bot-thread-peer-avatar { width: 2.4rem; height: 2.4rem; }
-.bot-thread-peer-name { font-weight: 600; }
 
 .bot-thread-message {
   display: grid; grid-template-columns: var(--avatar-size) minmax(0, 1fr); column-gap: var(--avatar-gap);
@@ -62,5 +52,7 @@ a.bot-message-row:focus-visible { outline: 2px solid var(--focus); outline-offse
   .bot-message-row { margin-inline-start: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .bot-thread-peer, a.bot-message-row { transition: none; }
+  a.bot-message-row { transition: none; }
 }
+.bot-message-direction { display: inline-grid; flex: none; width: .9rem; height: .9rem; color: var(--text-3); }
+.bot-message-direction svg { width: 100%; height: 100%; }

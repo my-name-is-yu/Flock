@@ -209,6 +209,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
             for (const auto& action : *actions) {
                 Json item = Json::object();
                 copyFields(item, action, {"tool", "taskId", "effect"});
+                if (field(action, "tool") == "message_bot") copyFields(item, action, {"botId", "messageId", "text"});
                 details["actions"].push_back(std::move(item));
             }
         }

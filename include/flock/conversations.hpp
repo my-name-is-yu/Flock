@@ -25,7 +25,6 @@ public:
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, ConversationEvents events = ConversationEvents::all,
                       const Person* viewer = nullptr) const;
-    std::vector<std::string> botDmPeers(std::string_view bot, const std::vector<std::string>& candidates) const;
     Json botDmMessages(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from = 0) const;
     struct ConversationChanges {
         Id through;

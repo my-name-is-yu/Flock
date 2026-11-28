@@ -807,9 +807,11 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         check(std::ranges::any_of(
                   input.history,
                   [&](const Json& entry) {
-                      return entry.contains("actions") &&
-                             entry.at("actions") ==
-                                 Json::array({{{"tool", "message_bot"}, {"effect", "sent"}, {"botId", "reviewer"}, {"text", question}}});
+                      if (!entry.contains("actions") || entry.at("actions").size() != 1) return false;
+                      auto action = entry.at("actions").at(0);
+                      const bool delivered = action.contains("messageId") && action.at("messageId").is_number_integer();
+                      action.erase("messageId");
+                      return delivered && action == Json{{"tool", "message_bot"}, {"effect", "sent"}, {"botId", "reviewer"}, {"text", question}};
                   }),
               "Ernest's history lost the question that Reviewer answered");
         return {"reply", {{"text", "Reviewer says we can ship today."}}, "Relay the answer"};
@@ -849,8 +851,11 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
 
     constexpr auto pair = "/api/bot-dms?bot=ernest&peer=reviewer";
-    check(browser.get("/api/bot-dms?bot=ernest").at("peers") == Json::array({{{"id", "reviewer"}, {"name", "Reviewer"}}}),
-          "Bot DM picker lost the active peer or showed a Bot with no conversation");
+    Browser::checked(browser.client.Get("/api/bot-dms?bot=ernest"), 400);
+    const auto sent = conversationReply(ernest, asked.at("messageId")).at("actions").at(0);
+    check(sent.at("tool") == "message_bot" && sent.at("botId") == "reviewer" && sent.at("text") == question &&
+              sent.at("messageId") == inbound->at("id"),
+          "Ernest's reply did not record which Bot message it sent");
     const auto events = browser.get(pair).at("events");
     check(events == browser.get("/api/bot-dms?bot=reviewer&peer=ernest").at("events") && events.size() == 2 &&
               events.at(0).at("id") == inbound->at("id") && events.at(0).at("data").at("fromBotId") == "ernest" &&
@@ -896,11 +901,10 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     const auto shared = startWeb(store, 0, web);
     Browser reader(*shared);
     reader.client.set_default_headers({{"Authorization", "Bearer reader"}});
-    check(reader.get("/api/bot-dms?bot=ernest").at("peers").empty(), "Bot DM picker exposed an inaccessible peer");
     Browser::checked(reader.client.Get(pair), 403);
     Browser::checked(reader.client.Get("/api/bot-dms?bot=reviewer&peer=ernest"), 403);
     access.setMember(owner, "reviewer", "reader", true);
-    check(reader.get(pair).at("events") == latest.at("events") && reader.get("/api/bot-dms?bot=ernest").at("peers").size() == 1,
+    check(reader.get(pair).at("events") == latest.at("events"),
           "A shared reader with access to both Bots could not read the transcript");
 }
 

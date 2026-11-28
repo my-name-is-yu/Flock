@@ -642,12 +642,11 @@ private:
         const auto bot = req.get_param_value("bot");
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("bot") != 1 || !validBotId(bot)) return error(res, 400, "invalid_bot");
-        if (req.has_param("peer") && (req.get_param_value_count("peer") != 1 || !validBotId(peer) || peer == bot))
-            return error(res, 400, "invalid_peer");
+        if (req.get_param_value_count("peer") != 1 || !validBotId(peer) || peer == bot) return error(res, 400, "invalid_peer");
         const auto actor = web::person(callbacks_, req);
         const Policy policy{store_};
         const auto canView = [&](std::string_view id) { return policy.allows(actor, Action::bot_view, id); };
-        if (!canView(bot) || (!peer.empty() && !canView(peer))) return error(res, 403, "access_denied");
+        if (!canView(bot) || !canView(peer)) return error(res, 403, "access_denied");
         const auto known = bots();
         const auto* owner = botById(known, bot);
         if (!owner) return error(res, 404, "bot_not_found");
@@ -657,23 +656,13 @@ private:
         try {
             const auto before = queryId(req, "before", true);
             const auto anchor = req.has_param("anchor") ? queryId(req, "anchor", false) : 0;
-            if ((before && anchor) || (peer.empty() && (before || anchor))) return error(res, 400, "invalid_cursor");
-            if (!peer.empty()) {
-                const auto* other = botById(known, peer);
-                if (!other) return error(res, 404, "bot_not_found");
-                auto page = web::botDm(store_, bot, peer, before, anchor);
-                page["bot"] = participant(*owner);
-                page["peer"] = participant(*other);
-                return reply(res, 200, page);
-            }
-            std::vector<std::string> candidates;
-            for (const auto& descriptor : known) {
-                const auto id = field(descriptor, "id");
-                if (!id.empty() && id != bot && canView(id)) candidates.push_back(id);
-            }
-            auto peers = Json::array();
-            for (const auto& id : Conversations(store_).botDmPeers(bot, candidates)) peers.push_back(participant(*botById(known, id)));
-            reply(res, 200, {{"bot", participant(*owner)}, {"peers", std::move(peers)}});
+            if (before && anchor) return error(res, 400, "invalid_cursor");
+            const auto* other = botById(known, peer);
+            if (!other) return error(res, 404, "bot_not_found");
+            auto page = web::botDm(store_, bot, peer, before, anchor);
+            page["bot"] = participant(*owner);
+            page["peer"] = participant(*other);
+            reply(res, 200, page);
         } catch (const InputError& e) {
             error(res, 400, e.what());
         } catch (const Conflict&) {

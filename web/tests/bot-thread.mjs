@@ -12,6 +12,10 @@ function fixtures() {
     { id: 30, kind: 'conversation_message', taskId: 0, time: time + 30, data: { text: 'Ask Reviewer about the release' } },
     delivered(40, 'reviewer', 'Reviewer', 'Ready. See the report for every check that ran overnight and what is still pending.'),
     delivered(41, 'ghost', 'Ghost', 'A Bot this viewer cannot open'),
+    { id: 42, kind: 'conversation_reply', taskId: 0, time: time + 42, data: {
+      text: 'I asked Reviewer.', textHtml: '<p>I asked Reviewer.</p>', route: 'reply', status: 'done', replyToMessageId: 30,
+      actions: [{ tool: 'message_bot', effect: 'sent', botId: 'reviewer', messageId: 39, text: 'Is it ready?' }],
+    } },
   ];
   const message = (id, fromBotId, textHtml) => ({ id, time: time + id, data: { fromBotId, textHtml } });
   window.dmRequests = [];
@@ -29,7 +33,6 @@ function fixtures() {
       const params = new URL(path, location.href).searchParams;
       dmRequests.push(params.toString());
       const pair = { bot: { id: 'scout', name: 'Scout' }, peer: { id: 'reviewer', name: 'Reviewer' } };
-      if (!params.has('peer')) return Response.json({ bot: pair.bot, peers: [pair.peer] });
       if (params.has('before')) return Response.json({ ...pair, events: [message(12, 'scout', '<p>Check the release.</p>')], olderBefore: 0 });
       return Response.json({ ...pair, olderBefore: 39, hasNewer: params.has('anchor'), events: [
         message(39, 'scout', '<p>Is it ready?</p>'),
@@ -73,11 +76,16 @@ async function exercise() {
   check(row.getAttribute('href') === '/?bot=scout&thread=reviewer&message=40', 'The row did not link to its thread');
   check(getComputedStyle(row.querySelector('.bot-message-preview')).textOverflow === 'ellipsis', 'The preview was not truncated to one line');
   check($('#event-41').matches('article.bot-message-row') && !$('#event-41 a'), 'A message from an unavailable Bot became a link');
+  const sent = $('#event-42-sent-0');
+  check(sent?.matches('a.bot-message-row.sent') && sent.getAttribute('href') === '/?bot=scout&thread=reviewer&message=39' &&
+    sent.querySelector('.bot-message-name').textContent === 'Reviewer' && sent.querySelector('.bot-message-preview').textContent === 'Is it ready?',
+    'A message the Bot sent to another Bot did not link to its thread');
+  check(!$('#conversation-bot-dms') && !$('.bot-thread-peers'), 'A separate Bot DM entry point is still present');
 
   row.click();
-  await waitFor(() => $('.bot-thread-anchored'), 'Opening a Bot message did not show its thread');
+  await waitFor(() => $('.bot-thread-anchored') && getComputedStyle(conversation).visibility === 'hidden',
+    'Opening a Bot message did not show its thread in place of the conversation');
   const anchored = $('.bot-thread-anchored');
-  check(!panel.hidden && getComputedStyle(conversation).visibility === 'hidden', 'The thread did not replace the conversation in place');
   check(params().get('thread') === 'reviewer' && params().get('message') === '40', 'The thread was not in the address');
   check(anchored.id === 'bot-thread-message-40' && document.activeElement === anchored, 'The opened message was not focused');
   check(anchored.querySelector('strong')?.textContent === 'Ready' && anchored.querySelector('a[target="_blank"][rel~="noopener"]'),
@@ -103,14 +111,15 @@ async function exercise() {
   await waitFor(() => panel.hidden && !params().has('thread'), 'Close did not return to the conversation');
   check(getComputedStyle(conversation).visibility === 'visible' && $('#profile-thread').hidden, 'The conversation did not come back');
 
-  const entry = $('#conversation-bot-dms');
-  check(entry.getAttribute('href') === '/?bot=scout&thread=', 'The conversation menu did not link to the Bot list');
-  entry.click();
-  await waitFor(() => $('.bot-thread-peer'), 'The Bot list did not open');
-  check($('#profile-thread').textContent === 'Bots', 'The Bot list breadcrumb was wrong');
-  $('.bot-thread-peer').click();
-  await waitFor(() => $('#bot-thread-message-40') && params().get('thread') === 'reviewer', 'Choosing a Bot did not open its thread');
-  check(!dmRequests.at(-1).includes('anchor'), 'Choosing a Bot opened an anchored thread');
+  sent.click();
+  await waitFor(() => document.activeElement?.id === 'bot-thread-message-39', 'A sent Bot message did not open at that message');
+  document.activeElement.querySelector('.bubble').click();
+  check(!panel.hidden, 'Selecting a message closed the thread');
+  $('.bot-thread .day').click();
+  await waitFor(() => panel.hidden && !params().has('thread'), 'Tapping empty space did not close the thread');
+
+  row.click();
+  await waitFor(() => !panel.hidden, 'The thread did not reopen');
   panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await waitFor(() => panel.hidden, 'Escape did not close the thread');
 
@@ -140,9 +149,10 @@ const index = (await readAsset('/index.html')).replace('<script type="module" sr
       document.documentElement.dataset.flockResult = error.message;
     }
   </script>`);
+// --dump-dom renders no frames, so animations never finish; the reduced-motion path runs the same state changes.
 await withAssetServer({ '/': index }, async (origin) => {
   for (const query of ['bot=scout', 'bot=scout&thread=reviewer&message=40']) {
-    requirePass(await dumpDom(process.argv[2], `${origin}/?${query}`, { flags: ['--window-size=390,844'] }),
+    requirePass(await dumpDom(process.argv[2], `${origin}/?${query}`, { flags: ['--window-size=390,844', '--force-prefers-reduced-motion'] }),
       'The browser did not finish the Bot thread checks', query);
   }
 });
