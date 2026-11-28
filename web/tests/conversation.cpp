@@ -859,8 +859,8 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     check(field(events.at(0).at("data"), "textHtml").find("<strong>ship</strong>") != std::string::npos, "Bot DM lost Markdown formatting");
     const auto firstId = events.front().at("id").get<Id>();
     Browser::checked(browser.client.Get(std::string(pair) + "&anchor=" + asked.at("messageId").dump()), 404);
-    const auto page = browser.client.Get("/bot-dms?bot=ernest&peer=reviewer");
-    check(page && page->status == 200 && page->body.find("dm-timeline") != std::string::npos, "the dedicated Bot DM page is missing");
+    const auto page = browser.client.Get("/?bot=ernest&thread=reviewer");
+    check(page && page->status == 200 && page->body.find("bot-thread-timeline") != std::string::npos, "the Bot thread panel is missing");
 
     model.script = [](const ModelInput& input) -> Decision {
         if (input.event.contains("botMessage") || !input.event.at("turn").empty()) return {"reply", {{"text", "Done."}}, ""};

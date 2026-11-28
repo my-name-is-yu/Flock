@@ -275,7 +275,6 @@ public:
         });
         for (const auto& asset : web::assets) {
             const auto path = asset.path == "/index.html"          ? "/"
-                              : asset.path == "/bot-dms.html"      ? "/bot-dms"
                               : asset.path == "/settings.html"     ? "/settings"
                               : asset.path == "/bot-settings.html" ? R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))"
                                                                    : asset.path;

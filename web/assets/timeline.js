@@ -3,7 +3,7 @@ import { orderSetupNotices, setupNotice } from './bot-setup.js';
 import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide } from './chat-grouping.mjs';
 import { closedLabels, pendingActionLabels, stateLabels } from './conversation-copy.mjs';
 import { node, setMessageBody } from './dom.js';
-import { botDmUrl } from './bot-dm-url.js';
+import { botThreadUrl } from './bot-thread.js';
 import { timelineMessages } from './event-history.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton } from './question-choices.js';
 import { replyArrivalId } from './reply-arrival.mjs';
@@ -413,7 +413,27 @@ function memoryNotice(event, canUndo, context) {
   return note;
 }
 
-function eventCard(event, context, place, report, dmLink) {
+function botMessageRow(event, sender, link) {
+  const { fromBotId, fromName } = event.data.botMessage;
+  const row = node(link ? 'a' : 'article', 'bot-message-row');
+  row.id = `event-${event.id}`;
+  if (link) {
+    row.href = link;
+    row.dataset.botThread = '';
+    row.dataset.timelineAction = 'open-bot-thread';
+  } else row.tabIndex = -1;
+  const face = avatar(sender ?? { id: fromBotId, name: fromName || fromBotId }, 'bot-message-avatar');
+  const name = node('span', 'bot-message-name', sender?.name ?? (fromName || fromBotId));
+  name.dir = 'auto';
+  const preview = node('span', 'bot-message-preview', event.data.text ?? '');
+  preview.dir = 'auto';
+  const time = eventTime(event);
+  time.classList.add('sr-only');
+  row.append(face, name, preview, time);
+  return row;
+}
+
+function eventCard(event, context, place, report, dmLink, sender) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
@@ -431,22 +451,7 @@ function eventCard(event, context, place, report, dmLink) {
     });
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
-  if (data.botMessage) {
-    const { fromBotId, fromName } = data.botMessage;
-    const note = node('article', 'system-note session-event');
-    note.id = `event-${event.id}`;
-    note.tabIndex = -1;
-    const label = `From ${fromName || fromBotId}`;
-    if (dmLink) {
-      const link = node('a', 'link', label);
-      link.href = dmLink;
-      link.dataset.timelineAction = 'open-bot-dm';
-      note.append(link);
-    } else note.append(label);
-    note.append(' · ', eventTime(event));
-    note.append(node('p', 'session-invitation-note', data.text ?? ''));
-    return note;
-  }
+  if (data.botMessage) return botMessageRow(event, sender, dmLink);
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 thread “${session.title || session.threadId}”`;
@@ -993,9 +998,10 @@ function conversationRows(data, events, keep, source) {
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const fromBotId = event.data.botMessage?.fromBotId;
-    const dmLink = fromBotId && bot && bots.some(({ id }) => id === fromBotId) ? botDmUrl(bot.id, fromBotId, event.id) : null;
+    const sender = fromBotId ? bots.find(({ id }) => id === fromBotId) : null;
+    const dmLink = sender && bot ? botThreadUrl(bot.id, fromBotId, event.id) : null;
     const row = keep(`event-${report?.id ?? event.id}`,
-      [event, report, botVersion, dmLink, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
+      [event, report, botVersion, dmLink, sender && [sender.name, sender.avatar], timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
@@ -1003,7 +1009,7 @@ function conversationRows(data, events, keep, source) {
         request ? timeline.parallelTasks.get(event.taskId) : null,
         isSystemNotice(event) && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report, dmLink));
+      () => eventCard(event, timeline, place, report, dmLink, sender));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);
