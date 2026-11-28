@@ -416,13 +416,15 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
                   {"text", "Look at this"},
                   {"attachments", Json::array({noncanonicalAudio})}},
                  409);
-    const auto assertCounts = [](const Json& events, const std::map<Id, int>& expected) {
+    const auto assertCounts = [](const Json& events, const std::map<Id, std::pair<int, int>>& expected) {
         auto remaining = expected;
         for (const auto& event : events) {
             const auto match = remaining.find(event.at("id").get<Id>());
             if (match == remaining.end()) continue;
             const auto& data = event.at("data");
-            check(data.at("imageAttachmentCount") == match->second, "wrong saved image count in the conversation");
+            const auto [files, images] = match->second;
+            check(data.at("attachmentCount") == files && data.at("imageAttachmentCount") == images,
+                  "wrong saved file or image count in the conversation");
             check(data.at("textHtml").is_string(), "user message was not projected as safe Markdown HTML");
             check(!data.contains("attachments") && !data.contains("dataBase64") &&
                       data.dump().find("private-screenshot") == std::string::npos,
@@ -436,7 +438,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get(conversation), 401);
     browser.client.set_default_headers({{"Authorization", "Bearer reader"}});
     const auto view = browser.get("/api/view?bot=release");
-    assertCounts(view.at("events"), {{single, 1}, {multiple, 2}, {textOnly, 0}, {markdownMessage, 0}});
+    assertCounts(view.at("events"), {{single, {2, 1}}, {multiple, {2, 2}}, {textOnly, {0, 0}}, {markdownMessage, {0, 0}}});
     bool renderedUserMarkdown = false;
     for (const auto& event : view.at("events")) {
         if (event["kind"] != "conversation_message" || event["id"] != markdownMessage) continue;
@@ -449,7 +451,7 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
             html.find("&lt;script&gt;alert(1)&lt;/script&gt;") != std::string::npos && html.find("<script>") == std::string::npos;
     }
     check(renderedUserMarkdown, "Web user-message projection changed canonical text or rendered unsafe Markdown");
-    assertCounts(browser.get(std::string(conversation) + "&before=" + std::to_string(multiple)).at("events"), {{single, 1}});
+    assertCounts(browser.get(std::string(conversation) + "&before=" + std::to_string(multiple)).at("events"), {{single, {2, 1}}});
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"), 403);
 }
 
