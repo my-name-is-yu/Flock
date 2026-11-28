@@ -262,7 +262,7 @@ class Fixture(BaseHTTPRequestHandler):
 
     def tool(self, name, args):
         state = self.server.state
-        if state.get("attachmentTools"):
+        if state.get("attachmentTools") and not self.server.stock_thread:
             if name == "t3_attachment_prepare_upload":
                 assert set(args) == {"upload"}
                 state.setdefault("effects", {}).setdefault(name, []).append(args)
@@ -866,6 +866,29 @@ class Fixture(BaseHTTPRequestHandler):
 
     def stock_tool(self, name, args):
         state = self.server.state
+        if name == "t3_attachment_prepare_upload":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            uploads = state.setdefault("uploads", {})
+            attachment_id = f"stock-file-{len(uploads) + 1}"
+            uploads[attachment_id] = args["upload"]
+            path = "/api/attachments/upload/" + attachment_id
+            return {"attachmentId": attachment_id, "relativeUrl": path, "uploadUrl": self.server.origin + path}
+        if name == "t3_attachment_discard":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            state.setdefault("uploads", {}).pop(args["attachmentId"], None)
+            return {}
+        if name == "t3_thread_send_attachments":
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
+            files = []
+            for ref in args["attachments"]:
+                upload = state["uploads"][ref["id"]]
+                assert {key: value for key, value in ref.items() if key != "id"} == {
+                    key: value for key, value in upload.items() if key != "bytes"}
+                files.append({"id": ref["id"], "name": ref["name"], "mimeType": ref["mimeType"],
+                              "bytes": upload["bytes"]})
+            state.setdefault("attachmentMessages", []).append({"text": args["message"], "files": files})
+            return {"threadId": args["threadId"], "projectId": "project", "runId": "next-run",
+                    "status": "started", "messageId": "sent-id"}
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
         if name == "t3_project_list":

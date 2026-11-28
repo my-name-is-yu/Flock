@@ -1024,12 +1024,12 @@ bool checkAttachmentTools(Client& client, const Command& command, bool linked, b
 
 struct AttachmentUploads {
     Client& client;
-    const bool& invoked;
+    const bool& attachmentSendStarted;
     bool canDiscard = false;
     Json pending = Json::array();
 
     ~AttachmentUploads() {
-        if (invoked || !canDiscard) return;
+        if (attachmentSendStarted || !canDiscard) return;
         for (const auto& id : pending) {
             try {
                 client.call(DiscardUpload, {{"attachmentId", id}});
@@ -1085,7 +1085,8 @@ Json sendWork(Client& client, const Command& command, std::string_view thread, c
 }
 
 Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning,
-                      const Json& attachments, const T3::SendAuthorization& authorizeAfterStaging) {
+                      const Json& attachments, const T3::SendAuthorization& authorizeAfterStaging,
+                      bool& attachmentSendStarted) {
     args.erase("message");
     const auto launched = launchThread(client, std::move(args), warning);
     const auto threadId = field(launched, "threadId");
@@ -1110,6 +1111,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         if (!attachments.empty() && !projectStillAuthorized(client, command.projectId))
             return attachmentAuthorizationRefusal("Could not verify the destination T3 Project before dispatching attachments");
         if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
+        if (!attachments.empty()) attachmentSendStarted = true;
         const auto sent = sendWork(client, command, threadId, attachments, command.actionId + ":start");
         if (field(sent, "threadId") != threadId || field(sent, "runId").empty() ||
             (field(sent, "delivery") != "started" && field(sent, "delivery") != "queued"))
@@ -1175,7 +1177,8 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection), {}, targetRoute(command.environmentId, gateway));
             if (command.tool == CommandTool::answer_session_question) return answer(client, command, invoked);
-            AttachmentUploads uploads{client, invoked};
+            bool attachmentSendStarted = false;
+            AttachmentUploads uploads{client, attachmentSendStarted};
             const auto stage = [&] {
                 if (command.attachments.empty()) return Json::array();
                 if (gateway == command.environmentId &&
@@ -1190,6 +1193,7 @@ public:
                 if (gateway == command.environmentId && field(environment, "environmentId") != command.environmentId)
                     return {Outcome::Settings, {}, "The OAuth endpoint belongs to a different T3 environment", true};
                 const auto files = stage();
+                attachmentSendStarted = !files.empty();
                 invoked = true;
                 const auto reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto run = field(reply, "runId");
@@ -1222,7 +1226,7 @@ public:
                     invoked = true;
                     auto delivery =
                         launchPinned(client, command, std::move(launchArguments.parameters), launchArguments.pin, launchWarning, files,
-                                     authorizeAfterStaging);
+                                     authorizeAfterStaging, attachmentSendStarted);
                     delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run, command.environmentId, origin);
                     return delivery;
@@ -1234,6 +1238,7 @@ public:
                     if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
                     launchArguments.parameters["attachments"] = std::move(files);
                 }
+                attachmentSendStarted = !command.attachments.empty();
                 invoked = true;
                 reply = launchThread(client, std::move(launchArguments.parameters), launchWarning);
                 if (field(reply, "projectId") != command.projectId) invalidResponse();
@@ -1289,6 +1294,7 @@ public:
                         return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                     if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
                 }
+                attachmentSendStarted = !files.empty();
                 invoked = true;
                 reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto delivery = field(reply, "delivery");

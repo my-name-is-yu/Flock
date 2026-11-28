@@ -71,6 +71,57 @@ int main(int argc, char** argv) {
         const auto started = adapter->send(command);
         check(started.kind == Delivery::Kind::Accepted && started.run.threadId == command.actionId && started.run.runId == "next-run",
               "idle stock workspace starts only after its input pin matches");
+
+        fixture({{"attachmentTools", true}});
+        auto refused = command;
+        refused.actionId = "pinned-refused-after-provision";
+        refused.attachments = {{"report.txt", "text/plain", "Pinned report"}};
+        refused.attachmentCount = refused.attachments.size();
+        auto pendingAttachments = [&] {
+            const auto response = http(origin + "/fixture/attachments", "GET");
+            check(response.status == 200, "Could not inspect staged files on the T3 fixture");
+            return Json::parse(response.body).at("pending").get<std::size_t>();
+        };
+        auto effectCount = [&](std::string_view name) {
+            const auto current = Json::parse(http(origin + "/fixture/effects", "GET").body);
+            const auto found = current.find(name);
+            return found == current.end() ? std::size_t{} : found->size();
+        };
+        const auto pendingBeforeRefusal = pendingAttachments();
+        const auto sendsBeforeRefusal = effectCount("t3_thread_send_attachments");
+        const auto discardsBeforeRefusal = effectCount("t3_attachment_discard");
+        int authorizationChecks = 0;
+        const auto deniedAfterProvision = adapter->send(refused, [&] { return ++authorizationChecks == 1; });
+        const auto stockAfterRefusal = Json::parse(http(origin + "/fixture/stock", "GET").body);
+        check(deniedAfterProvision.kind == Delivery::Kind::Settings && deniedAfterProvision.definitelyUnsent &&
+                  deniedAfterProvision.noAutomaticRetry,
+              "a pinned pre-send authorization refusal was not terminal: kind=" +
+                  std::to_string(static_cast<int>(deniedAfterProvision.kind)) + ", definitelyUnsent=" +
+                  std::to_string(deniedAfterProvision.definitelyUnsent) + ", noAutomaticRetry=" +
+                  std::to_string(deniedAfterProvision.noAutomaticRetry) + ", checks=" +
+                  std::to_string(authorizationChecks) + ", detail=" + deniedAfterProvision.detail);
+        check(authorizationChecks == 2 && stockAfterRefusal.at("stockLaunches").contains("project:pinned-refused-after-provision"),
+              "the authorization refusal did not occur after pinned Session creation");
+        check(effectCount("t3_thread_send_attachments") == sendsBeforeRefusal,
+              "the pinned pre-send refusal dispatched its staged attachments");
+        check(effectCount("t3_attachment_discard") == discardsBeforeRefusal + 1 &&
+                  pendingAttachments() == pendingBeforeRefusal,
+              "the pinned pre-send refusal retained staged attachments");
+
+        auto ambiguous = refused;
+        ambiguous.actionId = "pinned-ambiguous-attachment-send";
+        const auto pendingBeforeAmbiguous = pendingAttachments();
+        const auto sendsBeforeAmbiguous = effectCount("t3_thread_send_attachments");
+        const auto discardsBeforeAmbiguous = effectCount("t3_attachment_discard");
+        fixture({{"dropAttachmentReply", true}});
+        authorizationChecks = 0;
+        const auto lostReply = adapter->send(ambiguous, [&] { ++authorizationChecks; return true; });
+        check(lostReply.kind == Delivery::Kind::Unknown && authorizationChecks == 2 &&
+                  effectCount("t3_thread_send_attachments") == sendsBeforeAmbiguous + 1 &&
+                  effectCount("t3_attachment_discard") == discardsBeforeAmbiguous &&
+                  pendingAttachments() == pendingBeforeAmbiguous + 1,
+              "an ambiguous pinned attachment send was discarded or replayed");
+
         for (const auto mode : {"unstaged", "staged"}) {
             fixture({{"stockTrackedEdit", mode}});
             const auto dirty = adapter->observe(environment, command.config, started.run);
@@ -91,8 +142,8 @@ int main(int argc, char** argv) {
               "different actual worktree input blocks the first prompt");
         const auto effects = Json::parse(http(origin + "/fixture/effects", "GET").body);
         const auto stock = Json::parse(http(origin + "/fixture/stock", "GET").body);
-        check(effects.at("t3_thread_send").size() == 1 && effects.at("t3_thread_launch").size() == 5 &&
-                  !effects.contains("t3_thread_interrupt") && stock.at("stockLaunches").size() == 4 &&
+        check(effects.at("t3_thread_send").size() == 1 && effects.at("t3_thread_launch").size() == 7 &&
+                  !effects.contains("t3_thread_interrupt") && stock.at("stockLaunches").size() == 6 &&
                   stock.at("stockLaunches").at("project:pinned-worker").at("replays") == 1 &&
                   stock.at("stockPromptSends").at("pinned-worker:pinned-worker:start").at("replays") == 0,
               "same-key provision recovery created another thread, resent the first prompt, or sent to invalid work");
