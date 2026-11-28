@@ -196,7 +196,7 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
                 auto& projected = details["files"] = Json::array();
                 for (const auto& file : *files) {
                     Json item = Json::object();
-                    copyFields(item, file, {"id", "name", "sizeBytes"});
+                    copyFields(item, file, {"id", "name"});
             const auto mime = field(file, "mimeType");
             const auto preview = conversationMediaKind(mime);
             if (!preview.empty()) item["preview"] = preview;

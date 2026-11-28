@@ -506,9 +506,9 @@ void attachmentsInConversation(const std::filesystem::path& path) {
         throw std::runtime_error("The message with files was missing from the conversation");
     };
     const Json mixedFiles = Json::array({
-        {{"id", 1}, {"name", "clip.webm"}, {"sizeBytes", 4}, {"preview", "video"}},
-        {{"id", 2}, {"name", "reader's 日本語.html"}, {"sizeBytes", 20}},
-        {{"id", 3}, {"name", image.at("name")}, {"sizeBytes", png.body.size()}, {"preview", "image"}, {"mayAnimate", true}}
+        {{"id", 1}, {"name", "clip.webm"}, {"preview", "video"}},
+        {{"id", 2}, {"name", "reader's 日本語.html"}},
+        {{"id", 3}, {"name", image.at("name")}, {"preview", "image"}, {"mayAnimate", true}}
     });
     checkFileList(browser.get("/api/view?bot=release"), mixed, mixedFiles);
     checkFileList(browser.get(conversation), mixed, mixedFiles);

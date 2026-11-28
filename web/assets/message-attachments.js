@@ -25,22 +25,17 @@ function fileName(name) {
   return label;
 }
 
-function fileSize(bytes) {
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
-  return `${bytes} B`;
-}
-
 function setDownload(link, file) {
   link.href = `${file.url}&download=1`;
   link.download = file.name;
   link.setAttribute('aria-label', `Download ${file.name}`);
 }
 
-function fileCard(file, note = fileSize(file.sizeBytes), available = true) {
+function fileCard(file, note, available = true) {
   const card = node(available ? 'a' : 'div', 'chat-file-card');
   const label = node('span', 'chat-file-label');
-  label.append(fileName(file.name), node('span', 'chat-file-note', note));
+  label.append(fileName(file.name));
+  if (note) label.append(node('span', 'chat-file-note', note));
   card.append(glyph('file'), label);
   if (available) {
     card.append(glyph('download'));
