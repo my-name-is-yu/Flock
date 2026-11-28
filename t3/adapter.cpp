@@ -990,8 +990,20 @@ bool authorizedStagedAttachments(const Command& command, const T3::SendAuthoriza
 
 bool projectStillAuthorized(Client& client, std::string_view projectId) {
     try {
-        const auto project = client.call("t3_project_read", {{"projectId", projectId}});
-        return field(project, "id") == projectId;
+        Position nextCursor = 0;
+        for (;;) {
+            const auto page = client.call("t3_project_list", {{"cursor", nextCursor}, {"limit", 100}});
+            for (const auto& project : array(page, "projects")) {
+                if (field(project, "id") != projectId) continue;
+                const auto archived = project.find("archivedAt");
+                return archived == project.end() || archived->is_null();
+            }
+            const auto& next = member(page, "nextCursor");
+            if (next.is_null()) return false;
+            const auto cursor = position(next);
+            if (cursor <= nextCursor) return false;
+            nextCursor = cursor;
+        }
     } catch (...) {
         return false;
     }
@@ -1095,6 +1107,8 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         const auto workspace = workspaceHead(client, command.projectId, thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
+        if (!projectStillAuthorized(client, command.projectId))
+            return attachmentAuthorizationRefusal("Could not verify the destination T3 Project before dispatching attachments");
         if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
         const auto sent = sendWork(client, command, threadId, attachments, command.actionId + ":start");
         if (field(sent, "threadId") != threadId || field(sent, "runId").empty() ||

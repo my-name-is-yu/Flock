@@ -85,6 +85,16 @@ void attachmentHandoff(T3& t3, T3& restarted, Command launch, const std::functio
     check(refusal.kind == Delivery::Kind::Settings && refusal.definitelyUnsent && refusal.noAutomaticRetry && checkedAfterStaging &&
               effects("t3_thread_launch").size() == launchCount,
           "new-task delegation launched despite a post-staging authorization denial");
+    auto archived = launch;
+    archived.actionId = "attachment-launch-archived-project";
+    const auto pendingBeforeArchive = destination().at("pending");
+    fixture({{"archiveProjectOnUpload", true}});
+    const auto archivedRefusal = t3.send(archived, [] { return true; });
+    check(archivedRefusal.kind == Delivery::Kind::Settings && archivedRefusal.definitelyUnsent &&
+              archivedRefusal.noAutomaticRetry && effects("t3_thread_launch").size() == launchCount &&
+              destination().at("pending") == pendingBeforeArchive,
+          "new-task delegation launched or remained retryable after its Project was archived during staging");
+    fixture({{"archiveProjectOnUpload", false}, {"archiveProject", false}});
     const auto accepted = t3.send(launch, [] { return true; });
     check(accepted.kind == Delivery::Kind::Accepted, "T3 did not launch with the selected files: " + accepted.detail);
     const auto compare = [](const Json& posted, const Command& command) {

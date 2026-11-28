@@ -101,6 +101,8 @@ class Fixture(BaseHTTPRequestHandler):
             upload["bytes"] = base64.b64encode(raw).decode()
             if state.get("moveThreadOnUpload"):
                 state["selectedProject"] = "other-project"
+            if state.get("archiveProjectOnUpload"):
+                state["archiveProject"] = True
             self.reply(code=201)
             return
         if self.path == "/token":
@@ -322,7 +324,8 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["limit"] == 100
             if args["cursor"] == 0:
                 return {"projects": [
-                    {"id": "project", "title": "Release Pipeline", "archivedAt": None,
+                    {"id": "project", "title": "Release Pipeline",
+                     "archivedAt": "2026-01-01T00:00:00Z" if state.get("archiveProject") else None,
                      "workspaceRoot": "/fixture/release"},
                     {"id": "archived", "title": "Archived Release", "archivedAt": "2026-01-01T00:00:00Z",
                      "workspaceRoot": "/fixture/archive"},
@@ -865,6 +868,8 @@ class Fixture(BaseHTTPRequestHandler):
         state = self.server.state
         if name == "t3_environment_read":
             return {"environmentId": state.get("claimedEnvironment", "env-1"), "label": "T3 fixture"}
+        if name == "t3_project_list":
+            return {"projects": [{"id": "project", "archivedAt": None}], "nextCursor": None}
         if name == "t3_project_read":
             return {"id": "project", "workspaceRoot": state["stockRoot"]}
         if name == "t3_thread_launch":
