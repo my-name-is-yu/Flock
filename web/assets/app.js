@@ -1,255 +1,183 @@
 import './tooltip.js';
-import { handleComposerEnter, isComposerSuggestionKey } from './composer-shortcuts.mjs';
-import { accentColor, presenceMotion, showAvatar } from './avatars.js';
-import { actionLabel, approvalSummary } from './action-labels.mjs';
-import { refreshEventHistory, timelineMessages } from './event-history.mjs';
-import { coalescedRefresh, createLiveUpdates } from './live-updates.js';
-import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from './browser-notifications.mjs';
-import { createBotEditor } from './bot-editor.js';
-import { createBotRoleCard } from './bot-role.js';
-import { createBotWorkspaceCard } from './bot-workspace.js';
-import { mountBotDeletion } from './bot-deletion.js';
-import { mountBotPause } from './bot-pause.js';
-import { setupNotice, createSetupSettings, orderSetupNotices } from './bot-setup.js';
-import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide } from './chat-grouping.mjs';
 import { mountBoardInbox, taskWaitDecision } from './board-inbox.js';
-import {
-  closedLabels, decisionConfirmations, pendingActionLabels, pendingKindLabels, responseErrors, sessionEndLabels, stateLabels, waitLabels,
-} from './conversation-copy.mjs';
-import { screenshotMessage, stageScreenshots } from './composer-screenshots.mjs';
-import { createTimelineRows, placeRows } from './timeline-rows.js';
-import { replyArrivalId } from './reply-arrival.mjs';
-import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
-import { createComposerDraftStore } from './composer-drafts.mjs';
+import { mountBotDeletion } from './bot-deletion.js';
+import { createBotEditor } from './bot-editor.js';
+import { mountBotPause } from './bot-pause.js';
+import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from './browser-notifications.mjs';
+import { messageSide } from './chat-grouping.mjs';
+import { screenshotMessage } from './composer-screenshots.mjs';
+import { handleComposerEnter, isComposerSuggestionKey } from './composer-shortcuts.mjs';
+import { decisionConfirmations, responseErrors } from './conversation-copy.mjs';
 import { mountConversationFind } from './conversation-find.mjs';
-import { createRecurringRequests } from './recurring-requests.js';
-import { createMemoryHistory } from './memory-history.js';
 import { enableBackdropDismiss } from './dialog-backdrop.mjs';
-import { node } from './dom.js';
+import { refreshEventHistory } from './event-history.mjs';
+import { coalescedRefresh, createLiveUpdates } from './live-updates.js';
+import {
+  assignBotDeletion,
+  assignBotDraft,
+  assignBotEditor,
+  assignBotPause,
+  assignBots,
+  assignCloseDetail,
+  assignComposition,
+  assignConnection,
+  assignConversationFind,
+  assignDecisions,
+  assignDetailOrigin,
+  assignDragDepth,
+  assignFinishingBotEditor,
+  assignHeaderFocusTarget,
+  assignListLoaded,
+  assignLiveUpdates,
+  assignMenu,
+  assignMessageTap,
+  assignNotificationDestination,
+  assignOpenDetail,
+  assignOpenNewBot,
+  assignOperate,
+  assignPickerTarget,
+  assignReadState,
+  assignRefreshBots,
+  assignRender,
+  assignRenderComposer,
+  assignReopenSettingsOnClose,
+  assignRosterRevision,
+  assignSelectBot,
+  assignSessionDateRefresh,
+  assignSetNotice,
+  assignSettingsReturnFocus,
+  assignSidebarViewer,
+  assignSyncRetry,
+  assignTimelineHeight,
+  assignTimelineWidth,
+  assignView,
+  assignVisibilityGeneration,
+  botQuery,
+  bots,
+  byId,
+  byteLength,
+  closedQuestion,
+  composerDrafts,
+  composerLimit,
+  composition,
+  connection,
+  conversationActions,
+  conversationActionsTrigger,
+  detailNav,
+  detailOrigin,
+  dragDepth,
+  elements,
+  findPanel,
+  hasTextSelection,
+  listLoaded,
+  menu,
+  messageTap,
+  narrow,
+  navBackdrop,
+  noHover,
+  notices,
+  pickerTarget,
+  readState,
+  reducedMotion,
+  reopenSettingsOnClose,
+  responseViewers,
+  rosterRevision,
+  screenshotAnchor,
+  screenshotsFor,
+  scroller,
+  sendingMessages,
+  sessionDateRefresh,
+  settingsReturnFocus,
+  showingComposer,
+  sidebar,
+  sidebarCollapseThreshold,
+  sidebarDefaultWidth,
+  sidebarMaxWidth,
+  sidebarMinWidth,
+  sidebarResizer,
+  sidebarShow,
+  sidebarToggle,
+  sidebarViewer,
+  signatures,
+  syncRetry,
+  tapMoved,
+  timelineHeight,
+  timelineWidth,
+  view,
+  visibilityGeneration,
+  visualViewport,
+  workspace,
+} from './app-state.js';
+import { animateViewTransition, api, closeConversationActions, conversationUrl, openNavigation, pins, save, saved } from './app-core.js';
+import {
+  closeMenu,
+  focusKey,
+  openBotSettings,
+  openSettingsFromMenu,
+  pinnedBotsInShortcutOrder,
+  renderBots,
+  scheduleReadCheck,
+} from './sidebar.js';
+import { renderActivity, renderHeader } from './activity.js';
+import {
+  backToLatest,
+  beginReply,
+  cardSourceAction,
+  closeMessageTime,
+  eventHistoryForRefresh,
+  leaveConversationSource,
+  messageBubble,
+  nextSuggestion,
+  rememberReadingPosition,
+  renderTimeline,
+  resetConversationJump,
+  showConversationMessage,
+  syncMessageFolding,
+  timelineAtEnd,
+  timelineScrollPosition,
+  updateFindOverlap,
+  updateJumpToLatest,
+} from './timeline.js';
+import { addScreenshots, clearScreenshots, fitMessage, renderComposer, setNotice } from './composer.js';
+import {
+  clearDetailSectionTransition,
+  closeDetail,
+  detail,
+  detailWorkspace,
+  focusAfterBotDeletion,
+  followNotification,
+  headerFocusTarget,
+  openDetail,
+  openNewBot,
+  releaseDetailAvatar,
+  renderDetail,
+  selectSection,
+  setBotPaused,
+  setDetail,
+  showDetailError,
+} from './bot-detail.js';
 
-const byId = (id) => document.getElementById(id);
-const elements = Object.fromEntries([
-  'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
-  'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-summary', 'cancel-reply',
-  'decision-reply-context', 'decision-reply-label', 'decision-reply-target',
-  'reply-label', 'compose-label', 'message', 'composer-ghost', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'composer-banner', 'composer-banner-title', 'composer-banner-description', 'composer-banner-action',
-  'attach-screenshots', 'screenshot-input', 'screenshot-previews',
-  'bot-editor', 'bot-activity', 'activity-scope-name',
-  'sidebar-resizer',
-].map((id) => [id, byId(id)]));
-const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
-const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-const motionAnimations = new WeakMap();
-const motionEaseOut = 'cubic-bezier(0.23, 1, 0.32, 1)';
-const motionSpring = 'cubic-bezier(0.22, 1.2, 0.36, 1)';
-function cancelMotion(el) {
-  const prev = el && motionAnimations.get(el);
-  if (!prev) return;
-  motionAnimations.delete(el);
-  prev.cancel();
-}
-function runMotion(el, keyframes, options) {
-  if (!el?.animate || reducedMotion.matches) return null;
-  cancelMotion(el);
-  const animation = el.animate(keyframes, options);
-  motionAnimations.set(el, animation);
-  const clear = () => {
-    if (motionAnimations.get(el) === animation) motionAnimations.delete(el);
-  };
-  animation.addEventListener('finish', clear, { once: true });
-  animation.addEventListener('cancel', clear, { once: true });
-  return animation;
-}
-function animateLiveReply(id) {
-  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
-    { opacity: .5, transform: 'translateY(8px) scale(.975)' },
-    { opacity: 1, transform: 'none' },
-  ], { duration: 200, easing: motionSpring });
-}
-function animateSentMessage(id) {
-  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
-    { opacity: 0, transform: 'translateY(10px) scale(.96)' },
-    { opacity: 1, transform: 'none' },
-  ], { duration: 210, easing: motionSpring });
-}
-const workspace = document.querySelector('.workspace');
-const conversationActions = byId('conversation-actions');
-const conversationActionsTrigger = conversationActions.querySelector('summary');
-const narrow = matchMedia('(max-width: 700px)');
-const noHover = matchMedia('(hover: none)');
-const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
-const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
-const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
-const byteLength = (text) => new TextEncoder().encode(text).length;
-function saved(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
-  catch { return fallback; }
-}
-function save(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); }
-  catch {}
-}
-const savedPins = saved('flock-pins', []);
-const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
-const composerDrafts = createComposerDraftStore();
-const screenshotDrafts = new WeakMap();
-const sendingMessages = new Set();
-const notices = new Map();
-const signatures = new Map();
-const readingPositions = new Map();
-let bots = [];
-let rosterRevision = 0;
-let listLoaded = false;
-let view = null;
-let visibilityGeneration = 0;
-let menu = null;
-let detail = null;
-let profileAvatar = null;
-let profileKey = '';
-let profileMotion;
-let scopeKey = '';
-let connection = 'loading';
+// The parts of the page reach these through app-state.js, so they do not import this script.
+assignOpenDetail(openDetail);
+assignSelectBot(selectBot);
+assignCloseDetail(closeDetail);
+assignRenderComposer(renderComposer);
+assignSetNotice(setNotice);
+assignOperate(operate);
+assignRender(render);
+assignOpenNewBot(openNewBot);
+assignHeaderFocusTarget(headerFocusTarget);
 
-function button(text, className, click) {
-  const el = node('button', className, text);
-  el.type = 'button';
-  if (click) el.addEventListener('click', click);
-  return el;
-}
-function avatar(bot, className = '') {
-  const host = node('span', `avatar ${className}`.trim());
-  showAvatar(host, bot);
-  return host;
-}
-function runHref(run) {
-  if (!run?.link) return null;
-  let url;
-  try { url = new URL(run.link); }
-  catch { return null; }
-  const hosted = url.origin === 'https://app.t3.codes' && url.pathname.startsWith('/threads/');
-  const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
-  if ((!hosted && !local) || url.username || url.password) return null;
-  return url.href;
-}
-function linkToRun(run, label = 'Open in T3') {
-  const href = runHref(run);
-  if (!href) return null;
-  const link = node('a', 'link', label);
-  link.href = href;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
-  return link;
-}
-const openBotName = () => view?.data?.bot?.name ?? bots.find((bot) => bot.id === view?.id)?.name ?? 'The Bot';
-const withBotName = (text) => text?.replaceAll('$BOT', openBotName);
-function waitLabel(reason) { return withBotName(waitLabels[reason]?.[0]) ?? 'Waiting for you'; }
-function waitText(wait, { spokenByBot = false } = {}) {
-  const labels = waitLabels[wait.reason];
-  const fallback = withBotName((spokenByBot && labels?.[2]) || labels?.[1]);
-  if (wait.reason === 'policy_approval') return fallback;
-  return wait.text || fallback || 'Refresh the pending request.';
-}
-function quotedText(source) {
-  const data = source?.data;
-  if (!data) return 'Earlier message';
-  if (source.kind === 'waiting') return waitText(data, { spokenByBot: true });
-  return data.report || data.text || data.title || 'Earlier message';
-}
-function changed(key, ...values) {
-  const signature = JSON.stringify(values);
-  if (signatures.get(key) === signature) return false;
-  signatures.set(key, signature);
-  return true;
-}
-const responseViewers = new WeakMap();
-async function api(path, body, { method = body ? 'POST' : 'GET', signal } = {}) {
-  const headers = new Headers();
-  if (method !== 'GET') headers.set('X-Flock-Action', '1');
-  if (body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`/api/${path}`, {
-    method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status, data });
-  const viewer = response.headers.get('X-Flock-Viewer');
-  if (viewer !== null) responseViewers.set(data, viewer);
-  return data;
-}
-const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
-const timelineKey = (botId) => JSON.stringify([botId]);
-const showingComposer = (bot) => view?.id === bot;
 
 function setConnection(state) {
   if (connection === state) return;
-  connection = state;
+  assignConnection(state);
   elements.connection.dataset.state = state;
   elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
 }
-const mainElement = byId('main');
-const navBackdrop = byId('nav-backdrop');
-function openNavigation(open, focus = true) {
-  const expanded = open && narrow.matches;
-  const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
-  workspace.classList.toggle('nav-open', expanded);
-  if (mainElement) mainElement.inert = expanded;
-  elements['open-navigation'].setAttribute('aria-expanded', expanded);
-  if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
-}
-function closeConversationActions(focus = false) {
-  if (!conversationActions.open) return;
-  conversationActions.open = false;
-  if (focus) conversationActionsTrigger.focus({ preventScroll: true });
-}
-function conversationUrl(botId) {
-  const url = new URL(location.href);
-  if (botId) url.searchParams.set('bot', botId);
-  else url.searchParams.delete('bot');
-  return url;
-}
-function animateTimelineContent(kind) {
-  if (reducedMotion.matches) return;
-  const inner = elements.conversation.querySelector('.conversation-inner');
-  cancelMotion(inner);
-  cancelMotion(elements.timeline);
-  if (kind === 'bot-switch') {
-    runMotion(elements.timeline, [
-      { opacity: .15, transform: 'translateY(8px)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 210, easing: motionEaseOut });
-  }
-}
-function animateViewTransition(kind) {
-  const inner = elements.conversation.querySelector('.conversation-inner');
-  const profileHeading = byId('profile-heading');
-  for (const target of [inner, elements.timeline, elements['profile-avatar-button'], profileHeading]) {
-    cancelMotion(target);
-  }
-  if (reducedMotion.matches) return;
-  const context = view;
-  if (elements.timeline?.childElementCount > 0) {
-    animateTimelineContent(kind);
-    if (context) context.pendingViewMotion = null;
-  } else if (context) {
-    context.pendingViewMotion = kind;
-  }
-  if (kind === 'bot-switch') {
-    runMotion(elements['profile-avatar-button'], [
-      { opacity: .6, transform: 'scale(.88) translateY(3px)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 230, easing: motionSpring });
-    runMotion(profileHeading, [
-      { opacity: .5, transform: 'translateY(4px) scale(.96)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 220, easing: motionSpring });
-  }
-}
 function selectBot(botId, { updateHistory = true } = {}) {
-  menu = null;
+  assignMenu(null);
   closeConversationActions();
   openNavigation(false);
   if (view?.id === botId) {
@@ -262,8 +190,8 @@ function selectBot(botId, { updateHistory = true } = {}) {
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
-  view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false } : null;
+  assignView(botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
+    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false } : null);
   const url = conversationUrl(botId);
   if (url.href !== location.href) {
     if (updateHistory) history.pushState(null, '', url);
@@ -297,881 +225,27 @@ function selectLocation() {
   }
 }
 
-const sidebarIcons = {
-  pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M9 5v14M15 5v14"/></svg>',
-  resume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>',
-  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v6m4-6v6"/></svg>',
-  more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
-  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
-  inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
-  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
-  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
-  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
-};
-const activePresence = new Set(['working', 'thinking', 'waiting', 'paused']);
-const busyPresence = new Set(['working', 'thinking']);
-const sidebar = byId('navigation');
-const sidebarEntries = new Map();
-let readState = new Map();
-let sidebarViewer = null;
-
-let botDraft = null;
-function sidebarBots() {
-  if (botDraft?.mode !== 'edit') return bots;
-  return bots.map((bot) => (bot.id === botDraft.botId ? { ...bot, name: botDraft.name, avatar: botDraft.avatar } : bot));
-}
-function pinnedBotsInShortcutOrder(source = bots) {
-  return [...pins].map((id) => source.find((bot) => bot.id === id)).filter(Boolean);
-}
-function focusKey(key) {
-  sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
-}
-function positionMenuPopover(botId) {
-  if (!botId) return;
-  const popover = sidebar.querySelector('.menu-popover');
-  const trigger = sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${botId}`)}"]`);
-  if (!popover || !trigger) return;
-  const triggerRect = trigger.getBoundingClientRect();
-  const width = popover.offsetWidth;
-  const height = popover.offsetHeight;
-  const margin = 8;
-  const viewLeft = Math.max(margin, Math.min(window.innerWidth - width - margin, triggerRect.right - width));
-  const fitsBelow = triggerRect.bottom + 4 + height <= window.innerHeight - margin;
-  const viewTop = fitsBelow
-    ? triggerRect.bottom + 4
-    : Math.max(margin, triggerRect.top - height - 4);
-  const sidebarRect = getComputedStyle(sidebar).transform !== 'none' ? sidebar.getBoundingClientRect() : null;
-  const offsetX = sidebarRect ? sidebarRect.left : 0;
-  const offsetY = sidebarRect ? sidebarRect.top : 0;
-  popover.style.left = `${Math.round(viewLeft - offsetX)}px`;
-  popover.style.top = `${Math.round(viewTop - offsetY)}px`;
-  popover.style.setProperty('--menu-origin', fitsBelow ? 'top right' : 'bottom right');
-}
-function setMenu(botId, focus) {
-  menu = botId;
-  renderBots();
-  if (focus === 'first' || focus === 'last') {
-    const items = sidebar.querySelectorAll('.menu-popover [role="menuitem"]');
-    items[focus === 'first' ? 0 : items.length - 1]?.focus();
-  } else if (focus) focusKey(focus);
-}
-function closeMenu(restore = true) {
-  const botId = menu;
-  if (!botId) return;
-  setMenu(null, restore ? `menu:${botId}` : null);
-}
-function togglePin(botId) {
-  if (pins.has(botId)) pins.delete(botId);
-  else pins.add(botId);
-  save('flock-pins', [...pins]);
-  setMenu(null, `menu:${botId}`);
-}
-let settingsReturnFocus = null;
-function openSettingsFromMenu(botId) {
-  settingsReturnFocus = botId;
-  openDetail({ kind: 'settings' });
-}
-function openBotSettings(botId) {
-  menu = null;
-  if (view?.id !== botId) selectBot(botId);
-  else renderBots();
-  if (view?.data) openSettingsFromMenu(botId);
-  else if (view) view.openSettingsOnLoad = botId;
-}
-function menuButton(botId) {
-  const toggle = button(null, 'row-menu', () => (menu === botId ? closeMenu() : setMenu(botId, 'first')));
-  toggle.innerHTML = sidebarIcons.more;
-  toggle.dataset.focus = `menu:${botId}`;
-  toggle.setAttribute('aria-haspopup', 'menu');
-  toggle.addEventListener('keydown', (event) => {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    event.preventDefault();
-    setMenu(botId, event.key === 'ArrowDown' ? 'first' : 'last');
-  });
-  return toggle;
-}
-function menuPopover(bot) {
-  const list = node('div', 'menu-popover');
-  list.id = 'bot-menu';
-  list.setAttribute('role', 'menu');
-  list.setAttribute('aria-label', `${bot.name} menu`);
-  const actions = [
-    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot.id)],
-    ['History', sidebarIcons.inbox, () => {
-      selectBot(bot.id);
-      void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
-    }],
-    ['Bot settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
-  ];
-  if (bot.canDelete) {
-    actions.push([bot.paused ? 'Resume…' : 'Pause…', bot.paused ? sidebarIcons.resume : sidebarIcons.pause, () => {
-      closeMenu();
-      botPause.open(bot, () => focusKey(`menu:${bot.id}`));
-    }]);
-  }
-  const menuItem = ([label, icon, run], index) => {
-    const item = button(null, null, run);
-    item.innerHTML = icon;
-    item.append(node('span', null, label));
-    item.setAttribute('role', 'menuitem');
-    item.tabIndex = -1;
-    item.dataset.focus = `item:${bot.id}:${index}`;
-    return item;
-  };
-  list.append(...actions.map(menuItem));
-  if (bot.canDelete) {
-    const remove = menuItem(['Delete…', sidebarIcons.trash, () => {
-      closeMenu();
-      botDeletion.open(bots.find(({ id }) => id === bot.id), document.activeElement);
-    }], actions.length);
-    remove.classList.add('danger');
-    remove.setAttribute('aria-haspopup', 'dialog');
-    list.append(remove);
-  }
-  list.addEventListener('keydown', (event) => {
-    const items = [...list.querySelectorAll('[role="menuitem"]')];
-    const index = items.indexOf(document.activeElement);
-    const moves = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 };
-    if (event.key in moves) {
-      event.preventDefault();
-      items[(moves[event.key] + items.length) % items.length].focus();
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      closeMenu();
-    } else if (event.key === 'Tab') closeMenu();
-  });
-  return list;
-}
-function createSidebarEntry(botId) {
-  const row = node('div');
-  const select = button(null, '', () => {
-    decisions.close({ focus: false });
-    selectBot(botId);
-  });
-  select.dataset.focus = `bot:${botId}`;
-  const face = node('span');
-  const avatarHost = node('span', 'avatar');
-  const pinPresence = node('span');
-  pinPresence.innerHTML = sidebarIcons.pause;
-  pinPresence.setAttribute('aria-hidden', 'true');
-  const pinUnread = node('span', 'unread-dot pin-unread');
-  pinUnread.setAttribute('aria-hidden', 'true');
-  face.append(avatarHost, pinPresence, pinUnread);
-
-  const name = node('span', 'bot-name');
-  const nameText = node('span', 'bot-name-text');
-  const presenceDot = node('span', 'presence-dot');
-  const rowUnread = node('span', 'unread-dot row-unread');
-  rowUnread.setAttribute('aria-hidden', 'true');
-  name.append(nameText);
-  const preview = node('span', 'bot-preview');
-  const dots = node('span', 'working-dots');
-  dots.setAttribute('aria-hidden', 'true');
-  dots.append(node('i'), node('i'), node('i'));
-  const previewText = document.createTextNode('');
-  preview.append(presenceDot, dots, previewText);
-  const text = node('span', 'bot-text');
-  text.append(name, preview);
-
-  const pinName = node('span', 'pin-name');
-  const status = node('span', 'sr-only');
-  select.append(rowUnread, face, text, pinName, status);
-  const toggle = menuButton(botId);
-  const decisionCount = button(null, 'decision-count', () => {
-    selectBot(botId);
-    decisions.open(decisionCount);
-  });
-  decisionCount.dataset.focus = `decisions:${botId}`;
-  decisionCount.setAttribute('aria-controls', 'decision-panel');
-  row.append(select, decisionCount, toggle);
-  row.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    setMenu(botId, 'first');
-  });
-
-  let previousBot;
-  let avatarHandle;
-  let popover;
-  return {
-    row,
-    update(bot, pinIndex) {
-      const pinned = pinIndex >= 0;
-      const active = view?.id === botId;
-      const expanded = menu === botId;
-      row.className = pinned ? 'pin-tile' : 'bot-row';
-      row.classList.toggle('selected', active);
-      row.classList.toggle('menu-open', expanded);
-      select.className = pinned ? 'pin' : 'bot-select';
-      if (active) select.setAttribute('aria-current', 'true');
-      else select.removeAttribute('aria-current');
-      const count = decisions.count(botId);
-      decisionCount.hidden = !count;
-      decisionCount.textContent = count;
-      decisionCount.setAttribute('aria-label', `${bot.name}: ${count} ${count === 1 ? 'item needs' : 'items need'} you`);
-
-      face.className = pinned ? 'pin-face' : '';
-      avatarHost.classList.toggle('pin-avatar', pinned);
-      avatarHost.classList.toggle('bot-avatar', !pinned);
-      pinName.hidden = !pinned;
-      text.hidden = pinned;
-      const shortcut = pinned && pinIndex < 9 ? pinIndex + 1 : null;
-      if (shortcut) {
-        select.dataset.shortcut = `⌥⇧${shortcut}`;
-        select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
-      } else {
-        delete select.dataset.shortcut;
-        select.removeAttribute('aria-keyshortcuts');
-      }
-
-      if (previousBot?.name !== bot.name) {
-        nameText.textContent = pinName.textContent = bot.name;
-        toggle.setAttribute('aria-label', `${bot.name} menu`);
-        popover?.setAttribute('aria-label', `${bot.name} menu`);
-      }
-      const presence = bot.paused ? 'paused' : bot.presence;
-      if (pinned) select.dataset.tooltip = bot.paused ? `${bot.name} · Paused` : bot.name;
-      else delete select.dataset.tooltip;
-      const showWaitingPreview = presence === 'waiting' && !count;
-      const previewLabel = showWaitingPreview || bot.paused ? stateLabels[presence] : bot.preview || '';
-      if (previewText.data !== previewLabel) previewText.data = previewLabel;
-      preview.classList.toggle('waiting', showWaitingPreview);
-      if (showWaitingPreview || bot.paused) preview.setAttribute('aria-hidden', 'true');
-      else preview.removeAttribute('aria-hidden');
-      const hasPresence = activePresence.has(presence);
-      presenceDot.hidden = !showWaitingPreview;
-      dots.hidden = !busyPresence.has(presence);
-      preview.hidden = !previewLabel && dots.hidden;
-      pinPresence.hidden = !pinned || !hasPresence;
-      pinPresence.className = hasPresence ? `pin-presence ${presence}` : 'pin-presence';
-      const unread = hasUnread(bot);
-      row.classList.toggle('unread', !!unread);
-      pinUnread.hidden = !pinned || !unread;
-      rowUnread.hidden = pinned || !unread;
-      const label = [unread && 'New reply', hasPresence && stateLabels[presence]].filter(Boolean).join(', ');
-      status.hidden = !label;
-      if (status.textContent !== label) status.textContent = label;
-
-      toggle.setAttribute('aria-expanded', expanded);
-      if (expanded) {
-        toggle.setAttribute('aria-controls', 'bot-menu');
-        if (popover && (previousBot?.canDelete !== bot.canDelete || previousBot?.paused !== bot.paused)) {
-          if (popover.contains(document.activeElement)) toggle.focus();
-          popover.remove();
-          popover = null;
-        }
-        if (!popover) {
-          popover = menuPopover(bot);
-          row.append(popover);
-        }
-      } else if (popover) {
-        toggle.removeAttribute('aria-controls');
-        popover.remove();
-        popover = null;
-      }
-      if (!previousBot || previousBot.paused !== bot.paused || JSON.stringify(previousBot.avatar) !== JSON.stringify(bot.avatar)) {
-        avatarHandle?.destroy();
-        avatarHandle = showAvatar(avatarHost, bot, { still: !!bot.paused, state: presenceMotion(bot.paused ? 'idle' : bot.presence) });
-      } else if (previousBot.presence !== bot.presence) {
-        const nextMotion = presenceMotion(bot.presence);
-        if (presenceMotion(previousBot.presence) !== nextMotion) avatarHandle?.update({ state: nextMotion });
-      }
-      previousBot = bot;
-    },
-    destroy() {
-      avatarHandle?.destroy();
-      row.remove();
-    },
-  };
-}
-function skeletonRows(count, className = 'skeleton-row') {
-  return Array.from({ length: count }, () => {
-    const row = node('div', className);
-    row.setAttribute('aria-hidden', 'true');
-    if (className === 'skeleton-bot') row.append(node('span', 'skeleton-avatar'));
-    const lines = node('span', 'skeleton-lines');
-    lines.append(node('span', 'skeleton-line'), node('span', 'skeleton-line short'));
-    row.append(lines);
-    return row;
-  });
-}
-
-function draftRow(draft) {
-  const row = node('div', 'bot-row draft');
-  row.setAttribute('aria-hidden', 'true');
-  const select = node('span', 'bot-select');
-  const name = node('span', 'bot-name');
-  name.append(node('span', 'bot-name-text', draft.name));
-  const text = node('span', 'bot-text');
-  text.append(name);
-  select.append(avatar(draft, 'bot-avatar'), text);
-  row.append(select);
-  return row;
-}
-
-const rowRevealTimers = new WeakMap();
-function triggerRowReveal(container) {
-  if (reducedMotion.matches) return;
-  clearTimeout(rowRevealTimers.get(container));
-  container.classList.remove('rows-reveal');
-  void container.offsetWidth;
-  container.classList.add('rows-reveal');
-  rowRevealTimers.set(container, setTimeout(() => {
-    container.classList.remove('rows-reveal');
-    rowRevealTimers.delete(container);
-  }, 400));
-}
-function clearRowReveal(container) {
-  clearTimeout(rowRevealTimers.get(container));
-  rowRevealTimers.delete(container);
-  container.classList.remove('rows-reveal');
-}
-
-let previousPinsKey = null;
-let previousListLoaded = false;
-function renderBots() {
-  const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds,
-    bots.map(({ id }) => decisions.count(id)))) return;
-  const revealedFromSkeleton = !previousListLoaded && listLoaded;
-  previousListLoaded = listLoaded;
-  const pinsKey = JSON.stringify([...pins]);
-  const animateFlip = previousPinsKey !== null && previousPinsKey !== pinsKey && !reducedMotion.matches;
-  previousPinsKey = pinsKey;
-  if (animateFlip || menu) {
-    clearRowReveal(elements['bot-list']);
-    clearRowReveal(elements.pinned);
-  }
-  const beforeRects = new Map();
-  if (animateFlip) {
-    for (const entry of sidebarEntries.values()) {
-      if (entry.row.isConnected) beforeRects.set(entry.row, entry.row.getBoundingClientRect());
-    }
-    if (!elements['bot-activity'].hidden) {
-      beforeRects.set(elements['bot-activity'], elements['bot-activity'].getBoundingClientRect());
-    }
-  }
-  const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const source = sidebarBots();
-  const pinned = pinnedBotsInShortcutOrder(source);
-  const unpinned = source.filter((bot) => !pins.has(bot.id));
-  const activeIds = new Set(source.map((bot) => bot.id));
-  for (const [id, entry] of sidebarEntries) {
-    if (!activeIds.has(id)) {
-      entry.destroy();
-      sidebarEntries.delete(id);
-    }
-  }
-  for (const { id } of source) {
-    if (!sidebarEntries.has(id)) sidebarEntries.set(id, createSidebarEntry(id));
-  }
-  const rowFor = ({ id }) => sidebarEntries.get(id).row;
-  placeRows(elements.pinned, pinned.map(rowFor));
-  elements.pinned.hidden = !pinned.length;
-  const list = elements['bot-list'];
-  list.setAttribute('aria-busy', !listLoaded);
-  const rows = unpinned.map(rowFor);
-  if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
-  if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
-  placeRows(list, rows);
-  pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
-  unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
-  if (revealedFromSkeleton) {
-    if (unpinned.length) triggerRowReveal(list);
-    if (pinned.length) triggerRowReveal(elements.pinned);
-  }
-  if (animateFlip) {
-    for (const [el, before] of beforeRects) {
-      if (!el.isConnected || el.hidden) continue;
-      const after = el.getBoundingClientRect();
-      if (!after.width || !after.height) continue;
-      const dx = before.left - after.left;
-      const dy = before.top - after.top;
-      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-        el.animate?.([
-          { transform: `translate(${dx}px, ${dy}px)` },
-          { transform: 'none' },
-        ], { duration: 230, easing: 'cubic-bezier(.2, .9, .25, 1)' });
-      }
-    }
-  }
-  if (menu) positionMenuPopover(menu);
-  if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
-}
-
-function hasUnread(bot) {
-  const state = readState.get(bot.id);
-  return state && state.incoming > state.readThrough;
-}
-
-let readCheckFrame;
-function scheduleReadCheck() {
-  readCheckFrame ??= requestAnimationFrame(() => {
-    readCheckFrame = undefined;
-    if (!view?.data || sidebarViewer === null || responseViewers.get(view.data) !== sidebarViewer ||
-        document.hidden || decisions.isOpen() || document.querySelector('dialog[open]')) return;
-    const state = readState.get(view.id);
-    if (!state || state.incoming <= state.readThrough) return;
-    const scroller = elements.conversation;
-    if (!scroller.clientHeight) return;
-    const message = byId(`event-${state.incoming}`);
-    if (!message || !elements.timeline.contains(message)) return;
-    const viewport = scroller.getBoundingClientRect();
-    const bounds = message.getBoundingClientRect();
-    if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom || bounds.bottom > viewport.bottom + 1) return;
-    state.readThrough = state.incoming;
-    renderBots();
-  });
-}
-
-const participant = (id) => bots.find((bot) => bot.id === id) ?? { id, name: id };
-
-function renderHeader() {
-  const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
-  conversationFind.setContext(view?.data ? view : null);
-  const profile = elements['profile-avatar-button'];
-  const identity = elements['profile-identity'];
-  identity.hidden = !bot;
-  elements['profile-toolbar'].hidden = !bot;
-  // The first-run empty state carries its own heading; a bare "Conversation" title would only repeat it.
-  elements['profile-placeholder'].hidden = !!bot || (listLoaded && !bots.length);
-  elements['bot-activity'].hidden = !bot;
-  byId('conversation-bot-settings').hidden = !bot;
-  const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
-  if (nextScopeKey !== scopeKey) {
-    if (bot) elements['activity-scope-name'].textContent = `${bot.name} activity`;
-    if (bot) document.documentElement.style.setProperty('--bot-accent', accentColor(bot));
-    else document.documentElement.style.removeProperty('--bot-accent');
-  }
-  scopeKey = nextScopeKey;
-  const pageTitle = bot ? `${bot.name} · Flock` : 'Flock';
-  if (document.title !== pageTitle) document.title = pageTitle;
-  if (!bot) {
-    profileAvatar?.destroy();
-    profileAvatar = null;
-    profileKey = '';
-    return;
-  }
-  const presence = bot.paused ? 'paused' : (view?.data?.presence ?? 'idle');
-  const motion = presenceMotion(bot.paused ? 'idle' : presence);
-  const look = { state: motion, followPointer: motion === 'idle' };
-  const key = JSON.stringify([bot.id, bot.avatar, bot.paused]);
-  if (key !== profileKey) {
-    profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: !!bot.paused, ...look });
-    profileKey = key;
-  } else if (profileMotion !== motion) {
-    profileAvatar?.update(look);
-  }
-  profileMotion = motion;
-  const offline = connection === 'offline' && !bot.paused;
-  const status = offline ? 'Offline' : stateLabels[presence] ?? presence;
-  const showStatus = offline || (presence !== 'idle' && !(presence === 'waiting' && decisions.count(bot.id)));
-  const settingsLabel = `${bot.name} settings`;
-  const name = elements['profile-name'];
-  identity.dataset.state = offline ? 'offline' : presence;
-  profile.setAttribute('aria-label', settingsLabel);
-  profile.dataset.tooltip = settingsLabel;
-  name.textContent = bot.name;
-  elements['profile-status'].textContent = showStatus ? status : '';
-  elements['profile-status'].hidden = !showStatus;
-  if (showStatus) profile.setAttribute('aria-describedby', 'profile-status');
-  else profile.removeAttribute('aria-describedby');
-}
-
-function activityRow(tag, className, title, status, statusClass) {
-  const row = node(tag, `activity ${className}`);
-  const heading = node('span', 'activity-title', title);
-  const line = node('span', `activity-status ${statusClass}`.trim());
-  line.append(node('span', 'activity-mark'), node('span', null, status));
-  row.append(heading, line);
-  return row;
-}
-function sessionRow(request, session, status, tone, startedAt) {
-  const link = runHref(session);
-  const title = [session.name, request].filter(Boolean).join(' · ');
-  const row = activityRow(link ? 'a' : 'div', 'session-row', title, status, tone);
-  const details = [Number.isFinite(startedAt) && `Started ${fullTime.format(startedAt)}`, session.commit].filter(Boolean);
-  row.dataset.tooltip = [...details, title].filter(Boolean).join(' · ');
-  if (details.length) row.append(node('span', 'sr-only', ` · ${details.join(' · ')}`));
-  if (link) {
-    row.href = link;
-    row.target = '_blank';
-    row.rel = 'noopener noreferrer';
-    row.insertAdjacentHTML('beforeend', sidebarIcons.open);
-    row.lastElementChild.classList.add('activity-open');
-    row.append(node('span', 'sr-only', ' (Open in T3)'));
-  }
-  return row;
-}
-function conversationSummaries(compactions, open) {
-  return compactions.map((compaction) => {
-    const item = node('details', 'activity-details');
-    item.dataset.inspector = `summary-${compaction.compactionId}`;
-    item.open = open.has(item.dataset.inspector);
-    const summary = node('summary', 'activity');
-    const status = node('span', 'activity-status');
-    status.append(node('span', 'activity-mark'), node('span', null, `Summary of ${compaction.originalCount} messages`));
-    summary.append(node('span', 'activity-title', 'Earlier conversation'), status);
-    item.append(summary, node('p', 'activity-details-body', compaction.summary));
-    return item;
-  });
-}
-function finishedSessionRow(request, session) {
-  const startedAt = Date.parse(session.createdAt);
-  const started = Number.isFinite(startedAt) ? startedLabel(startedAt) : '';
-  const quiet = session.state === 'completed' && !!started;
-  const end = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-  const status = quiet ? started : [end, started].filter(Boolean).join(' · ');
-  const tone = quiet ? 'quiet' : session.state === 'failed' ? 'failed' : '';
-  const row = sessionRow(request, session, status, tone, startedAt);
-  if (quiet) row.querySelector('.activity-mark').after(node('span', 'sr-only', 'Complete, started '));
-  return row;
-}
-function requestRow(task, sessions, renderRow, renderSession = renderRow) {
-  const taskStatus = { state: task.state };
-  if (sessions.length < 2) return renderRow(task.request, sessions[0] ?? taskStatus);
-  const item = node('div', 'request-task');
-  const links = node('div', 'request-sessions');
-  for (const session of sessions)
-    links.append(renderSession('', { ...session, name: session.name ?? 'T3 Session' }));
-  item.append(renderRow(task.request, taskStatus), links);
-  return item;
-}
-function requestGroups(history, activeTasks, parallelTasks, canStop = false) {
-  const runsByTask = new Map(parallelTasks.map(task => [task.id, task.runs.filter(run => run.threadId)]));
-  const groups = { working: [], waiting: [], done: [] };
-  const withStopAction = (item, task) => {
-    if (!canStop || task.state === 'stopping') return item;
-    const stop = button(null, 'icon-button request-stop', () => {
-      openNavigation(false);
-      openDetail({ kind: 'stop-task', taskId: task.id });
-    });
-    stop.innerHTML = sidebarIcons.stop;
-    stop.setAttribute('aria-label', 'Stop request');
-    stop.dataset.tooltip = 'Stop request';
-    stop.dataset.tooltip = 'Stop request';
-    if (item.classList.contains('request-task')) {
-      item.classList.add('has-stop');
-      item.append(stop);
-      return item;
-    }
-    const entry = node('div', 'request-entry');
-    entry.append(item, stop);
-    return entry;
-  };
-  for (const task of [...activeTasks].sort((a, b) => b.id - a.id)) {
-    const sessions = runsByTask.get(task.id) ?? (task.session ? [{ ...task.session, state: task.state }] : []);
-    if (task.problem) {
-      const renderProblem = (request, session) => {
-        const label = waitLabel(task.problem.reason);
-        if (runHref(session)) {
-          const row = sessionRow(request, session, label, 'waiting');
-          row.dataset.tooltip = [task.problem.text, row.dataset.tooltip].join(' · ');
-          return row;
-        }
-        const title = [session.name, request].filter(Boolean).join(' · ');
-        const row = activityRow('button', 'session-row', title, label, 'waiting');
-        row.type = 'button';
-        row.dataset.tooltip = [task.problem.text, title].filter(Boolean).join(' · ');
-        row.addEventListener('click', () => {
-          openNavigation(false);
-          openDetail({ kind: 'wait', taskId: task.id, waitId: task.problem.id });
-        });
-        return row;
-      };
-      groups.waiting.push(withStopAction(requestRow(task, sessions, renderProblem, finishedSessionRow), task));
-      continue;
-    }
-    if (task.state === 'external_waiting') {
-      const renderWaiting = (request, session) => {
-        const row = sessionRow(request, session, task.waitingNote, 'waiting');
-        row.dataset.tooltip = [task.waitingNote, row.dataset.tooltip].join(' · ');
-        return row;
-      };
-      groups.waiting.push(withStopAction(requestRow(task, sessions, renderWaiting, finishedSessionRow), task));
-      continue;
-    }
-    groups.working.push(withStopAction(requestRow(task, sessions, (request, session) => sessionRow(request, session,
-      stateLabels[session.state] ?? session.state, session.state === 'confirmation_pending' ? 'waiting' :
-        !Object.hasOwn(sessionEndLabels, session.state) ? 'live' : '',
-      task.createdAt ? task.createdAt * 1000 : undefined)), task));
-  }
-  const finished = [...history].sort((a, b) => b.id - a.id);
-  for (const task of finished) {
-    const renderDone = (request, session) => finishedSessionRow(request, { ...session, state: task.state });
-    groups.done.push(requestRow(task, task.sessions, renderDone, finishedSessionRow));
-  }
-  const sections = [];
-  for (const [key, label] of [['working', 'Working'], ['waiting', 'Waiting'], ['done', 'Done']]) {
-    const tasks = groups[key];
-    if (!tasks.length) continue;
-    const section = node('section', 'request-group');
-    section.dataset.sessionGroup = key;
-    const heading = node('h3', 'activity-group');
-    heading.append(node('span', null, label), node('span', 'activity-group-count', tasks.length));
-    section.append(heading, ...tasks);
-    sections.push(section);
-  }
-  return sections;
-}
-let activityBotId = null;
-let activitySeen = false;
-let activityReveal = null;
-let previousWaitsLoading = false;
-let previousSessionsLoading = false;
-function renderActivity() {
-  const data = view?.data;
-  const loading = !!view && !data;
-  const pending = view?.id ? decisions.pendingItemsFor(view.id) : [];
-  const inboxWaitIds = new Set(pending.filter((item) => item.waitId > 0).map((item) => item.waitId));
-  const problemWaitIds = new Set((data?.activeTasks ?? []).filter((task) => task.problem?.id > 0).map((task) => task.problem.id));
-  const extraWaits = (data?.waits ?? []).filter((task) => !inboxWaitIds.has(task.wait.id) && !problemWaitIds.has(task.wait.id));
-  if (changed('waits', view?.id, loading, pending, extraWaits)) {
-    const revealedWaits = previousWaitsLoading && !loading;
-    previousWaitsLoading = loading;
-    const waitCount = pending.length + extraWaits.length;
-    elements['wait-count'].textContent = waitCount;
-    elements['wait-count'].hidden = !waitCount;
-    elements['wait-list'].setAttribute('aria-busy', loading);
-    const rows = pending.map((item) => {
-      const status = pendingKindLabels[item.itemKind] ?? 'Needs you';
-      const title = item.itemKind === 'policy_approval' && item.action
-        ? [actionLabel(item.action), item.displayTarget ?? item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
-      const row = activityRow('button', 'wait-row', title, status, 'waiting');
-      row.type = 'button';
-      row.setAttribute('aria-description', item.itemKind === 'policy_approval' ? approvalSummary(item.prompt, item) || title : item.prompt || title);
-      row.addEventListener('click', () => {
-        openNavigation(false);
-        decisions.openItem(item, row);
-      });
-      return row;
-    });
-    for (const task of extraWaits) {
-      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
-      row.type = 'button';
-      row.setAttribute('aria-description', waitText(task.wait) || task.request);
-      row.addEventListener('click', () => {
-        openNavigation(false);
-        openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
-      });
-      rows.push(row);
-    }
-    elements['wait-list'].replaceChildren(...rows);
-    if (loading) elements['wait-list'].append(...skeletonRows(1));
-    else if (revealedWaits && rows.length) triggerRowReveal(elements['wait-list']);
-    elements['wait-list'].closest('section').hidden = !loading && !rows.length;
-  }
-  const history = [...(view?.loadedSessions.values() ?? [])];
-  const activeTasks = data?.activeTasks ?? [];
-  const parallelTasks = data?.parallelTasks ?? [];
-  const canStop = !!view?.composer;
-  const more = elements['more-sessions'];
-  more.hidden = !view?.sessionsBefore;
-  more.disabled = !!view?.loadingSessions;
-  if (changed('sessions', view?.id, loading, canStop, history, activeTasks, parallelTasks,
-    data?.compactions, dayFormat.format(Date.now()))) {
-    const revealedSessions = previousSessionsLoading && !loading;
-    previousSessionsLoading = loading;
-    const rows = requestGroups(history, activeTasks, parallelTasks, canStop);
-    const list = elements['session-list'];
-    const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
-    rows.push(...conversationSummaries(data?.compactions ?? [], open));
-    list.setAttribute('aria-busy', loading);
-    list.replaceChildren(...rows);
-    if (loading) list.append(...skeletonRows(2));
-    else if (revealedSessions && rows.length) triggerRowReveal(list);
-    list.closest('section').hidden = !loading && !rows.length && more.hidden;
-  }
-  const nextActivityBotId = view ? view.id : null;
-  if (nextActivityBotId !== activityBotId) {
-    const shouldReveal = activitySeen && !!nextActivityBotId;
-    activityBotId = nextActivityBotId;
-    if (nextActivityBotId) activitySeen = true;
-    activityReveal?.cancel();
-    activityReveal = null;
-    const panel = elements['bot-activity'];
-    if (shouldReveal && !panel.hidden && !reducedMotion.matches) {
-      activityReveal = panel.animate?.([
-        { opacity: 0, transform: 'translateY(6px)' },
-        { opacity: 1, transform: 'none' },
-      ], { duration: 190, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }) ?? null;
-    }
-  }
-}
-
-function beginReply(target, text = '') {
-  const composer = view?.composer;
-  if (!target.messageId || !composer || sendingMessages.has(composer)) return;
-  composer.openReply(target, text);
-  closeDetail();
-  renderComposer();
-  elements.message.focus();
-}
-const icons = {
-  person: '<circle cx="12" cy="8" r="3.25"/><path d="M5.25 19c.6-3.5 3.1-5.4 6.75-5.4s6.15 1.9 6.75 5.4"/>',
-  copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
-  copied: '<path d="m5.5 12.5 4 4 9-9"/>',
-  reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
-  resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
-  check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
-  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
-  open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
-};
-function icon(name, className = 'glyph') {
-  const host = node('span', className);
-  host.setAttribute('aria-hidden', 'true');
-  host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
-  return host;
-}
-function setMessageHtml(element, html) {
-  element.innerHTML = html;
-  for (const link of element.querySelectorAll('a[href]')) {
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-  }
-}
-function iconButton(name, label, click) {
-  const control = button(null, 'icon-button msg-action', click);
-  control.dataset.timelineAction = name;
-  control.setAttribute('aria-label', label);
-  control.dataset.tooltip = label;
-  control.append(icon(name));
-  return control;
-}
-async function copyMessage(control, text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    clearTimeout(control._copyTimer);
-    delete control.dataset.copied;
-    void control.offsetWidth;
-    control.dataset.copied = 'true';
-    control.replaceChildren(icon('copied'));
-    control.setAttribute('aria-label', 'Copied');
-    control.dataset.tooltip = 'Copied';
-    control._copyTimer = setTimeout(() => {
-      delete control.dataset.copied;
-      control.replaceChildren(icon('copy'));
-      control.setAttribute('aria-label', 'Copy text');
-      control.dataset.tooltip = 'Copy text';
-    }, 1600);
-  } catch { if (view) setNotice(view, 'Couldn’t copy the text.', true); }
-}
-function questionActions(context, task, { dialog = false } = {}) {
-  const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
-  const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  const choices = task.wait.choices;
-  const item = taskWaitDecision(context.id, task);
-  const busy = decisions.busy(item);
-  if (hasQuestionChoices(choices)) {
-    const { key, text, stale } = decisions.choice(item);
-    actions.append(questionChoiceForm({
-      key, prompt: target.summary, choices, dialog, answer: text, busy: busy || stale,
-      select: (answer) => decisions.selectChoice(item, answer),
-      submit: (answer) => void operate(context, task, 'answer', { text: answer }),
-    }));
-  }
-  const reply = questionReplyButton(() => {
-    if (view?.id === context.id) beginReply(target);
-  }, dialog);
-  reply.disabled = busy;
-  actions.append(reply);
-  return actions;
-}
-function readOnlyChoices(choices) {
-  const options = node('ul', 'read-only-choices');
-  for (const choice of choices) options.append(node('li', null, choice));
-  return options;
-}
-function nextSuggestion(context) {
-  const composer = context?.composer;
-  if (context?.data?.canDecide !== true || context.source || !composer) return null;
-  const composerBusy = sendingMessages.has(composer) || composition || decisions.composer() || composer.reply;
-  if (composerBusy || composer.textAt(0)) return null;
-  if (['working', 'thinking'].includes(context.data.presence)) return null;
-  let latest = null;
-  for (const event of context.events.values()) if (event.kind !== 'wait_closed' && (!latest || event.id > latest.id)) latest = event;
-  if (latest?.kind !== 'conversation_reply') return null;
-  const text = latest.data.suggestions?.[0];
-  if (typeof text !== 'string' || !text.trim()) return null;
-  const drafts = screenshotsFor(composer);
-  if ([0, latest.id].some((anchor) => {
-    const draft = drafts?.get(anchor);
-    return draft?.images.length || draft?.loading;
-  })) return null;
-  const replyDraft = composer.textAt(latest.id);
-  if (replyDraft && replyDraft !== text) return null;
-  return { text, target: { kind: 'message', messageId: latest.id, summary: latest.data.text } };
-}
-function suggestionActions(event) {
-  const actions = node('div', 'event-actions');
-  const target = { kind: 'message', messageId: event.id, summary: event.data.text };
-  for (const suggestion of event.data.suggestions)
-    actions.append(button(suggestion, 'button', () => beginReply(target, suggestion)));
-  return actions;
-}
-function channelLabel(kind) {
-  if (kind === 'slack') return 'via Slack';
-  if (kind === 'imessage') return 'via iMessage';
-  return 'via external channel';
-}
-function eventTime(event, extra) {
-  const timestamp = new Date(event.time * 1000);
-  const time = node('time', 'msg-time', clock.format(timestamp));
-  time.dateTime = timestamp.toISOString();
-  time.setAttribute('aria-description', [fullTime.format(timestamp), extra].filter(Boolean).join(' · '));
-  return time;
-}
-
-function chatTimeBreak(event) {
-  const separator = node('p', 'day chat-time-break');
-  separator.setAttribute('aria-hidden', 'true');
-  separator.append(eventTime(event));
-  return separator;
-}
-
-function messageBubble(target) {
-  if (!(target instanceof Element)) return null;
-  const bubble = target.closest('.event-message .bubble');
-  const control = target.closest('a, button, input, select, textarea, label, summary, [controls], '
-    + '[contenteditable]:not([contenteditable="false"]), [tabindex], [role="button"], [role="link"]');
-  return bubble?.contains(control) ? null : bubble;
-}
-
-function closeMessageTime() {
-  const context = view;
-  if (!context?.revealedTimeRow) return;
-  const row = byId(context.revealedTimeRow)?.closest('.event-message');
-  const time = row?.querySelector(':scope > .msg-time');
-  if (time) row.querySelector('.msg-actions').prepend(time);
-  context.revealedTimeRow = null;
-}
-
-let messageTap = null;
-const tapMoved = (event, tap) => Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 10;
-const hasTextSelection = () => window.getSelection()?.isCollapsed === false;
-
 // Observe the native click after a short, stationary press. Leave scrolling and selection to the browser.
 elements.timeline.addEventListener('pointerdown', (event) => {
   const bubble = noHover.matches && event.isPrimary && event.button === 0 && messageBubble(event.target);
-  messageTap = bubble && !hasTextSelection()
+  assignMessageTap(bubble && !hasTextSelection()
     ? { bubble, id: event.pointerId, x: event.clientX, y: event.clientY, start: event.timeStamp, released: false }
-    : null;
+    : null);
 }, { passive: true });
 elements.timeline.addEventListener('pointermove', (event) => {
-  if (messageTap?.id === event.pointerId && tapMoved(event, messageTap)) messageTap = null;
+  if (messageTap?.id === event.pointerId && tapMoved(event, messageTap)) assignMessageTap(null);
 }, { passive: true });
 elements.timeline.addEventListener('pointerup', (event) => {
   if (messageTap?.id !== event.pointerId) return;
-  if (tapMoved(event, messageTap) || event.timeStamp - messageTap.start >= 500) messageTap = null;
+  if (tapMoved(event, messageTap) || event.timeStamp - messageTap.start >= 500) assignMessageTap(null);
   else messageTap.released = true;
 }, { passive: true });
 for (const type of ['pointercancel', 'contextmenu']) {
-  elements.timeline.addEventListener(type, () => { messageTap = null; }, { passive: true });
+  elements.timeline.addEventListener(type, () => { assignMessageTap(null); }, { passive: true });
 }
 elements.timeline.addEventListener('click', (event) => {
   const tap = messageTap;
-  messageTap = null;
+  assignMessageTap(null);
   const context = view;
   if (!context || !noHover.matches || !tap?.released || !event.detail || hasTextSelection()
     || messageBubble(event.target) !== tap.bubble) return;
@@ -1186,1114 +260,9 @@ elements.timeline.addEventListener('click', (event) => {
   time.scrollIntoView({ block: 'nearest' });
 });
 noHover.addEventListener('change', () => {
-  messageTap = null;
+  assignMessageTap(null);
   if (!noHover.matches) closeMessageTime();
 });
-
-function conversationMessageRow(id) {
-  // A collapsed Session report can be an anchor inside the completion row.
-  return byId(`event-${id}`)?.closest('article');
-}
-function resetConversationJump(context) {
-  if (context) context.pendingSource = null;
-  elements['conversation-source-error'].textContent = '';
-}
-function leaveConversationSource(context) {
-  resetConversationJump(context);
-  if (!context.source) return false;
-  context.source = null;
-  readingPositions.delete(timelineKey(context.id));
-  return true;
-}
-function backToLatest() {
-  leaveConversationSource(view);
-  render('bottom');
-  elements.conversation.scrollTop = elements.conversation.scrollHeight;
-  elements.conversation.focus({ preventScroll: true });
-}
-function updateFindOverlap() {
-  const scroller = elements.conversation;
-  const overlap = findPanel.hidden ? 0 : findPanel.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top;
-  const previousOverlap = parseFloat(scroller.style.getPropertyValue('--find-overlap')) || 0;
-  if (previousOverlap !== overlap) {
-    const top = scroller.scrollTop;
-    const atBottom = scroller.scrollHeight - top - scroller.clientHeight <= 4;
-    const before = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
-    scroller.style.setProperty('--find-overlap', `${overlap}px`);
-    if (atBottom && !view?.source) scroller.scrollTop = scroller.scrollHeight;
-    else {
-      const after = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
-      scroller.scrollTop = top + after - before;
-    }
-  }
-  return overlap;
-}
-function focusConversationMessage(target) {
-  const row = target?.closest('article') ?? target;
-  if (!row) return;
-  // Scroll within the conversation and keep the message clear of the floating controls.
-  const scroller = elements.conversation;
-  updateFindOverlap();
-  const viewport = scroller.getBoundingClientRect();
-  const topSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
-  const returnSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockEnd) || 0;
-  const message = (row.querySelector('.bubble') ?? row).getBoundingClientRect();
-  const top = viewport.top + topSpace;
-  const bottom = viewport.bottom - returnSpace;
-  const center = top + Math.max(0, (bottom - top - message.height) / 2);
-  row.focus({ preventScroll: true });
-  const nextTop = Math.max(0, scroller.scrollTop + message.top - center);
-  if (typeof scroller.scrollTo === 'function') {
-    scroller.scrollTo({ top: nextTop, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
-  } else {
-    scroller.scrollTop = nextTop;
-  }
-}
-async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
-  if (context !== view || signal?.aborted) return;
-  resetConversationJump(context);
-  const error = elements['conversation-source-error'];
-  let target = preferLoaded ? conversationMessageRow(id) : null;
-  if (!target && preferLoaded && context.events.has(id)) {
-    if (leaveConversationSource(context)) {
-      renderTimeline();
-      renderComposer();
-    }
-    target = conversationMessageRow(id);
-  } else if (!target) {
-    // Only the newest jump in this conversation can apply its page.
-    const request = context.pendingSource = { id };
-    let page;
-    try {
-      page = await api(botQuery('conversation', context.id, id + 1), undefined, { signal });
-    } catch {}
-    if (context !== view || context.pendingSource !== request) return;
-    context.pendingSource = null;
-    if (signal?.aborted) return;
-    if (!page) {
-      error.textContent = 'Couldn’t load that message.';
-      return;
-    }
-    const event = page.events.find((item) => item.id === id);
-    if (!event || event.kind === 'wait_closed' || event.kind === 'bot_message') {
-      error.textContent = 'That message is no longer in this conversation.';
-      return;
-    }
-    if (!context.source) rememberReadingPosition(true);
-    context.source = { id, bot: bot ?? context.data.bot, events: page.events };
-    renderTimeline();
-    renderComposer();
-    target = conversationMessageRow(id);
-  }
-  if (!target) {
-    error.textContent = 'That message is no longer in this conversation.';
-    return;
-  }
-  unfoldMessageRow(target);
-  elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
-  void target.offsetWidth;
-  target.classList.add('conversation-source-target');
-  focusConversationMessage(target);
-  updateJumpToLatest();
-}
-function cardSourceAction(item, close) {
-  const id = item.conversationEventId;
-  if (!Number.isSafeInteger(id) || id <= 0 || id >= Number.MAX_SAFE_INTEGER) return null;
-  return button('Show in conversation', 'text-button board-inbox-source', () => {
-    close();
-    void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
-  });
-}
-// Rendered Markdown is block content, so an icon that belongs beside the words goes inside its first or last paragraph.
-function inlineEdge(text, last) {
-  const block = last ? text.lastElementChild : text.firstElementChild;
-  return text.classList.contains('markdown-body') && block?.tagName === 'P' ? block : text;
-}
-function setBody(text, html, plain) {
-  if (typeof html === 'string') {
-    text.classList.add('markdown-body');
-    setMessageHtml(text, html);
-  } else text.append(document.createTextNode(plain ?? ''));
-}
-function appendTrailingIcon(body, icon) {
-  const text = inlineEdge(body, true);
-  const last = text.lastChild;
-  const at = last?.nodeType === Node.TEXT_NODE ? last.data.trimEnd().search(/\S+$/) : -1;
-  // Long URLs and unspaced CJK text still need to wrap inside the bubble.
-  if (at >= 0 && last.data.trimEnd().length - at <= 24) {
-    const word = last.splitText(at);
-    const glued = node('span', 'trailing-icon');
-    glued.append(word, icon);
-    text.append(glued);
-  } else text.append(icon);
-}
-function runIcon(run) {
-  const link = linkToRun(run);
-  if (!link) return null;
-  link.className = 'run-link';
-  link.dataset.timelineAction = `run:${link.href}`;
-  link.dataset.tooltip = 'Open in T3';
-  link.setAttribute('aria-label', 'Open in T3');
-  link.replaceChildren(icon('open'));
-  return link;
-}
-function verificationLine(run, showLink) {
-  const status = Object.hasOwn(stateLabels, run.state) ? stateLabels[run.state] : run.state;
-  const line = node('p', 'event-reason', [run.name, status].filter(Boolean).join(' · '));
-  if (run.commit) line.append(' · ', node('code', null, run.commit));
-  if (showLink) {
-    const link = runIcon(run);
-    if (link) {
-      link.setAttribute('aria-label', `Open ${run.name} in T3`);
-      line.append(link);
-    }
-  }
-  return line;
-}
-
-function memoryUndo(event, context, status) {
-  const { data } = event;
-  const undo = button('Undo', 'text-button', async () => {
-    if (undo.getAttribute('aria-disabled') === 'true') return;
-    undo.setAttribute('aria-disabled', 'true');
-    status.textContent = 'Undoing…';
-    try {
-      await api('memory/revert', { botId: context.id, docId: data.docId, revisionId: data.revisionId, baseVersion: data.version });
-    } catch (error) {
-      if (error.status === 409) {
-        status.textContent = 'Memory has changed.';
-        if (context === view) void context.refresh();
-      } else {
-        status.textContent = 'Couldn’t undo. Try again.';
-        undo.removeAttribute('aria-disabled');
-      }
-      return;
-    }
-    const current = context.events.get(event.id);
-    if (current) context.events.set(event.id, { ...current, data: { ...current.data, canUndo: false, undone: true } });
-    if (context === view) {
-      renderTimeline();
-      void context.refresh();
-    }
-  });
-  undo.dataset.timelineAction = 'undo-memory';
-  return undo;
-}
-
-function memoryNotice(event, canUndo, context) {
-  const { data } = event;
-  const learned = event.kind === 'memory_learned';
-  const note = node('article', 'system-note memory-notice');
-  note.id = `event-${event.id}`;
-  note.tabIndex = -1;
-  const kind = learned ? 'Learned' : 'Remembered';
-  note.append(node('strong', null, data.undone ? 'Memory undone' : kind), ' · ',
-    learned ? data.added.map((fact) => `“${fact}”`).join(' · ') : data.text);
-  if (learned) {
-    const source = button(data.taskTitle || 'Source request', 'text-button', () => {
-      void showConversationMessage(context, data.requestEventId, { preferLoaded: true });
-    });
-    source.dataset.timelineAction = 'show-learning-source';
-    note.append(' · from ', source);
-  }
-  const stale = !!data.revisionId && !data.canUndo && !data.undone;
-  const status = node('span', 'memory-notice-status', stale ? 'Memory has changed.' : '');
-  status.setAttribute('role', 'status');
-  if (canUndo) note.append(' · ', memoryUndo(event, context, status));
-  if (learned && data.removed.length) {
-    note.append(node('p', 'memory-notice-removed', 'Replaced · ' + data.removed.map((fact) => `“${fact}”`).join(' · ')));
-  }
-  if (canUndo || stale) note.append(status);
-  return note;
-}
-
-function eventCard(event, context, place, report) {
-  const data = event.data;
-  const bot = context.bot;
-  const { side } = place;
-  if (event.kind === 'bot_setup_updated')
-    return setupNotice(event, !context.readOnly && bot?.canDelete, async () => {
-      const active = view;
-      await api('bots/setup/undo', { botId: bot.id, eventId: event.id });
-      const current = active.events.get(event.id);
-      if (current) active.events.set(event.id, { ...current, data: { ...current.data, undone: true } });
-      if (active === view) {
-        renderTimeline();
-        void active.refresh();
-        void refreshBots();
-      }
-    });
-  if (isMemoryNotice(event))
-    return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
-  if (data.botMessage) {
-    const note = node('article', 'system-note session-event', `From ${data.botMessage.fromName} · `);
-    note.id = `event-${event.id}`;
-    note.tabIndex = -1;
-    note.append(eventTime(event));
-    note.append(node('p', 'session-invitation-note', data.text ?? ''));
-    return note;
-  }
-  if (data.sessionWake || data.sessionInvitation) {
-    const session = data.sessionWake ?? data.sessionInvitation;
-    const name = `T3 thread “${session.title || session.threadId}”`;
-    const wakeText = {
-      finished: `Work finished in ${name}`,
-      failed: `Work stopped before finishing in ${name}`,
-      interrupted: `Work was interrupted in ${name}`,
-      waiting_for_person: `Work in ${name} needs your input`,
-      unknown: `Flock couldn’t check the status of work in ${name}`,
-      check_due: `Time to check on work in ${name}`,
-    };
-    const text = data.sessionWake
-      ? (Object.hasOwn(wakeText, session.reason) ? wakeText[session.reason] : wakeText.unknown)
-      : `Invited by ${session.inviterName} to ${name}`;
-    const note = node('article', 'system-note session-event', `${text} · `);
-    note.id = `event-${event.id}`;
-    note.tabIndex = -1;
-    note.append(eventTime(event));
-    if (session.sourceMessageId) {
-      const original = button('Original request', 'text-button', () => {
-        void showConversationMessage(view, session.sourceMessageId, { preferLoaded: true });
-      });
-      original.dataset.timelineAction = 'open-original';
-      note.append(' · ', original);
-    }
-    if (session.note) note.append(node('p', 'session-invitation-note', session.note));
-    return note;
-  }
-  if (side === 'system') {
-    const stopped = data.request ? `“${data.request.split('\n')[0]}” was stopped` : 'A request was stopped';
-    const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · ${stopped} · `);
-    note.id = `event-${event.id}`;
-    note.tabIndex = -1;
-    note.append(eventTime(event));
-    return note;
-  }
-  const row = node('article', `msg event-message ${side}`);
-  row.id = `event-${event.id}`;
-  row.tabIndex = -1;
-  if (report) {
-    const anchor = node('span');
-    anchor.id = `event-${report.id}`;
-    anchor.hidden = true;
-    row.append(anchor);
-  }
-  row.classList.toggle('group-start', place.groupStart);
-  row.classList.toggle('task-start', place.taskStart);
-  const trigger = event.kind === 'request' ? data.trigger : null;
-  let scheduled = '';
-  if (trigger?.targetTime) {
-    scheduled = trigger.occurrenceCount > 1
-      ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
-      : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
-  } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const author = side === 'external' ? 'Other sender' : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
-  const time = eventTime(event, scheduled);
-  row.append(node('span', 'msg-name sr-only', author));
-
-  const line = node('div', 'msg-line');
-  if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
-  else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
-  const bubble = node('div', 'bubble');
-  const text = node('div', 'event-text');
-  const actions = node('div', 'msg-actions');
-  actions.append(time);
-  const extras = [];
-  let quote = null;
-  let replyTarget = null;
-  let copy = data.text ?? '';
-  const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
-
-  if (event.kind === 'waiting') {
-    copy = waitText(data, { spokenByBot: true });
-    text.textContent = copy;
-    bubble.append(text);
-    const choices = pendingWait?.wait.choices ?? data.choices;
-    if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
-    if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
-    else if (pendingWait) {
-      if (pendingWait.wait.reason !== 'policy_approval') {
-        const open = node('div', 'event-actions question-actions');
-        const label = pendingActionLabels[pendingWait.wait.reason] ?? 'View request…';
-        open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
-        extras.push(open);
-      }
-    } else if (!context.readOnly || context.closed.has(data.id)) {
-      const resolution = node('p', 'msg-resolution');
-      resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
-      extras.push(resolution);
-      if (data.reason === 'user_question' && view.composer?.textAt(event.id)) {
-        extras.push(button('View reply draft', 'text-button', () => beginReply({
-          kind: 'wait', messageId: event.id, summary: copy,
-        })));
-      }
-    }
-  } else if (event.kind === 'conversation_reply') {
-    setBody(text, data.textHtml, data.text);
-    text.classList.add('foldable-text');
-    bubble.append(text);
-    if (data.suggestions?.length) {
-      if (context.canDecide) extras.push(suggestionActions(event));
-      else bubble.append(readOnlyChoices(data.suggestions));
-    }
-    replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
-  } else if (event.kind === 'report') {
-    copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
-      : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
-    setBody(text, copy === data.report ? data.textHtml : undefined, copy);
-    text.classList.add('foldable-text');
-    const link = runIcon(data.run);
-    if (link) appendTrailingIcon(text, link);
-    bubble.append(text);
-    if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
-    if (data.destination) {
-      bubble.append(verificationLine({name: data.destination, state: data.status, commit: data.commit}, false));
-    } else if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
-      const status = Object.hasOwn(stateLabels, data.status) ? stateLabels[data.status] : data.status;
-      bubble.append(node('p', 'event-reason', `Work ${status.toLowerCase()}`));
-    }
-    if ((data.evidenceStatus || data.destination) && data.detail) bubble.append(node('p', 'event-reason', data.detail));
-    if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
-  } else if (event.kind === 'completed') {
-    const outcome = data.runStatus;
-    setBody(text, data.textHtml, data.text);
-    const lead = inlineEdge(text, false);
-    if (outcome === 'completed') {
-      lead.prepend(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
-    } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
-      const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
-      lead.prepend(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Work ${stateLabels[outcome].toLowerCase()}: `));
-    }
-    const link = runIcon(data.run);
-    if (link) appendTrailingIcon(text, link);
-    bubble.append(text);
-    if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
-  } else {
-    setBody(text, data.textHtml, data.text);
-    if (trigger) inlineEdge(text, false).prepend(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
-    bubble.append(text);
-    text.classList.add('foldable-text');
-    if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
-      const count = data.imageAttachmentCount;
-      bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
-    }
-    if (event.kind === 'user_answer') {
-      const question = data.question;
-      if (question && !place.afterQuestion) {
-        quote = node('p', 'msg-quote');
-        quote.append(icon('reply'), node('span', null, question));
-        quote.dataset.tooltip = question;
-      }
-    }
-    if (event.kind === 'conversation_message' && place.replyQuote) {
-      quote = button(null, 'msg-quote msg-quote-link', () => {
-        void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
-      });
-      quote.dataset.timelineAction = 'open-original';
-      quote.setAttribute('aria-label', `Show the message this replies to: ${place.replyQuote}`);
-      quote.append(icon('reply'), node('span', null, place.replyQuote));
-      quote.dataset.tooltip = place.replyQuote;
-    }
-    if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
-    else if (event.id === context.latestWebMessageId && data.status === 'received')
-      extras.push(node('p', 'msg-note', 'Received'));
-    if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
-    if (['request', 'conversation_message'].includes(event.kind)) {
-      for (const run of context.parallelTasks.get(event.taskId) ?? []) {
-        bubble.append(verificationLine(run, true));
-        if (run.detail) bubble.append(node('p', 'event-reason', run.detail));
-      }
-    }
-    const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
-    if (blocker) {
-      const note = node('p', 'msg-note msg-queued');
-      if (blocker.request) {
-        note.append(icon('clock'), node('span', null, 'Queued after'), node('span', 'msg-queued-request', `“${blocker.request}”`));
-        note.setAttribute('aria-description', `Starts when “${blocker.request}” finishes`);
-      } else {
-        note.append(icon('clock'), node('span', null, 'Waiting for another Bot to finish in this project'));
-      }
-      extras.push(note);
-    }
-  }
-  for (const file of data.attachments ?? []) {
-    const link = node('a', 'button', file.name);
-    link.href = '/api/channels/attachments/' + encodeURIComponent(file.id);
-    link.download = file.name;
-    if (file.mimeType.startsWith('image/')) {
-      const preview = node('img', 'channel-image');
-      preview.src = link.href;
-      preview.alt = file.name;
-      preview.loading = 'lazy';
-      link.replaceChildren(preview);
-    }
-    extras.push(link);
-  }
-  for (const artifact of data.artifacts ?? []) {
-    const link = node('a', 'button', artifact.title);
-    link.href = '/api/artifacts/' + encodeURIComponent(artifact.id);
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    extras.push(link);
-  }
-  if (copy) {
-    const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
-    actions.append(control);
-  }
-
-  if (context.canDecide && replyTarget) {
-    const [label, target] = replyTarget;
-    actions.append(iconButton('reply', label, () => beginReply(target)));
-  }
-  if (!actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
-  line.append(bubble, actions);
-  row.append(...(quote ? [quote] : []), line, ...extras);
-  const revealed = context.revealedTimeRow;
-  if (noHover.matches && (revealed === row.id || (report && revealed === `event-${report.id}`))) line.after(time);
-  return row;
-}
-function syncTimelineAvatar(row, show, bot) {
-  const current = row.querySelector('.msg-line')?.firstElementChild;
-  if (show && current?.classList.contains('msg-avatar-space')) current.replaceWith(avatar(bot, 'msg-avatar'));
-  else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
-}
-const workingText = (data) => data.presence === 'working'
-  ? data.activeTasks?.find(task => task.state === 'running')?.request ?? stateLabels.working : stateLabels.thinking;
-// The working row stays mounted while the Bot works; only its status changes, sliding the old one out.
-function workingLine(bot) {
-  const row = node('div', 'msg bot working group-start');
-  const line = node('div', 'msg-line');
-  const dots = node('span', 'typing');
-  dots.setAttribute('aria-hidden', 'true');
-  dots.append(node('span'), node('span'), node('span'));
-  const status = node('span', 'working-status');
-  line.append(avatar(bot, 'msg-avatar'), dots, status);
-  row.append(line);
-  return row;
-}
-function setWorkingText(row, label) {
-  const status = row.querySelector('.working-status');
-  const current = status.querySelector('.working-label:not(.leaving)');
-  if (current?.textContent === label) return;
-  status.querySelector('.working-label.leaving')?.remove();
-  const next = node('span', 'working-label', label);
-  next.dataset.tooltip = label;
-  if (current && !reducedMotion.matches) {
-    current.setAttribute('aria-hidden', 'true');
-    current.classList.add('leaving');
-    next.classList.add('entering');
-    const removeLeaving = ({ animationName }) => {
-      if (animationName === 'working-label-out') current.remove();
-    };
-    const clearEntering = ({ animationName }) => {
-      if (animationName !== 'working-label-in') return;
-      next.classList.remove('entering');
-      next.removeEventListener('animationend', clearEntering);
-      next.removeEventListener('animationcancel', clearEntering);
-    };
-    current.addEventListener('animationend', removeLeaving);
-    current.addEventListener('animationcancel', removeLeaving);
-    next.addEventListener('animationend', clearEntering);
-    next.addEventListener('animationcancel', clearEntering);
-  } else current?.remove();
-  status.append(next);
-}
-function startedLabel(timestamp) {
-  const day = dayLabel(timestamp / 1000);
-  return day === 'Today' ? clock.format(timestamp) : day === 'Yesterday' ? day : shortDay.format(timestamp);
-}
-function dayLabel(seconds) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const days = Math.round((today - new Date(seconds * 1000).setHours(0, 0, 0, 0)) / 86400000);
-  return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
-}
-
-function timelineScrollPosition() {
-  const scroller = elements.conversation;
-  const height = scroller.scrollHeight;
-  const top = scroller.scrollTop;
-  return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
-}
-
-function timelineAtEnd(scroller, viewportHeight = scroller.clientHeight) {
-  return scroller.scrollHeight - scroller.scrollTop - viewportHeight <= 4;
-}
-
-function rememberReadingPosition(keepAtBottom = false) {
-  if (view?.source) return;
-  const context = view;
-  if (context?.newestEvent == null || context.anchor || !context.data) return;
-  const { top, atBottom } = timelineScrollPosition();
-  if (atBottom && !keepAtBottom) return;
-  const viewportTop = elements.conversation.getBoundingClientRect().top;
-  const anchors = elements.timeline.querySelectorAll(':scope > [id]');
-  const anchor = [...anchors].find((row) => row.getBoundingClientRect().bottom > viewportTop);
-  const { events, olderBefore, newestEvent } = context;
-  readingPositions.set(timelineKey(context.id), {
-    // Retain loaded pages so an older message is available when its conversation reopens.
-    history: { events, olderBefore, newestEvent, historyCursor: context.data?.historyCursor },
-    top, atBottom,
-    anchorId: anchor?.id,
-    offset: anchor ? anchor.getBoundingClientRect().top - viewportTop : 0,
-  });
-}
-
-function restoreReadingPosition(position) {
-  const scroller = elements.conversation;
-  if (position.atBottom) {
-    scroller.scrollTop = scroller.scrollHeight;
-    return;
-  }
-  const row = position.anchorId ? byId(position.anchorId) : null;
-  const anchor = row?.closest('article') ?? row;
-  scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
-    scroller.getBoundingClientRect().top - position.offset : position.top;
-}
-
-function eventHistoryForRefresh(context) {
-  // Reopen saved pages only after a successful read of the current conversation.
-  if (context.newestEvent != null) return context;
-  const cached = readingPositions.get(timelineKey(context.id));
-  return cached ? { ...cached.history } : context;
-}
-
-function updateJumpToLatest() {
-  const scroller = elements.conversation;
-  const frame = scroller.parentElement;
-  const { height, top, atBottom } = timelineScrollPosition();
-  frame.toggleAttribute('data-history-above', top > 1);
-  frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
-  const control = elements['jump-to-latest'];
-  // An explicitly opened history page is separate from the latest messages.
-  const hidden = !view?.source && atBottom;
-  if (control.hidden === hidden) return;
-  if (hidden && document.activeElement === control) scroller.focus({ preventScroll: true });
-  control.hidden = hidden;
-}
-
-function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
-  const older = elements.older;
-  const source = view?.source;
-  const data = source ? null : view?.data;
-  const context = view;
-  const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
-  elements.conversation.classList.toggle('viewing-source', !!source);
-  older.hidden = !!source || !context?.olderBefore;
-  older.disabled = !!context?.loadingOlder;
-  const olderLabel = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
-  if (older.textContent !== olderLabel) older.textContent = olderLabel;
-  const scroller = elements.conversation;
-  const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id);
-  const position = !source && key && readingPositions.get(key);
-  const moveScroll = () => {
-    if (scroll === 'anchor') focusConversationMessage(byId(`event-${context.anchorId}`));
-    else if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
-    else if (position) {
-      restoreReadingPosition(position);
-      // The restored offset already includes the returning composer's height.
-      timelineHeight = scroller.clientHeight;
-      timelineWidth = scroller.clientWidth;
-      scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
-      readingPositions.delete(key);
-    } else if (scroll === 'bottom' || (!context?.anchor && previousScroll.atBottom)) scroller.scrollTop = scroller.scrollHeight;
-    else scroller.scrollTop = previousScroll.top;
-    updateJumpToLatest();
-  };
-  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
-    decisions.pendingKeys(), listLoaded, data?.presence, data?.activeTasks, data?.parallelTasks, data?.sessionTasks,
-    bots, dayFormat.format(Date.now()),
-    decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
-    scroller.setAttribute('aria-label', 'Conversation history');
-    const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
-    syncMessageFolding(added);
-    moveScroll();
-    if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
-      const pending = context.pendingViewMotion;
-      context.pendingViewMotion = null;
-      animateTimelineContent(pending);
-    }
-  }
-  const motionAllowed = !source && !document.hidden && !reducedMotion.matches && !document.querySelector('dialog[open]');
-  const canAnimate = motionAllowed && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom;
-  if (canAnimate) {
-    const id = replyArrivalId(events, liveAfterId);
-    if (id != null) animateLiveReply(id);
-  }
-  const sentAfterId = context?.pendingSentAfterId;
-  const messageAfterId = canAnimate ? liveAfterId : (sentAfterId != null ? sentAfterId : null);
-  if (messageAfterId != null) {
-    const addedMessages = events.filter((event) => event.id > messageAfterId &&
-      event.kind === 'conversation_message' && messageSide(event) !== 'system');
-    if (addedMessages.length > 0) {
-      if (motionAllowed && addedMessages.length <= 2) {
-        for (const event of addedMessages) animateSentMessage(event.id);
-      }
-      if (sentAfterId != null) context.pendingSentAfterId = null;
-    }
-  }
-}
-
-// Like ChatGPT, fold any very long message to its first lines behind Show more.
-const foldLines = 12;
-const unfoldedMessages = new Set();
-function setBubbleFold(bubble, toggle, folded) {
-  bubble.dataset.fold = folded ? 'folded' : 'unfolded';
-  toggle.textContent = folded ? 'Show more' : 'Show less';
-  toggle.setAttribute('aria-expanded', String(!folded));
-}
-function unfoldMessageRow(row) {
-  const bubble = row?.querySelector('.bubble[data-fold="folded"]');
-  if (!bubble) return;
-  const text = bubble.querySelector('.foldable-text');
-  const toggle = text?.nextElementSibling?.classList.contains('fold-toggle') ? text.nextElementSibling : null;
-  if (text) {
-    cancelMotion(text);
-    text.style.overflow = '';
-  }
-  if (toggle) setBubbleFold(bubble, toggle, false);
-  else bubble.dataset.fold = 'unfolded';
-  if (row.id) unfoldedMessages.add(row.id);
-}
-function syncMessageFolding(rows) {
-  const entries = rows.flatMap((row) => [...row.querySelectorAll('.foldable-text')].map((text) => ({
-    text,
-    bubble: text.closest('.bubble'),
-    id: text.closest('.event-message')?.id,
-    existing: text.nextElementSibling?.classList.contains('fold-toggle') ? text.nextElementSibling : null,
-  })));
-  // Inserting or removing a toggle invalidates layout. Measure all candidates before changing any row.
-  const shouldFold = entries.map(({ text }) => {
-    const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-    return Number.isFinite(lineHeight) && text.scrollHeight > lineHeight * (foldLines + 2);
-  });
-  entries.forEach(({ text, bubble, id, existing }, index) => {
-    if (!bubble) return;
-    if (!shouldFold[index]) {
-      if (existing) existing.remove();
-      delete bubble.dataset.fold;
-      cancelMotion(text);
-      text.style.overflow = '';
-      return;
-    }
-    if (existing) {
-      setBubbleFold(bubble, existing, !unfoldedMessages.has(id));
-      return;
-    }
-    const toggle = button(null, 'fold-toggle', () => {
-      const nextFolded = bubble.dataset.fold !== 'folded';
-      const startHeight = text.getBoundingClientRect().height;
-      cancelMotion(text);
-      setBubbleFold(bubble, toggle, nextFolded);
-      if (nextFolded) unfoldedMessages.delete(id);
-      else unfoldedMessages.add(id);
-      const endHeight = nextFolded ? text.getBoundingClientRect().height : text.scrollHeight;
-      if (!reducedMotion.matches && text.animate && Math.abs(endHeight - startHeight) > 1) {
-        text.style.overflow = 'hidden';
-        const duration = Math.min(340, Math.max(200, Math.round(180 + Math.abs(endHeight - startHeight) * 0.18)));
-        const anim = runMotion(text, [
-          { maxHeight: `${startHeight}px` },
-          { maxHeight: `${endHeight}px` },
-        ], { duration, easing: motionEaseOut });
-        if (anim) {
-          const cleanup = () => {
-            if (!motionAnimations.has(text)) text.style.overflow = '';
-          };
-          anim.addEventListener('finish', () => {
-            cleanup();
-            if (nextFolded) bubble.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-          }, { once: true });
-          anim.addEventListener('cancel', cleanup, { once: true });
-          return;
-        }
-        text.style.overflow = '';
-      }
-      if (nextFolded) bubble.scrollIntoView({ block: 'nearest' });
-    });
-    text.after(toggle);
-    setBubbleFold(bubble, toggle, !unfoldedMessages.has(id));
-  });
-}
-
-function conversationRows(data, events, keep, source) {
-  const timeline = {
-    bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
-    // Source lookups do not establish the latest message in the live conversation.
-    latestWebMessageId: data && !source ? events.findLast((event) =>
-      event.kind === 'conversation_message' && !event.data.channel?.channelKind && messageSide(event) === 'user')?.id : undefined,
-    // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
-    canDecide: !source && !!view?.composer,
-    readOnly: !!source,
-    revealedTimeRow: view?.revealedTimeRow,
-    waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
-    queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
-    parallelTasks: new Map((data?.parallelTasks ?? []).map((task) => [task.id, task.runs])),
-    closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
-  };
-  const bot = timeline.bot;
-  const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
-  const approvals = source ? [] : decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval' &&
-    (item.status !== 'pending' || !timeline.closed.has(item.waitId)));
-  const pendingByWait = new Map(approvals.filter(item => item.status === 'pending').map(item => [item.waitId, item]));
-  const replacements = new Map();
-  const anchoredToWait = new Set();
-  for (const event of events) {
-    if (event.kind !== 'waiting' || event.data.reason !== 'policy_approval') continue;
-    const item = pendingByWait.get(event.data.id);
-    if (item && item.taskId === event.taskId) {
-      replacements.set(event.id, item);
-      anchoredToWait.add(item.itemId);
-    }
-  }
-  const shown = timelineMessages(orderSetupNotices(events), dayLabel);
-  const eventsById = new Map(events.map((event) => [event.id, event]));
-  const rows = [];
-  let day = '';
-  let previous = null;
-  let previousReport = null;
-  shown.forEach(({ event, report }, index) => {
-    const eventDay = dayLabel(event.time);
-    if (eventDay !== day) {
-      rows.push(keep(`day-${event.id}`, eventDay, () => node('p', 'day', eventDay)));
-      day = eventDay;
-      previous = previousReport = null;
-    }
-    const place = messagePlacement(previous, event, shown[index + 1]?.event);
-    const replyId = event.kind === 'conversation_message' ? event.data.replyToMessageId : 0;
-    place.replyQuote = replyId && ![previous?.id, previousReport?.id].includes(replyId) ? quotedText(eventsById.get(replyId)) : null;
-    if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
-    const approval = replacements.get(event.id);
-    if (approval) {
-      rows.push(keep(`event-${event.id}`, ['approval', approval, decisions.busy(approval)], () => {
-        const card = decisions.inlinePolicyCard(approval);
-        card.id = `event-${event.id}`;
-        card.tabIndex = -1;
-        return card;
-      }));
-      previous = event;
-      previousReport = null;
-      return;
-    }
-    const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
-    const waitDecision = wait && taskWaitDecision(view.id, wait);
-    const request = ['request', 'conversation_message'].includes(event.kind);
-    const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
-    const row = keep(`event-${report?.id ?? event.id}`,
-      [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
-        place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
-        event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
-        waitDecision && decisions.busy(waitDecision),
-        wait?.wait.reason === 'user_question' && decisions.choice(waitDecision), blocker,
-        request ? timeline.parallelTasks.get(event.taskId) : null,
-        isSystemNotice(event) && bot?.canDelete,
-        event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report));
-    if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
-    row.classList.toggle('group-continues', !place.groupEnd);
-    row.classList.toggle('conversation-source-target', event.id === source?.id);
-    rows.push(row);
-    for (const item of approvals) {
-      if (!anchoredToWait.has(item.itemId) && item.conversationEventId === event.id)
-        rows.push(keep(`policy-${item.itemId}`, [item, decisions.busy(item)], () => decisions.inlinePolicyCard(item)));
-    }
-    previous = event;
-    previousReport = report;
-  });
-  // A new chat stays blank: the header already shows the Bot's avatar and name.
-  if (!rows.length && !data) {
-    const loaded = !view && listLoaded;
-    rows.push(keep('empty', [loaded, !bots.length], () => {
-      const empty = node('div', 'empty-state');
-      if (loaded && !bots.length) {
-        empty.classList.add('first-run');
-        const flock = node('div', 'first-run-flock');
-        flock.setAttribute('aria-hidden', 'true');
-        for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
-        empty.append(flock, node('h2', null, 'Create your first Bot'),
-          node('p', null, 'A Bot takes your requests, gets the work done and reports back here.'),
-          button('New Bot', 'button primary', () => openNewBot(elements['new-bot-button'])));
-      } else {
-        empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
-      }
-      return empty;
-    }));
-  }
-  if (data && !data.bot.paused && (data.presence === 'working' || data.presence === 'thinking')) {
-    const row = keep('working', botVersion, () => workingLine(bot));
-    setWorkingText(row, workingText(data));
-    rows.push(row);
-  }
-  return rows;
-}
-
-function setNotice(context, text, isError = false, { quiet = false } = {}) {
-  notices.set(context.id, { text, isError, quiet });
-  if (showingComposer(context.id)) renderComposer();
-}
-const composerLimit = (limits, reply, decision) =>
-  decision || reply?.kind === 'wait' ? limits.waitAnswerBytes : limits.messageBytes;
-const screenshotAnchor = (reply) => reply?.messageId ?? 0;
-const screenshotsFor = (composer) => screenshotDrafts.get(composer);
-let pickerTarget = null;
-let renderedScreenshots = null;
-
-function clearScreenshots(composer, reply) {
-  const drafts = screenshotsFor(composer);
-  const anchor = screenshotAnchor(reply);
-  const draft = drafts?.get(anchor);
-  drafts?.delete(anchor);
-  for (const image of draft?.images ?? []) URL.revokeObjectURL(image.preview);
-}
-
-async function addScreenshots(context, composer, reply, files) {
-  const anchor = screenshotAnchor(reply);
-  const isCurrent = () => view === context && context.composer === composer && context.data.canDecide === true &&
-    !decisions.composer() && screenshotAnchor(composer.reply) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
-  if (!files.length || !composer || !isCurrent()) return;
-  let drafts = screenshotsFor(composer);
-  if (!drafts) screenshotDrafts.set(composer, drafts = new Map());
-  const draft = drafts.get(anchor) ?? { images: [] };
-  if (draft.loading) return;
-  drafts.set(anchor, draft);
-  draft.loading = true;
-  draft.error = '';
-  notices.delete(context.id);
-  renderComposer();
-  try { await stageScreenshots(draft, files, context.data.limits.attachments, isCurrent); }
-  finally {
-    draft.loading = false;
-    if (showingComposer(context.id)) renderComposer();
-  }
-}
-
-function renderScreenshots(draft, disabled) {
-  const list = elements['screenshot-previews'];
-  const images = draft?.images ?? null;
-  if (renderedScreenshots !== images) {
-    renderedScreenshots = images;
-    list.replaceChildren(...(images ?? []).map((image, index) => {
-      const item = node('li', 'screenshot-preview');
-      const preview = node('img');
-      preview.alt = image.attachment.name;
-      preview.dataset.tooltip = image.attachment.name;
-      preview.src = image.preview;
-      const remove = button('×', 'icon-button remove-screenshot', () => {
-        const hadFocus = document.activeElement === remove;
-        URL.revokeObjectURL(image.preview);
-        draft.images = draft.images.filter((entry) => entry !== image);
-        draft.error = '';
-        renderComposer();
-        if (hadFocus) {
-          const buttons = list.querySelectorAll('button');
-          const next = buttons[Math.min(index, buttons.length - 1)] ?? elements['attach-screenshots'];
-          (next.disabled ? elements.message : next).focus();
-        }
-      });
-      remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
-      remove.dataset.tooltip = 'Remove image';
-      remove.dataset.tooltip = `Remove ${image.attachment.name}`;
-      item.append(preview, remove);
-      return item;
-    }));
-  }
-  list.hidden = !images?.length;
-  for (const button of list.querySelectorAll('button')) button.disabled = disabled;
-}
-
-const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
-  !context.data.waits.some((task) => task.wait.messageId === reply.messageId);
-let composition = null;
-function scheduleNoticeFade(context, notice) {
-  const bot = context.id;
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || decisions.pendingForBot(bot)) return;
-  notice.timer = setTimeout(() => {
-    notice.timer = null;
-    if (notices.get(bot) !== notice || !showingComposer(bot)) return;
-    notice.fading = true;
-    renderComposer();
-    setTimeout(() => {
-      if (notices.get(bot) !== notice) return;
-      notices.delete(bot);
-      if (showingComposer(bot)) renderComposer();
-    }, 400);
-  }, 3600);
-}
-function fitMessage() {
-  const field = elements.message;
-  if (!field.offsetParent) return;
-  const scroller = elements.conversation;
-  const atBottom = timelineAtEnd(scroller);
-  field.style.height = 'auto';
-  field.style.height = `${field.scrollHeight}px`;
-  // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
-  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
-}
-
-function renderComposerCopy({ data, events }, target, inboxReply, suggestion) {
-  const answering = target?.kind === 'wait';
-  const working = ['working', 'thinking'].includes(data.presence);
-  const fieldLabel = answering ? 'Write your answer' :
-    target ? 'Write a reply' : 'Message';
-  elements['decision-reply-context'].hidden = !inboxReply;
-  elements['reply-context'].hidden = !target || inboxReply;
-  elements['compose-label'].textContent = fieldLabel;
-  elements.message.placeholder = suggestion ? `${suggestion.text} (press Enter to use this suggestion)` :
-    target ? fieldLabel : working ? `Guide ${data.bot.name} while it works` : `Message ${data.bot.name}`;
-  const sendLabel = answering ? 'Send answer' : target ? 'Send reply' : 'Send message';
-  elements.send.setAttribute('aria-label', sendLabel);
-  elements.send.dataset.tooltip = sendLabel;
-
-  const summaryId = inboxReply ? 'decision-reply-target' : 'reply-summary';
-  elements.message.setAttribute('aria-describedby', target ? `${summaryId} notice` : 'notice');
-  if (!target) return;
-
-  let summary = target.summary;
-  if (!summary && target.messageId) {
-    const source = events.get(target.messageId)?.data;
-    if (source) summary = answering ? waitText(source) : reviewing ? source.title : source.report ?? source.text;
-  }
-  elements[inboxReply ? 'decision-reply-label' : 'reply-label'].textContent = answering ? 'Answering' : 'Replying to';
-  elements[summaryId].textContent = summary || (answering ? waitLabel('user_question') : 'Earlier message');
-}
-
-function renderComposer() {
-  const context = view;
-  const readOnly = context?.data?.canDecide === false;
-  const bot = context?.data?.bot;
-  const paused = !!bot?.paused;
-  const needsModel = !!bot && !paused && !readOnly && !bot.model;
-  const banner = paused ? 'paused' : needsModel ? 'setup' : null;
-  const available = !!context?.data && (!!context.composer || readOnly || !!banner);
-  const canDecide = available && !!context.composer && !banner;
-  const wasComposing = elements.composer.contains(document.activeElement);
-  const action = elements['composer-banner-action'];
-  const canAct = !!banner && bot.canDelete === true;
-  elements['composer-banner'].hidden = !banner;
-  elements['composer-banner'].dataset.state = banner ?? '';
-  action.hidden = !canAct;
-  action.textContent = banner === 'setup' ? 'Choose a model' : 'Resume';
-  const title = banner === 'paused' ? `${bot.name} is paused` : banner === 'setup' ? `${bot.name} isn’t set up yet` : '';
-  if (elements['composer-banner-title'].textContent !== title) elements['composer-banner-title'].textContent = title;
-  const bannerDescription = elements['composer-banner-description'];
-  const description = banner === 'paused' ? context.resumeError ||
-      (canAct ? 'Resume to send a message.' : 'The Bot’s owner or a Flock administrator can resume it.')
-    : banner === 'setup' ? (canAct ? 'Choose a model so this Bot can reply.' : 'The Bot’s owner or a Flock administrator can set it up.')
-    : '';
-  if (bannerDescription.textContent !== description) bannerDescription.textContent = description;
-  bannerDescription.classList.toggle('error', paused && !!context.resumeError);
-  elements['composer-container'].hidden = !available;
-  elements.composer.hidden = !canDecide;
-  elements['view-only-notice'].hidden = !available || !!banner || canDecide;
-  if (banner && wasComposing) (canAct ? action : headerFocusTarget()).focus({ preventScroll: true });
-  const decision = canDecide ? decisions.composer() : null;
-  if (!canDecide) {
-    dragDepth = 0;
-    elements.composer.classList.remove('dragover');
-    composition = null;
-    elements['composer-ghost'].hidden = true;
-    elements.message.classList.remove('has-ghost');
-    elements.message.value = '';
-    elements.message.readOnly = true;
-    elements.send.disabled = true;
-    return renderScreenshots(null, true);
-  }
-  const { composer } = context;
-  const reply = decision ? null : composer.reply;
-  const anchor = decision?.key ?? reply?.messageId;
-  if (composition && (composition.composer !== composer || composition.anchor !== anchor)) composition = null;
-  const screenshots = decision ? null : screenshotsFor(composer)?.get(screenshotAnchor(reply));
-  const notice = notices.get(context.id);
-  const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
-  const busy = !!decision?.busy || sendingMessages.has(composer);
-  const closedReply = closedQuestion(context, reply);
-  elements['cancel-reply'].disabled = busy;
-  const suggestion = nextSuggestion(context);
-  const target = decision ? { kind: 'wait', summary: decision.item.prompt?.trim() } : reply;
-  renderComposerCopy(context, target, !!decision, suggestion);
-  const ghost = elements['composer-ghost'];
-  ghost.hidden = !suggestion;
-  ghost.firstElementChild.textContent = suggestion?.text ?? '';
-  elements.message.classList.toggle('has-ghost', !!suggestion);
-  if (!composition && elements.message.value !== body) {
-    elements.message.value = body;
-    fitMessage();
-  }
-  elements.message.readOnly = busy || closedReply;
-  elements['attach-screenshots'].hidden = !!decision;
-  elements['attach-screenshots'].disabled = !!decision || busy || closedReply;
-  elements['attach-screenshots'].setAttribute('aria-disabled', String(!!screenshots?.loading));
-  renderScreenshots(screenshots, busy || !!screenshots?.loading);
-  elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
-    !body.trim() || byteLength(body) > composerLimit(context.data.limits, reply, decision);
-  elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  const screenshotError = !busy && !closedReply && screenshots?.error;
-  const needsMessageForImages = !busy && !closedReply && !screenshotError && !notice?.text &&
-    !body.trim() && (screenshots?.images?.length ?? 0) > 0 && !screenshots?.loading;
-  elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? 'This question is closed. You can still copy your reply.' :
-      screenshotError || notice?.text || (needsMessageForImages ? 'Add a message to send images.' : ''));
-  elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
-  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.fading);
-  elements.notice.classList.toggle('sr-only', !closedReply && !screenshotError && !needsMessageForImages && !!notice?.quiet);
-  scheduleNoticeFade(context, notice);
-}
-
-const detailNav = byId('detail-nav');
-const settingsSections = {
-  general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  memory: ['Memory', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M9 9h6m-6 4h6m-6 4h3"/></svg>'],
-  recurring: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
-};
-const settingsTabs = Object.keys(settingsSections);
-const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
-let detailAvatar = null;
-let detailRole = null;
-let detailWorkspace = null;
-let detailSetup = null;
-let detailOrigin = null;
-let recurringRequests = null;
-
-function releaseDetailAvatar() {
-  detailAvatar?.handle?.destroy();
-  detailAvatar = null;
-}
-function releaseDetailRole() {
-  detailRole?.dispose();
-  detailRole = null;
-}
-let detailSectionTimer = 0;
-function clearDetailSectionTransition() {
-  clearTimeout(detailSectionTimer);
-  detailSectionTimer = 0;
-  elements['detail-body'].classList.remove('section-switching');
-}
-function setDetail(selection) {
-  releaseDetailRole();
-  detailWorkspace = null;
-  detailSetup = null;
-  recurringRequests?.close();
-  recurringRequests = selection?.kind === 'settings' ? createRecurringRequests(view.id, api) : null;
-  detail = selection;
-}
-function closeDetail() {
-  setDetail(null);
-  clearDetailSectionTransition();
-  releaseDetailAvatar();
-  if (elements.detail.open) elements.detail.close();
-}
-function openDetail(selection) {
-  if (!view?.data) return;
-  decisions.close({ focus: false });
-  clearDetailSectionTransition();
-  setDetail(selection.kind === 'settings' ? { section: 'general', ...selection } : selection);
-  signatures.delete('detail');
-  renderDetail();
-  if (elements.detail.open) return;
-  detailOrigin = document.activeElement;
-  elements.detail.showModal();
-  if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
-}
 elements.detail.addEventListener('cancel', (event) => {
   const keep = elements.detail.querySelector('.wait-stop-keep');
   if (!keep || keep.disabled) return;
@@ -2306,66 +275,10 @@ elements.detail.addEventListener('close', () => {
   clearDetailSectionTransition();
   releaseDetailAvatar();
   const origin = detailOrigin;
-  detailOrigin = null;
+  assignDetailOrigin(null);
   const active = document.activeElement;
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
-
-function selectSection(section, focus = false) {
-  if (detail?.kind !== 'settings' || detail.section === section) return;
-  detail.section = section;
-  renderDetail();
-  const body = elements['detail-body'];
-  body.scrollTop = 0;
-  clearDetailSectionTransition();
-  if (!reducedMotion.matches) {
-    void body.offsetWidth;
-    body.classList.add('section-switching');
-    detailSectionTimer = setTimeout(() => {
-      body.classList.remove('section-switching');
-      detailSectionTimer = 0;
-    }, 220);
-  }
-  if (focus) byId(`detail-tab-${section}`)?.focus();
-}
-function renderDetailNav(sections, current) {
-  const body = elements['detail-body'];
-  elements.detail.classList.toggle('has-nav', sections.length > 1);
-  detailNav.hidden = sections.length < 2;
-  if (detailNav.hidden) {
-    body.removeAttribute('role');
-    body.removeAttribute('aria-labelledby');
-    return;
-  }
-  if (changed('detail-nav', sections)) {
-    detailNav.replaceChildren(...sections.map((section) => {
-      const [label, icon] = settingsSections[section];
-      const tab = button(null, 'detail-tab', () => selectSection(section));
-      tab.id = `detail-tab-${section}`;
-      tab.dataset.section = section;
-      tab.setAttribute('role', 'tab');
-      tab.setAttribute('aria-controls', 'detail-body');
-      tab.innerHTML = icon;
-      tab.append(node('span', null, label));
-      return tab;
-    }));
-  }
-  const recurringTab = detailNav.querySelector('[data-section="recurring"]');
-  if (recurringTab && recurringRequests && !recurringTab.contains(recurringRequests.count)) {
-    recurringTab.querySelector('.detail-tab-count')?.remove();
-    const count = node('span', 'detail-tab-count');
-    count.append(recurringRequests.count);
-    recurringTab.append(count);
-  }
-  detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
-  for (const tab of detailNav.children) {
-    const selected = tab.dataset.section === current;
-    tab.setAttribute('aria-selected', selected);
-    tab.tabIndex = selected ? 0 : -1;
-  }
-  body.setAttribute('role', 'tabpanel');
-  body.setAttribute('aria-labelledby', `detail-tab-${current}`);
-}
 detailNav.addEventListener('keydown', (event) => {
   const tabs = [...detailNav.children];
   const index = tabs.indexOf(document.activeElement);
@@ -2377,67 +290,20 @@ detailNav.addEventListener('keydown', (event) => {
   selectSection(tabs[(next + tabs.length) % tabs.length].dataset.section, true);
 });
 
-function settingsRow(label, value, click) {
-  const row = click ? button(null, 'settings-row', click) : node('div', 'settings-row');
-  row.append(node('span', 'settings-row-label', label), node('span', 'settings-row-value', value));
-  if (click) row.insertAdjacentHTML('beforeend', chevron);
-  return row;
-}
-function pullRequestSetting(bot) {
-  const row = node('label', 'settings-row');
-  const label = node('span', 'settings-row-label', 'Fix failing checks and review feedback on its pull requests');
-  const toggle = node('input', 'settings-row-switch');
-  const feedback = node('span', 'settings-card-feedback error');
-  feedback.setAttribute('role', 'status');
-  toggle.type = 'checkbox';
-  toggle.setAttribute('role', 'switch');
-  toggle.checked = bot.fixPullRequests;
-  toggle.disabled = !bot.canDelete;
-  toggle.addEventListener('change', async () => {
-    const fixPullRequests = toggle.checked;
-    toggle.disabled = true;
-    feedback.textContent = '';
-    try {
-      const saved = await api('bots/profile', { botId: bot.id, fixPullRequests });
-      toggle.checked = saved.fixPullRequests;
-      if (view?.id === bot.id) void view.refresh();
-    } catch {
-      toggle.checked = !fixPullRequests;
-      feedback.textContent = 'Couldn’t save this change. Try again.';
-    } finally {
-      toggle.disabled = false;
-    }
-  });
-  label.append(feedback);
-  row.append(label, toggle);
-  return row;
-}
-let reopenSettingsOnClose = false;
-let finishingBotEditor = false;
-let notificationDestination;
-
-function followNotification() {
-  if (!notificationDestination || finishingBotEditor || elements['bot-editor'].open) return false;
-  const botId = notificationDestination;
-  notificationDestination = null;
-  selectBot(botId);
-  return true;
-}
-
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
   onDraft(draft) {
-    botDraft = draft;
+    assignBotDraft(draft);
     renderBots();
   },
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
-    reopenSettingsOnClose = false;
-    finishingBotEditor = true;
+    assignReopenSettingsOnClose(false);
+    assignFinishingBotEditor(true);
     try {
       await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
     } finally {
-      finishingBotEditor = false;
+      assignFinishingBotEditor(false);
     }
     if (followNotification()) return;
     if (savedMode === 'create') {
@@ -2450,68 +316,32 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   },
   onCancel(savedMode) {
     const returnToSettings = reopenSettingsOnClose;
-    reopenSettingsOnClose = false;
+    assignReopenSettingsOnClose(false);
     if (followNotification()) return;
     if (savedMode === 'edit' && returnToSettings && view?.data) {
       openDetail({ kind: 'settings', section: 'general' });
     }
   },
 });
-
-function openNewBot(origin = elements['new-bot-button']) {
-  reopenSettingsOnClose = false;
-  closeMenu(false);
-  closeDetail();
-  botEditor.openCreate({ bots, origin });
-}
-
-function headerFocusTarget() {
-  return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
-}
-
-function openEditAppearance(bot) {
-  reopenSettingsOnClose = true;
-  closeDetail();
-  botEditor.openEdit(bot, { bots, origin: headerFocusTarget() });
-}
-
-function focusAfterBotDeletion() {
-  if (elements.detail.open) {
-    (byId('delete-bot-settings') ?? elements['close-detail']).focus();
-    return;
-  }
-  if (narrow.matches && !workspace.classList.contains('nav-open')) {
-    elements['open-navigation'].focus();
-    return;
-  }
-  if (!narrow.matches && workspace.classList.contains('sidebar-collapsed')) {
-    sidebarShow.focus();
-    return;
-  }
-  if (view) focusKey(`bot:${view.id}`);
-  if (!sidebar.contains(document.activeElement)) elements['new-bot-button'].focus();
-}
+assignBotEditor(botEditor);
 
 const botDeletion = mountBotDeletion(byId('bot-delete'), {
   remove: (botId) => api('bots/delete', { botId }),
   focusFallback: focusAfterBotDeletion,
   onDeleted(id) {
     if (pins.delete(id)) save('flock-pins', [...pins]);
-    if (settingsReturnFocus === id) settingsReturnFocus = null;
-    rosterRevision++;
-    bots = bots.filter((bot) => bot.id !== id);
+    if (settingsReturnFocus === id) assignSettingsReturnFocus(null);
+    assignRosterRevision(rosterRevision + 1);
+    assignBots(bots.filter((bot) => bot.id !== id));
     readState.delete(id);
     if (view?.id === id) selectLocation();
     else render();
     void refreshBots();
   },
 });
-
-async function setBotPaused(bot, paused) {
-  await api('bots/pause', { botId: bot.id, paused });
-  await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
-}
+assignBotDeletion(botDeletion);
 const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
+assignBotPause(botPause);
 
 elements['composer-banner-action'].addEventListener('click', async (event) => {
   const control = event.currentTarget;
@@ -2538,334 +368,6 @@ elements['composer-banner-action'].addEventListener('click', async (event) => {
     if (view === context && !control.hidden) control.focus({ preventScroll: true });
   }
 });
-
-const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-function generalContent(bot) {
-  const canEdit = bot.canDelete === true;
-  const hero = node('div', 'settings-hero');
-  const face = node('span', 'settings-avatar');
-  let avatarHost;
-  if (canEdit) {
-    avatarHost = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
-    avatarHost.setAttribute('aria-label', 'Edit appearance');
-    avatarHost.dataset.tooltip = 'Edit appearance';
-    avatarHost.dataset.tooltipSide = 'top';
-    avatarHost.append(face);
-  } else {
-    avatarHost = node('span', 'settings-avatar-static');
-    avatarHost.append(face);
-  }
-  detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
-
-  const nameWrap = node('div', 'settings-name-wrap');
-  const statusNote = node('p', 'settings-status', detail?.status ?? '');
-  statusNote.setAttribute('role', 'status');
-  statusNote.hidden = !detail?.status;
-
-  function renderNameDisplay() {
-    if (!canEdit) {
-      nameWrap.replaceChildren(node('span', 'settings-name', bot.name));
-      return;
-    }
-    const nameBtn = button(null, 'settings-name-button', beginInlineRename);
-    nameBtn.setAttribute('aria-description', 'Rename Bot');
-    nameBtn.append(node('span', 'settings-name', bot.name));
-    nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
-    nameWrap.replaceChildren(nameBtn);
-  }
-  function beginInlineRename() {
-    const input = node('input', 'settings-name-input');
-    input.type = 'text';
-    input.maxLength = 32;
-    input.value = bot.name;
-    input.setAttribute('aria-label', 'Bot name');
-    let settled = false;
-    async function commit() {
-      if (settled) return;
-      settled = true;
-      const trimmed = input.value.trim();
-      if (!trimmed || trimmed === bot.name) {
-        renderNameDisplay();
-        return;
-      }
-      input.disabled = true;
-      statusNote.classList.remove('error');
-      statusNote.textContent = 'Saving name…';
-      statusNote.hidden = false;
-      try {
-        await api('bots/profile', { botId: bot.id, name: trimmed });
-        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
-        if (detail?.kind === 'settings') {
-          detail = { ...detail, status: 'Name saved.' };
-          signatures.delete('detail');
-          renderDetail();
-        }
-      } catch (error) {
-        statusNote.classList.add('error');
-        statusNote.textContent = error.message === 'invalid_name'
-          ? 'Enter a name between 1 and 32 characters.'
-          : 'Couldn’t rename this Bot.';
-        statusNote.hidden = false;
-        renderNameDisplay();
-      }
-    }
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void commit();
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        settled = true;
-        renderNameDisplay();
-        nameWrap.querySelector('button')?.focus();
-      }
-    });
-    input.addEventListener('blur', () => { void commit(); });
-    nameWrap.replaceChildren(input);
-    input.focus();
-    input.select();
-  }
-  renderNameDisplay();
-  hero.append(avatarHost, nameWrap, statusNote);
-  const rows = node('div', 'settings-card settings-rows');
-  rows.append(pullRequestSetting(bot));
-  const settings = document.createElement('a');
-  settings.className = 'settings-row';
-  settings.href = '/settings/' + encodeURIComponent(bot.id);
-  settings.append(node('span', 'settings-row-label', 'Access'));
-  settings.insertAdjacentHTML('beforeend', chevron);
-  rows.append(settings);
-  const activity = settingsRow('Status', bot.paused ? 'Paused' : 'Active');
-  if (bot.canDelete) {
-    const pause = button(bot.paused ? 'Resume…' : 'Pause…', 'button quiet',
-      () => botPause.open(bot, () => byId('bot-pause-setting')?.focus({ preventScroll: true })));
-    pause.id = 'bot-pause-setting';
-    pause.setAttribute('aria-haspopup', 'dialog');
-    activity.append(pause);
-  }
-  rows.append(activity);
-  if (bot.canDelete) {
-    const remove = button('Delete…', 'settings-row danger', (event) => botDeletion.open(bot, event.currentTarget));
-    remove.id = 'delete-bot-settings';
-    remove.setAttribute('aria-haspopup', 'dialog');
-    rows.append(remove);
-  }
-  detailSetup ??= createSetupSettings(async (patch) => {
-    const saved = await api('bots/profile', { botId: bot.id, ...patch });
-    if (view?.id === bot.id) void view.refresh();
-    return saved;
-  });
-  return [hero, workspaceCard(bot), roleCard(bot), detailSetup.element, rows];
-}
-function workspaceCard(bot) {
-  detailWorkspace ??= createBotWorkspaceCard(async (workspace) => {
-    const saved = await api('bots/profile', { botId: bot.id, ...workspace });
-    if (view?.id === bot.id) void view.refresh();
-    return saved;
-  }, (environmentId) => api(environmentId ? `settings/projects?${new URLSearchParams({ environmentId })}` : 'settings/projects'),
-  () => api(botQuery('settings/models', bot.id)));
-  return detailWorkspace.element;
-}
-function roleCard(bot) {
-  detailRole ??= createBotRoleCard(async (soul, originalSoul) => {
-    const saved = await api('bots/profile', { botId: bot.id, soul, originalSoul }).catch((error) => {
-      if (error.message === 'role_changed' && view?.id === bot.id) void view.refresh();
-      throw error;
-    });
-    void refreshBots();
-    if (view?.id === bot.id) void view.refresh();
-    return saved.soul;
-  });
-  return detailRole.element;
-}
-function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = `${bot.name} settings`;
-  if (section === 'memory') {
-    const context = view;
-    return [createMemoryHistory(
-      (before) => api(botQuery('memory/history', bot.id, before)),
-      (eventId) => {
-        closeDetail();
-        void showConversationMessage(context, eventId, { preferLoaded: true });
-      },
-      (run) => linkToRun(run, 'Open Session'),
-      bot.name
-    )];
-  }
-  if (section === 'recurring') return [recurringRequests.list, recurringRequests.form];
-  return generalContent(bot);
-}
-function waitContent(context, task) {
-  const wait = task.wait;
-  const canDecide = !!context.composer;
-  elements['detail-title'].textContent = waitLabel(wait.reason);
-  const request = node('blockquote', 'wait-request');
-  request.append(node('p', 'wait-request-text', task.request));
-  if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
-  const reason = node('div', 'wait-reason');
-  reason.append(node('p', 'wait-text', waitText(wait)));
-  const content = [request, reason];
-  const actions = node('div', 'wait-actions');
-  const primary = node('div', 'wait-primary');
-  const perform = (operation, fields) => {
-    const current = context.data.waits.find(item => item.id === task.id && item.wait.id === wait.id);
-    if (current) void operate(context, current, operation, fields);
-  };
-  const approveInT3 = canDecide && wait.reason === 't3_input';
-  const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
-  if (runLink) {
-    runLink.className = approveInT3 ? 'button primary' : 'button quiet';
-    primary.append(runLink);
-  }
-  if (!canDecide) {
-    if (wait.choices?.length) reason.append(readOnlyChoices(wait.choices));
-    if (runLink) content.push(primary);
-    return content;
-  }
-  if (wait.reason === 'user_question') {
-    primary.append(questionActions(context, task, { dialog: true }));
-  }
-  // Stopping can't be undone, so it asks in place, with the safe choice focused, instead of a browser dialog.
-  const stop = button('Stop this request', 'wait-cancel', () => {
-    const botName = context.data.bot?.name ?? 'The Bot';
-    const confirm = node('div', 'wait-stop-confirm');
-    confirm.setAttribute('role', 'group');
-    const prompt = node('p', 'wait-stop-text');
-    prompt.id = 'wait-stop-text';
-    prompt.append(node('strong', null, 'Stop this request?'),
-      ` This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
-    confirm.setAttribute('aria-labelledby', prompt.id);
-    const keep = button('Keep working', 'button quiet wait-stop-keep', () => {
-      actions.replaceChildren(stop, primary);
-      stop.focus();
-    });
-    const confirmStop = button('Stop request', 'button danger', () => perform('cancel'));
-    const choices = node('div', 'wait-primary');
-    choices.append(keep, confirmStop);
-    confirm.append(prompt, choices);
-    actions.replaceChildren(confirm);
-    keep.focus();
-  });
-  actions.append(stop, primary);
-  const feedback = node('p', 'dialog-feedback');
-  feedback.id = 'detail-feedback';
-  feedback.setAttribute('role', 'status');
-  return [...content, actions, feedback];
-}
-function showDetailError(text) {
-  const output = byId('detail-feedback');
-  if (output) output.textContent = text;
-}
-async function cancelActiveTask(context, task) {
-  const controls = [...elements['detail-body'].querySelectorAll('button, input')];
-  for (const control of controls) control.disabled = true;
-  showDetailError('');
-  try {
-    const response = await api('operations', {
-      botId: context.id,
-      taskId: task.id,
-      waitId: task.problem?.id ?? 0,
-      targetRevision: task.currentRevision ?? 0,
-      targetGeneration: task.generation,
-      operation: 'cancel',
-    });
-    if (response?.accepted !== true) throw new Error('decision_unconfirmed');
-    if (view === context && detail?.kind === 'stop-task' && detail.taskId === task.id) closeDetail();
-    setNotice(context, 'Stop requested.');
-    if (view?.id === context.id) await Promise.all([view.refresh(), !liveUpdates.live && refreshBots()]);
-  } catch (error) {
-    if (view === context && detail?.kind === 'stop-task' && detail.taskId === task.id) {
-      for (const control of controls) control.disabled = false;
-      showDetailError(responseErrors[error.message] ?? 'Flock could not confirm the action. Check the conversation.');
-    }
-  }
-}
-function stopTaskContent(context, task) {
-  elements['detail-title'].textContent = 'Stop this request?';
-  const request = node('blockquote', 'wait-request');
-  request.append(node('p', 'wait-request-text', task.request));
-  if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
-  const botName = context.data.bot?.name ?? 'The Bot';
-  const explanation = node('p', 'wait-why',
-    `This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
-  const keep = button('Keep working', 'button quiet wait-stop-keep', closeDetail);
-  keep.autofocus = true;
-  const confirmStop = button('Stop request', 'button danger', () => void cancelActiveTask(context, task));
-  const choices = node('div', 'wait-primary');
-  choices.append(keep, confirmStop);
-  const feedback = node('p', 'dialog-feedback');
-  feedback.id = 'detail-feedback';
-  feedback.setAttribute('role', 'status');
-  return [request, explanation, choices, feedback];
-}
-function labelDetail(label) {
-  if (label) {
-    elements.detail.setAttribute('aria-label', label);
-    elements.detail.removeAttribute('aria-labelledby');
-  } else {
-    elements.detail.removeAttribute('aria-label');
-    elements.detail.setAttribute('aria-labelledby', 'detail-title');
-  }
-}
-function replaceDetail(render) {
-  releaseDetailAvatar();
-  const content = render();
-  if (detailRole && !content.includes(detailRole.element)) releaseDetailRole();
-  if (detailWorkspace && !content.includes(detailWorkspace.element)) detailWorkspace = null;
-  if (detailSetup && !content.includes(detailSetup.element)) detailSetup = null;
-  placeRows(elements['detail-body'], content);
-  if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
-}
-function renderDetail() {
-  if (!detail || !view) return;
-  if (detail.kind === 'settings') {
-    const bot = view.data.bot;
-    labelDetail(`${bot.name} settings`);
-    renderDetailNav(settingsTabs, detail.section);
-    const { soul, environmentId, projectId, model, reasoningEffort, setupChangedBy, sessionModel, workspaceStrategy, ...settings } = bot;
-    if (changed('detail', detail, settings)) replaceDetail(() => settingsContent(bot, detail.section));
-    const canEdit = bot.canDelete === true;
-    detailRole?.update(soul, canEdit);
-    detailSetup?.update({ setupChangedBy, sessionModel, workspaceStrategy, canDelete: canEdit });
-    detailWorkspace?.update({ environmentId, projectId, model, reasoningEffort }, canEdit);
-    return;
-  }
-  labelDetail(null);
-  renderDetailNav([], null);
-  if (detail.kind === 'stop-task') {
-    const task = view.data.activeTasks.find((item) => item.id === detail.taskId);
-    if (!task || task.state === 'stopping') {
-      if (changed('detail', detail, task?.state ?? null)) {
-        elements['detail-title'].textContent = task?.state === 'stopping' ? 'Stopping request' : 'Request closed';
-        replaceDetail(() => [node('p', 'wait-why', 'Check the conversation for the latest update.')]);
-      }
-      return;
-    }
-    if (changed('detail', detail, task)) replaceDetail(() => stopTaskContent(view, task));
-    return;
-  }
-  const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);
-  if (!task) {
-    if (changed('detail', detail, null)) {
-      elements['detail-title'].textContent = 'Request closed';
-      replaceDetail(() => [node('p', 'wait-why', 'Check the conversation for the latest update.')]);
-    }
-    return;
-  }
-  if (changed('detail', detail, task, waitLabel(task.wait.reason), waitText(task.wait)))
-    replaceDetail(() => waitContent(view, task));
-  const item = taskWaitDecision(view.id, task);
-  const busy = decisions.busy(item);
-  for (const control of elements['detail-body'].querySelectorAll('button, input')) {
-    if (!control.closest('.question-choice-form')) control.disabled = busy;
-  }
-  const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
-  if (choiceForm) {
-    const { text, stale } = decisions.choice(item);
-    updateQuestionChoiceForm(choiceForm, text, busy || stale);
-  }
-}
 function render(scroll, liveAfterId) {
   decisions.setContext(view?.id, sidebarViewer);
   renderBots();
@@ -2951,17 +453,17 @@ const refreshBots = coalescedRefresh(async () => {
     if (revisionAtFetch !== rosterRevision) return;
     const viewer = responseViewers.get(latest) ?? null;
     const previous = viewer === sidebarViewer ? readState : null;
-    sidebarViewer = viewer;
-    readState = new Map();
+    assignSidebarViewer(viewer);
+    assignReadState(new Map());
     // The first successful list sets a baseline for existing conversations in this tab.
-    bots = latest.map(({ latestIncomingEventId: incoming, ...bot }) => {
+    assignBots(latest.map(({ latestIncomingEventId: incoming, ...bot }) => {
       if (viewer !== null) {
         const readThrough = previous?.get(bot.id)?.readThrough ?? incoming;
         readState.set(bot.id, { incoming, readThrough });
       }
       return bot;
-    });
-    listLoaded = true;
+    }));
+    assignListLoaded(true);
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
     render();
@@ -2969,7 +471,7 @@ const refreshBots = coalescedRefresh(async () => {
   } catch (error) {
     if (revisionAtFetch !== rosterRevision) return;
     if (error.status === 401 || error.status === 403) {
-      sidebarViewer = null;
+      assignSidebarViewer(null);
       decisions.setContext(null, null);
       render();
     }
@@ -2977,6 +479,7 @@ const refreshBots = coalescedRefresh(async () => {
     retrySync();
   }
 });
+assignRefreshBots(refreshBots);
 function readTimeline(context, read) {
   const next = (context.pageRead ?? Promise.resolve()).then(read, read);
   context.pageRead = next;
@@ -3102,8 +605,6 @@ async function submit(event) {
     if (showingComposer(context.id)) renderComposer();
   }
 }
-
-const findPanel = byId('conversation-find');
 const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
   panel: findPanel,
@@ -3120,6 +621,7 @@ const conversationFind = mountConversationFind({
     decisions.close({ focus: false });
   },
 });
+assignConversationFind(conversationFind);
 new ResizeObserver(updateFindOverlap).observe(findPanel);
 
 const decisions = mountBoardInbox({
@@ -3151,19 +653,13 @@ const decisions = mountBoardInbox({
     setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
   },
 });
+assignDecisions(decisions);
 
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
-const sidebarToggle = byId('toggle-chat-sidebar');
-const sidebarShow = byId('show-chat-sidebar');
-const sidebarResizer = elements['sidebar-resizer'];
-const sidebarMinWidth = 216;
-const sidebarMaxWidth = 416;
-const sidebarDefaultWidth = 296;
-const sidebarCollapseThreshold = 160;
 sidebarResizer?.setAttribute('aria-valuemin', String(sidebarMinWidth));
 sidebarResizer?.setAttribute('aria-valuemax', String(sidebarMaxWidth));
 function setSidebarWidth(px, persist = false) {
@@ -3287,7 +783,7 @@ elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
   if (narrow.matches) openNavigation(true, false);
   focusKey(`menu:${settingsReturnFocus}`);
-  settingsReturnFocus = null;
+  assignSettingsReturnFocus(null);
 });
 elements.older.addEventListener('click', loadOlder);
 // Like Messages, reaching the top of the history loads the previous page; the button stays for keyboard and assistive use.
@@ -3327,30 +823,29 @@ elements['cancel-reply'].addEventListener('click', () => {
 });
 elements['attach-screenshots'].addEventListener('click', () => {
   if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
-  pickerTarget = { context: view, composer: view.composer, reply: view.composer.reply };
+  assignPickerTarget({ context: view, composer: view.composer, reply: view.composer.reply });
   elements['screenshot-input'].click();
 });
 elements['screenshot-input'].addEventListener('change', (event) => {
   const files = Array.from(event.target.files);
   event.target.value = '';
   const target = pickerTarget;
-  pickerTarget = null;
+  assignPickerTarget(null);
   if (target) void addScreenshots(target.context, target.composer, target.reply, files);
 });
-elements['screenshot-input'].addEventListener('cancel', () => { pickerTarget = null; });
+elements['screenshot-input'].addEventListener('cancel', () => { assignPickerTarget(null); });
 elements.message.addEventListener('paste', (event) => {
   const files = Array.from(event.clipboardData?.files ?? []);
   if (!files.length || elements.message.readOnly || decisions.composer()) return;
   event.preventDefault();
   void addScreenshots(view, view.composer, view.composer.reply, files);
 });
-let dragDepth = 0;
 const canDropScreenshots = (event) => !elements.message.readOnly && !decisions.composer() &&
   Array.from(event.dataTransfer?.types ?? []).includes('Files');
 elements.composer.addEventListener('dragenter', (event) => {
   if (!canDropScreenshots(event)) return;
   event.preventDefault();
-  dragDepth++;
+  assignDragDepth(dragDepth + 1);
   elements.composer.classList.add('dragover');
 });
 elements.composer.addEventListener('dragover', (event) => {
@@ -3360,11 +855,11 @@ elements.composer.addEventListener('dragover', (event) => {
   elements.composer.classList.add('dragover');
 });
 elements.composer.addEventListener('dragleave', () => {
-  if (dragDepth > 0) dragDepth--;
+  if (dragDepth > 0) assignDragDepth(dragDepth - 1);
   if (!dragDepth) elements.composer.classList.remove('dragover');
 });
 elements.composer.addEventListener('drop', (event) => {
-  dragDepth = 0;
+  assignDragDepth(0);
   elements.composer.classList.remove('dragover');
   if (!canDropScreenshots(event)) return;
   event.preventDefault();
@@ -3385,12 +880,12 @@ function updateDraft() {
 }
 elements.message.addEventListener('compositionstart', () => {
   if (!view?.composer || elements.message.readOnly) return;
-  composition = { composer: view.composer, anchor: decisions.composer()?.key ?? view.composer.reply?.messageId };
+  assignComposition({ composer: view.composer, anchor: decisions.composer()?.key ?? view.composer.reply?.messageId });
   renderComposer();
 });
 elements.message.addEventListener('compositionend', () => {
   if (!composition) return;
-  composition = null;
+  assignComposition(null);
   if (elements.message.readOnly) renderComposer();
   else updateDraft();
 });
@@ -3420,10 +915,6 @@ elements.composer.addEventListener('keydown', (event) => {
   }
 });
 new ResizeObserver(fitMessage).observe(elements['composer-container']);
-
-const scroller = elements.conversation;
-let timelineHeight = scroller.clientHeight;
-let timelineWidth = scroller.clientWidth;
 scroller.classList.add('follow-newest');
 scroller.addEventListener('scroll', () => {
   updateJumpToLatest();
@@ -3439,16 +930,14 @@ new ResizeObserver(() => {
   const resized = height !== timelineHeight || widthChanged;
   // At the same width, a scroll can already have moved away from the previous bottom.
   const wasAtBottom = widthChanged || timelineAtEnd(scroller, timelineHeight);
-  timelineHeight = height;
-  timelineWidth = width;
+  assignTimelineHeight(height);
+  assignTimelineWidth(width);
   if (width > 0 && widthChanged) syncMessageFolding([...elements.timeline.children]);
   if (width > 0 && resized && wasAtBottom && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
 }).observe(scroller);
 // The timeline grows without resizing the scroller, which changes the history fades.
 new ResizeObserver(updateJumpToLatest).observe(elements.timeline);
-
-const visualViewport = window.visualViewport;
 if (visualViewport) {
   const touchInput = matchMedia('(any-pointer: coarse)');
   let viewportFrame = null;
@@ -3499,22 +988,20 @@ document.addEventListener('keydown', (event) => {
   else if (menu) closeMenu();
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
-
-let syncRetry;
 const browserNotifications = createBrowserNotifications({
   viewingBot: () => view?.id ?? null,
   openBot(botId) {
-    notificationDestination = botId;
+    assignNotificationDestination(botId);
     followNotification();
   },
 });
 function retrySync() {
-  if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
+  if (!document.hidden) assignSyncRetry(syncRetry ?? (setTimeout(catchUp, 2500)));
 }
 
 function catchUp() {
   clearTimeout(syncRetry);
-  syncRetry = null;
+  assignSyncRetry(null);
   void browserNotifications.refresh();
   if (document.hidden) return;
   void refreshBots();
@@ -3527,6 +1014,7 @@ const liveUpdates = createLiveUpdates(catchUp, (change) => {
   if (change.list === true) void refreshBots();
   if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
 });
+assignLiveUpdates(liveUpdates);
 
 function subscribeToView() {
   browserNotifications.updateViewing();
@@ -3538,14 +1026,12 @@ function subscribeToView() {
   if (view) params.set('bot', view.id);
   liveUpdates.use(params.size ? `/api/events?${params}` : '/api/events');
 }
-
-let sessionDateRefresh;
 function refreshSessionDate() {
   clearTimeout(sessionDateRefresh);
   if (document.hidden) return;
   const now = new Date();
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  sessionDateRefresh = setTimeout(refreshSessionDate, midnight - now);
+  assignSessionDateRefresh(setTimeout(refreshSessionDate, midnight - now));
   renderActivity();
 }
 
@@ -3562,11 +1048,11 @@ render();
 resumeUpdates();
 onNotificationPreferenceChange(resumeUpdates);
 document.addEventListener('visibilitychange', () => {
-  visibilityGeneration++;
+  assignVisibilityGeneration(visibilityGeneration + 1);
   resumeUpdates();
 });
 window.addEventListener('pagehide', () => {
-  visibilityGeneration++;
+  assignVisibilityGeneration(visibilityGeneration + 1);
   clearTimeout(sessionDateRefresh);
   liveUpdates.use(null);
 });
