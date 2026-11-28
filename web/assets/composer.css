@@ -48,9 +48,9 @@
 .composer:has(> .decision-reply-context:not([hidden])) {
   padding: .3rem;
   border-radius: var(--radius-xl);
-  background: light-dark(#f0f0ed, #1b1b1d);
+  background: var(--raised);
   border-color: var(--border-floating);
-  box-shadow: 0 14px 36px light-dark(rgb(0 0 0 / .08), rgb(0 0 0 / .44));
+  box-shadow: 0 14px 36px light-dark(var(--shade-1), var(--shade-4));
 }
 .composer:has(> .decision-reply-context:not([hidden])) .composer-box {
   --composer-control-size: 2.45rem;
@@ -63,12 +63,12 @@
   align-items: center;
   padding: .2rem .25rem .25rem;
   border-radius: var(--radius-lg);
-  background: light-dark(#ffffff, #141416);
+  background: var(--canvas);
   border: 1px solid var(--border-floating);
   transition: border-color .15s ease;
 }
 .composer:has(> .decision-reply-context:not([hidden])) .composer-box:focus-within {
-  border-color: light-dark(rgb(0 0 0 / .22), rgb(255 255 255 / .18));
+  border-color: light-dark(var(--shade-3), var(--tint-2));
 }
 .composer:has(> .decision-reply-context:not([hidden])) textarea {
   min-height: 2.9rem;
@@ -81,8 +81,8 @@
   background: var(--hover); color: var(--text);
 }
 .composer:has(> .decision-reply-context:not([hidden])) .send:not(:disabled) {
-  background: light-dark(#18181b, #f3f3f4);
-  color: light-dark(#ffffff, #121212);
+  background: var(--text);
+  color: var(--canvas);
 }
 .composer:has(> .decision-reply-context:not([hidden])) .send:hover:not(:disabled) {
   background: light-dark(#2c2c30, #ffffff);
