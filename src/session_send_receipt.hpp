@@ -21,5 +21,6 @@ struct SessionSendReceipt {
     Id taskId = 0;
     std::string actionId, requestId;
     bool notify = true;
+    bool hasAttachments = false;
 };
 }

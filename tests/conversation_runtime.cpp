@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "flock/base64.hpp"
 #include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
@@ -808,6 +809,76 @@ void attachedChoiceCanBeInspectedBeforeAnswering() {
     check(recorded.at("text") == "Keep going" && recorded.at("messageId") == receipt.at("messageId") &&
               recorded.at("waitId") == wait.at("id") && f.response(receipt).at("text") == "I recorded your answer.",
           "the conversation lost the model answer or reply");
+}
+
+void selectedTaskFilesSurviveRestart() {
+    Fixture f;
+    const Json files = Json::array({{{"name", "report.bin"}, {"mimeType", "application/octet-stream"}, {"dataBase64", "AEH/"}},
+                                    {{"name", "unselected.txt"}, {"mimeType", "text/plain"}, {"dataBase64", "Yg=="}}});
+    const auto select = [](Step next) -> Step {
+        return [next](const ModelInput& input) {
+            auto call = next(input);
+            call.args["attachments"] = Json::array({{{"messageId", input.event.at("messageId")}, {"attachmentId", "1"}}});
+            return call;
+        };
+    };
+    constexpr auto request = "Start a task with report.bin";
+    f.script(request, {select(start())});
+    const auto original = ConversationIntake(*f.store).receive(localOwner, f.routing(), "file-launch", request, 0, files);
+    f.runtime->runConversations();
+    const auto task = TaskList(*f.store).tasks("alpha").front().task.id;
+    f.restart();
+    f.reach(task, "running");
+    const auto verify = [&](std::size_t count) {
+        check(f.t3.sent.size() == count && f.t3.sent.back().attachments.size() == 1, "The selected file was dropped or another file was sent");
+        const auto& file = f.t3.sent.back().attachments.front();
+        check(file.name == "report.bin" && file.mimeType == "application/octet-stream" && file.bytes == std::string("\0A\xff", 3),
+              "The Session received changed file data");
+    };
+    verify(1);
+
+    constexpr auto denied = "Forward another person's report";
+    f.script(denied, {send(task, {{"attachments", Json::array({{{"messageId", original.at("messageId")}, {"attachmentId", "1"}}})}})});
+    ConversationIntake(*f.store).receive({"another-person", true}, f.routing(), "denied-file", denied);
+    f.runtime->runConversations();
+    const auto deniedResult = f.lastTurn().at(0).at("result");
+    check(!deniedResult.at("ok").get<bool>() && field(deniedResult, "error").find("permission to share") != std::string::npos &&
+              Tasks(*f.store).task(task).task.pendingInstructions.empty(),
+          "An attachment owned by another person was queued");
+
+    constexpr auto follow = "Follow up with a new report.bin";
+    f.script(follow, {select(send(task))});
+    ConversationIntake(*f.store).receive(localOwner, f.routing(), "file-followup", follow, 0, files);
+    f.runtime->runConversations();
+    f.restart();
+    f.t3.finish("run-1", "Initial work complete");
+    f.t3.loseNextSend = true;
+    f.t3.deliveryVisible = false;
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "Queued file was lost after restart");
+    verify(2);
+    f.restart();
+    f.now += 10;
+    f.t3.deliveryVisible = true;
+    f.reach(task, "running");
+    check(f.t3.sent.size() == 2 && !f.t3.reconciled.empty() && f.t3.reconciled.back().attachmentCount == 1 &&
+              f.t3.reconciled.back().attachments.empty(),
+          "Reconciliation lost the attachment reference or sent the file again");
+
+    SecretRequests secrets(*f.store);
+    constexpr auto protectedText = "fixture-key-for-file-dispatch";
+    secrets.submitSecret(localOwner, "alpha", secrets.requestSecret("alpha", {"fixture-file-secret"}), protectedText);
+    constexpr auto protectedRequest = "Start a new task with credentials.txt";
+    f.script(protectedRequest, {select(start())});
+    ConversationIntake(*f.store).receive(
+        localOwner, f.routing(), "protected-file", protectedRequest, 0,
+        Json::array({{{"name", "credentials.txt"}, {"mimeType", "text/plain"}, {"dataBase64", encodeBase64(protectedText)}}}));
+    f.runtime->runConversations();
+    const auto blocked = TaskList(*f.store).tasks("alpha").front().task.id;
+    f.reach(blocked, "waiting");
+    const auto error = field(f.task(blocked).at("wait"), "text");
+    check(f.t3.sent.size() == 2 && error.find("credentials.txt") != std::string::npos &&
+              error.find("protected information") != std::string::npos && error.find(protectedText) == std::string::npos,
+          "The protected attachment was sent or its failure was not safe to display");
 }
 
 void resumedChoicesRecoverSavedSessionCalls() {
@@ -4369,6 +4440,7 @@ int main(int argc, char** argv) {
         exactOfferedAnswersUseTheModel();
         latestSuggestionsTakePrecedenceOverAnInheritedQuestion();
         attachedChoiceCanBeInspectedBeforeAnswering();
+        selectedTaskFilesSurviveRestart();
         resumedChoicesRecoverSavedSessionCalls();
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();

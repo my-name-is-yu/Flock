@@ -47,6 +47,9 @@ using Clock = std::chrono::steady_clock;
 constexpr int ExcerptChars = 2730; // T3 uses UTF-16 offsets. 2730 code units occupy at most 8190 UTF-8 bytes.
 constexpr int PageSize = 30;
 constexpr auto PendingRequest = "t3_pending_request";
+constexpr auto PrepareUpload = "t3_attachment_prepare_upload";
+constexpr auto SendAttachments = "t3_thread_send_attachments";
+constexpr auto DiscardUpload = "t3_attachment_discard";
 std::string gatewayFor(std::string_view target, std::string_view gateway) {
     return gateway.empty() ? std::string(target) : std::string(gateway);
 }
@@ -686,7 +689,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
         if ((!direct && field(thread, "projectId") != command.projectId) ||
             (launch && (field(thread, "createdBy") != "agent" || field(thread, "creationSource") != "mcp")))
             continue;
-        if (direct || command.tool == CommandTool::start_in_session) {
+        if (!command.attachmentCount && (direct || command.tool == CommandTool::start_in_session)) {
             std::set<std::string> queued;
             queuedMatches(client, scan, threadId, expected, queued);
             for (const auto& run : queued)
@@ -702,7 +705,13 @@ Delivery reconcileWork(Client& client, const Command& command) {
                 const auto runId = field(item, "runId");
                 const bool exact = full && *full == expected;
                 if (!full || (runId.empty() && exact)) incomplete = true;
-                if (exact && !runId.empty() && (launch || runId != command.target.runId))
+                const auto files = item.find("attachments");
+                const bool confirmsFiles = !command.attachmentCount ||
+                                           (files != item.end() && files->is_array() && files->size() == command.attachmentCount &&
+                                            std::ranges::all_of(*files, [](const Json& file) {
+                                                return !field(file, "id").empty() && file.value("available", true);
+                                            }));
+                if (exact && confirmsFiles && !runId.empty() && (launch || runId != command.target.runId))
                     matches[{threadId, runId}] = {{threadId, runId, field(thread, "link"), command.target.gatewayEnvironmentId}, false};
             }
             // This is a launch, so only its initial local user message could have created the Thread.
@@ -710,9 +719,12 @@ Delivery reconcileWork(Client& client, const Command& command) {
         });
         if (matches.size() > 1) break;
     }
-    if (incomplete || matches.size() != 1)
+    if (incomplete || matches.size() != 1) {
+        if (command.attachmentCount)
+            return result(Outcome::Unknown, "T3 history has not confirmed delivery of the selected files. Check the Session before resending.");
         return result(Outcome::Unknown, matches.size() > 1 ? "More than one T3 Run matches the saved action"
                                                            : "T3 history did not establish exactly one Run for the saved action");
+    }
     const auto& [match, queued] = matches.begin()->second;
     if (receipt && (receipt->threadId != match.threadId || (!receipt->runId.empty() && receipt->runId != match.runId)))
         return result(Outcome::Unknown, "The matching T3 Run differs from the saved receipt");
@@ -953,8 +965,92 @@ Json launchThread(Client& client, Json args, std::string& warning) {
     }
 }
 
-Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning) {
-    auto prompt = field(args, "message");
+std::string attachmentNames(const Command& command) {
+    std::string names;
+    for (const auto& file : command.attachments) {
+        if (!names.empty()) names += ", ";
+        names += file.name;
+    }
+    return names;
+}
+
+bool checkAttachmentTools(Client& client, const Command& command, bool linked, bool pinned) {
+    const auto inputs = client.toolInputs();
+    const bool launch = command.tool == CommandTool::delegate && !pinned;
+    const auto send = launch ? "t3_thread_launch" : SendAttachments;
+    const auto prepare = inputs.value(PrepareUpload, Json::object());
+    const auto sendInputs = inputs.value(send, Json::object());
+    if (!prepare.contains("upload") || !sendInputs.contains("attachments") ||
+        (linked && (!prepare.contains("environmentId") || !sendInputs.contains("environmentId"))))
+        throw Failure(Failure::Kind::Settings, linked ? "This T3 gateway cannot send files to the linked destination. Connect it directly to Flock to send files"
+                                                      : "This T3 connection does not offer attachment upload and send");
+    return inputs.contains(DiscardUpload) && (!linked || inputs.at(DiscardUpload).contains("environmentId"));
+}
+
+struct AttachmentUploads {
+    Client& client;
+    const bool& invoked;
+    bool canDiscard = false;
+    Json pending = Json::array();
+
+    ~AttachmentUploads() {
+        if (invoked || !canDiscard) return;
+        for (const auto& id : pending) {
+            try {
+                client.call(DiscardUpload, {{"attachmentId", id}});
+            } catch (const std::exception&) {
+            }
+        }
+    }
+
+    Json stage(const Command& command) {
+        auto refs = Json::array();
+        if (command.attachments.size() > limits::messages::maxAttachments)
+            throw Failure(Failure::Kind::Settings, "T3 accepts up to eight attachments per message");
+        for (const auto& file : command.attachments) {
+            const bool image = limits::messages::isAttachmentImage(file.mimeType);
+            const auto maxBytes = image ? limits::messages::maxImageBytes : limits::messages::maxFileBytes;
+            try {
+                if (file.bytes.empty() || file.bytes.size() > maxBytes)
+                    throw Failure(Failure::Kind::Settings, "The file is empty or exceeds T3’s size limit");
+                Json metadata{{"type", image ? "image" : "file"},
+                              {"name", file.name},
+                              {"mimeType", file.mimeType},
+                              {"sizeBytes", file.bytes.size()}};
+                const auto slot = client.call(PrepareUpload, {{"upload", metadata}});
+                auto id = field(slot, "attachmentId");
+                if (id.empty() || id.size() > 256 ||
+                    id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos)
+                    invalidResponse();
+                pending.push_back(id);
+                client.uploadAttachment(slot, file.bytes);
+                metadata["id"] = std::move(id);
+                refs.push_back(std::move(metadata));
+            } catch (const Failure& failure) {
+                throw Failure(Failure::Kind::Settings, file.name + ": " + failure.what());
+            }
+        }
+        return refs;
+    }
+};
+
+Json sendWork(Client& client, const Command& command, std::string_view thread, const Json& attachments, std::string requestId) {
+    auto args = Json{{"threadId", thread}, {"message", sessionPrompt(command.actionId, command.instruction)}};
+    if (attachments.empty()) {
+        args["mode"] = "queue";
+        args["clientRequestId"] = std::move(requestId);
+        return client.call("t3_thread_send", std::move(args));
+    }
+    args["attachments"] = attachments;
+    auto reply = client.call(SendAttachments, std::move(args));
+    const auto status = field(reply, "status");
+    if (field(reply, "messageId").empty() || status.empty()) invalidResponse();
+    reply["delivery"] = status == "queued" ? "queued" : "started";
+    return reply;
+}
+
+Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning,
+                      const Json& attachments) {
     args.erase("message");
     const auto launched = launchThread(client, std::move(args), warning);
     const auto threadId = field(launched, "threadId");
@@ -976,9 +1072,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         const auto workspace = workspaceHead(client, command.projectId, thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
-        const auto sent = client.call(
-            "t3_thread_send",
-            {{"threadId", threadId}, {"mode", "queue"}, {"message", std::move(prompt)}, {"clientRequestId", command.actionId + ":start"}});
+        const auto sent = sendWork(client, command, threadId, attachments, command.actionId + ":start");
         if (field(sent, "threadId") != threadId || field(sent, "runId").empty() ||
             (field(sent, "delivery") != "started" && field(sent, "delivery") != "queued"))
             invalidResponse();
@@ -1035,16 +1129,23 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection), {}, targetRoute(command.environmentId, gateway));
             if (command.tool == CommandTool::answer_session_question) return answer(client, command, invoked);
+            AttachmentUploads uploads{client, invoked};
+            const auto stage = [&] {
+                if (command.attachments.empty()) return Json::array();
+                if (gateway == command.environmentId &&
+                    field(client.call("t3_environment_read", Json::object()), "environmentId") != command.environmentId)
+                    throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
+                uploads.canDiscard = checkAttachmentTools(client, command, gateway != command.environmentId, !launchArguments.pin.empty());
+                return uploads.stage(command);
+            };
             if (command.tool == CommandTool::message_session) {
                 const auto environment =
                     gateway == command.environmentId ? client.call("t3_environment_read", Json::object()) : Json::object();
                 if (gateway == command.environmentId && field(environment, "environmentId") != command.environmentId)
                     return {Outcome::Settings, {}, "The OAuth endpoint belongs to a different T3 environment", true};
+                const auto files = stage();
                 invoked = true;
-                const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId},
-                                                                  {"mode", "queue"},
-                                                                  {"message", sessionPrompt(command.actionId, command.instruction)},
-                                                                  {"clientRequestId", command.actionId}});
+                const auto reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto run = field(reply, "runId");
                 const auto delivery = field(reply, "delivery");
                 if (field(reply, "threadId") != command.target.threadId || run.empty() || (delivery != "started" && delivery != "queued"))
@@ -1066,13 +1167,16 @@ public:
                 if (!launchArguments.pin.empty()) {
                     if (!loopbackGitHost(origin))
                         return {Outcome::Settings, {}, "Pinned specialist worktrees require a local T3 environment", true};
+                    const auto files = stage();
                     invoked = true;
                     auto delivery =
-                        launchPinned(client, command, std::move(launchArguments.parameters), launchArguments.pin, launchWarning);
+                        launchPinned(client, command, std::move(launchArguments.parameters), launchArguments.pin, launchWarning, files);
                     delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run, command.environmentId, origin);
                     return delivery;
                 }
+                auto files = stage();
+                if (!files.empty()) launchArguments.parameters["attachments"] = std::move(files);
                 invoked = true;
                 reply = launchThread(client, std::move(launchArguments.parameters), launchWarning);
                 if (field(reply, "projectId") != command.projectId) invalidResponse();
@@ -1087,6 +1191,8 @@ public:
                     previous = threadHead(client, command.target.threadId).at("thread");
                     if (field(previous, "projectId") != command.projectId || boolean(previous, "archived"))
                         return {Outcome::Settings, {}, "The selected T3 Session moved projects or was archived", true};
+                    if (!command.attachments.empty() && !member(previous, "activeRunId").is_null())
+                        return {Outcome::Busy, {}, "The selected T3 Session is still active", true};
                 } else {
                     const auto readiness = followUpReadiness(client, command);
                     if (readiness == FollowUp::SessionUnavailable)
@@ -1094,11 +1200,9 @@ public:
                     if (readiness == FollowUp::Busy)
                         return {Outcome::Busy, {}, "T3 has other work or the assigned Run has not settled", true};
                 }
+                const auto files = stage();
                 invoked = true;
-                reply = client.call("t3_thread_send", {{"threadId", command.target.threadId},
-                                                       {"mode", "queue"},
-                                                       {"message", sessionPrompt(command.actionId, command.instruction)},
-                                                       {"clientRequestId", command.actionId}});
+                reply = sendWork(client, command, command.target.threadId, files, command.actionId);
                 const auto delivery = field(reply, "delivery");
                 const auto runId = field(reply, "runId");
                 if (field(reply, "threadId") != command.target.threadId || runId == command.target.runId ||
@@ -1115,6 +1219,12 @@ public:
             delivery.launchWarning = std::move(launchWarning);
             return delivery;
         } catch (const Failure& failure) {
+            if (!command.attachments.empty()) {
+                const auto detail = attachmentNames(command) + ": " + failure.what();
+                if (invoked)
+                    return result(Outcome::Unknown, detail + ". Check the T3 Session to confirm attachment delivery before resending.");
+                return {Outcome::Settings, {}, detail, true};
+            }
             if (invoked && command.tool != CommandTool::answer_session_question) {
                 auto delivery = workReply(failure);
                 delivery.launchWarning = std::move(launchWarning);
@@ -1140,7 +1250,7 @@ public:
                 try {
                     return reconcileWork(client, command);
                 } catch (const Failure& failure) {
-                    if (failure.missingHistory() && confirmsMissingSession(client, command.target.threadId))
+                    if (!command.attachmentCount && failure.missingHistory() && confirmsMissingSession(client, command.target.threadId))
                         return result(Outcome::NotAccepted, "The T3 Session was removed");
                     throw;
                 }

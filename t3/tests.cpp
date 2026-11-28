@@ -4,6 +4,7 @@
 #include "flock/web_conversation_intake.hpp"
 #include "internal.hpp"
 #include "flock/identity.hpp"
+#include "flock/base64.hpp"
 #include "flock/tasks.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/command.hpp"
@@ -21,6 +22,7 @@
 #include "flock/runtime_options.hpp"
 #include "flock/session_read.hpp"
 #include "flock/session_ref.hpp"
+#include "flock/session_prompt.hpp"
 #include "flock/store.hpp"
 #include "flock/t3.hpp"
 #include "flock/t3_command.hpp"
@@ -62,6 +64,67 @@ void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::functio
 
 namespace {
 using flockv0::test::check;
+
+void attachmentHandoff(T3& t3, T3& restarted, Command launch, const std::function<void(Json)>& fixture,
+                       const std::function<Json()>& destination) {
+    fixture({{"lineageFixture", false}, {"attachmentTools", true}});
+    launch.actionId = "attachment-launch";
+    launch.authGeneration = t3.authGeneration(launch.environmentId, launch.config);
+    launch.attachments = {{"reference.webp", "image/webp", std::string("RIFF\x00\x00\x00\x00WEBP", 12)},
+                          {"report.bin", "application/octet-stream", std::string("\0\xff\r\n", 4)}};
+    launch.attachmentCount = launch.attachments.size();
+    const auto accepted = t3.send(launch);
+    check(accepted.kind == Delivery::Kind::Accepted, "T3 did not launch with the selected files: " + accepted.detail);
+    const auto compare = [](const Json& posted, const Command& command) {
+        check(posted.at("text") == sessionPrompt(command.actionId, command.instruction), "T3 received a different instruction");
+        check(posted.at("files").size() == command.attachments.size(), "T3 received a different number of files");
+        for (std::size_t i = 0; i < command.attachments.size(); ++i) {
+            const auto& remote = posted.at("files").at(i);
+            const auto& local = command.attachments[i];
+            check(remote.at("name") == local.name && remote.at("mimeType") == local.mimeType &&
+                      remote.at("bytes") == encodeBase64(local.bytes),
+                  "T3 received changed file metadata or bytes");
+        }
+    };
+    compare(destination().at("messages").at(0), launch);
+
+    auto follow = launch;
+    follow.tool = CommandTool::message_session;
+    follow.target.threadId = accepted.run.threadId;
+    follow.actionId = "attachment-images";
+    follow.attachments = {{"first.jpg", "image/jpeg", "\xff\xd8\xff" "first"},
+                          {"second.jpg", "image/jpeg", "\xff\xd8\xff" "second"},
+                          {"third.jpg", "image/jpeg", "\xff\xd8\xff" "third"}};
+    follow.attachmentCount = follow.attachments.size();
+    fixture({{"dropAttachmentReply", true}, {"hideAttachmentEvidence", true}});
+    check(t3.send(follow).kind == Delivery::Kind::Unknown, "Lost send reply was treated as success or refusal");
+    compare(destination().at("messages").at(1), follow);
+    auto recovery = follow;
+    recovery.attachments.clear();
+    check(restarted.reconcile(recovery).kind == Delivery::Kind::Unknown, "Text alone established attachment delivery");
+    fixture({{"hideAttachmentEvidence", false}, {"dropAttachmentReply", false}});
+    check(restarted.reconcile(recovery).kind == Delivery::Kind::Accepted && destination().at("messages").size() == 2,
+          "Reconciliation missed the attachment message or resent it");
+    follow.actionId = "attachment-mixed-followup";
+    follow.attachments = launch.attachments;
+    follow.attachmentCount = follow.attachments.size();
+    check(t3.send(follow).kind == Delivery::Kind::Accepted, "Mixed attachment follow-up was refused");
+    compare(destination().at("messages").at(2), follow);
+
+    auto unauthorized = launch;
+    unauthorized.environmentId = "peer-only";
+    unauthorized.gatewayEnvironmentId = launch.environmentId;
+    const auto pending = destination().at("pending");
+    const auto unsupported = t3.send(unauthorized);
+    check(unsupported.definitelyUnsent && unsupported.detail.find("reference.webp") != std::string::npos &&
+              unsupported.detail.find("linked destination") != std::string::npos && destination().at("pending") == pending,
+          "Gateway-only destination was not rejected before upload");
+    fixture({{"rejectUpload", "report.bin"}});
+    const auto failed = t3.send(launch);
+    check(failed.definitelyUnsent && failed.detail.find("report.bin") != std::string::npos && failed.detail.find("413") != std::string::npos &&
+              destination().at("pending") == pending && destination().at("messages").size() == 3,
+          "Upload failure sent partial work, left staged bytes behind, or failed to identify the rejected file");
+}
 
 void lineageFallback(T3& t3, Command launch, const std::function<void(Json)>& fixture, const std::function<Json(std::string_view)>& effects,
                      const std::function<Json()>& sessions) {
@@ -848,6 +911,11 @@ int main(int argc, char** argv) {
             return Json::parse(response.body);
         });
         sessionOriginLaunch(*adapter, home.parent_path() / "session-origin-launch.db", fixture, effects);
+        attachmentHandoff(*adapter, *restarted, launch, fixture, [&] {
+            const auto response = http(origin + "/fixture/attachments", "GET");
+            check(response.status == 200, "Could not inspect files on the T3 fixture");
+            return Json::parse(response.body);
+        });
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -18,6 +18,10 @@ struct Conflict : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+struct InvalidAttachment : Conflict {
+    using Conflict::Conflict;
+};
+
 struct AccessDenied : Conflict {
     AccessDenied() : Conflict("You do not have permission to do this.") {}
     using Conflict::Conflict;

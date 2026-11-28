@@ -1,6 +1,9 @@
 #pragma once
 
 #include "flock/run_ref.hpp"
+#include "flock/task_attachment.hpp"
+
+#include <vector>
 
 namespace flockv0 {
 struct OutboxSourceRun {
@@ -23,6 +26,7 @@ struct OutboxInstruction {
     std::optional<std::int64_t> revisionId;
     bool conflicting;
     std::optional<OutboxSource> source;
+    std::vector<TaskAttachmentRef> attachments{};
 };
 
 }

@@ -591,9 +591,10 @@ function eventCard(event, context, place, report) {
     if (trigger) inlineEdge(text, false).prepend(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     bubble.append(text);
     text.classList.add('foldable-text');
-    if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
-      const count = data.imageAttachmentCount;
-      bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
+    if (event.kind === 'conversation_message') {
+      const count = data.attachmentCount ?? data.imageAttachmentCount;
+      const noun = count === data.imageAttachmentCount ? 'image' : 'file';
+      if (count > 0) bubble.append(node('p', 'message-attachments', `${count} ${noun}${count === 1 ? '' : 's'} attached`));
     }
     if (event.kind === 'user_answer') {
       const question = data.question;

@@ -5,7 +5,7 @@ import { createBotEditor } from './bot-editor.js';
 import { mountBotPause } from './bot-pause.js';
 import { browserNotificationsEnabled, createBrowserNotifications, onNotificationPreferenceChange } from './browser-notifications.mjs';
 import { messageSide } from './chat-grouping.mjs';
-import { screenshotMessage } from './composer-screenshots.mjs';
+import { attachmentMessageBody, screenshotMessage } from './composer-screenshots.mjs';
 import { handleComposerEnter, isComposerSuggestionKey } from './composer-shortcuts.mjs';
 import { decisionConfirmations, responseErrors } from './conversation-copy.mjs';
 import { mountConversationFind } from './conversation-find.mjs';
@@ -582,7 +582,7 @@ async function submit(event) {
       screenshots.pending = prepared.pending;
     } else payload = composer.prepareSend(reply);
     context.pendingSentAfterId = context.newestEvent ?? 0;
-    await api('messages', payload);
+    await api('messages', attachments.length ? attachmentMessageBody(payload) : payload);
     if (attachments.length) {
       composer.settleScreenshotSend(payload);
       clearScreenshots(composer, reply);
@@ -597,7 +597,7 @@ async function submit(event) {
       else composer.settleSend(payload, false);
     }
     if (error.message === 'bot_paused') void Promise.all([refreshBots(), context.refresh()]);
-    const notice = error.message === 'removed_bot_setting' ? error.data.message : responseErrors[error.message];
+    const notice = ['removed_bot_setting', 'invalid_attachment'].includes(error.message) ? error.data.message : responseErrors[error.message];
     setNotice(context, notice ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {

@@ -44,7 +44,7 @@ public:
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request, const TaskRoute&, Id messageId,
                              const std::optional<OutboxSource>& source, bool resume, const WorkSession* selectedSession = nullptr);
     bool acceptInstruction(TaskData& task, Id messageId, int step, std::string_view instruction, std::optional<OutboxSource> source,
-                           const TaskChange* change);
+                           const TaskChange* change, std::vector<TaskAttachmentRef> attachments = {});
     Id submitRequest(const Intake&, const Person* requester);
     Id submit(const Intake&, Id sourceMessageId = 0, const OutboxSource* source = nullptr, std::optional<TaskTrigger> trigger = {},
               std::optional<std::string> requester = {});

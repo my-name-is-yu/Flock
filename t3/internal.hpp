@@ -116,6 +116,8 @@ public:
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
     Json call(std::string_view tool, Json arguments);
+    Json toolInputs();
+    void uploadAttachment(const Json& response, const std::string& bytes);
 private:
     Json rpc(std::string_view method, const Json& arguments);
     void record(recording::Capture&, unsigned id, std::string_view method, const Json& arguments, const Json& message,

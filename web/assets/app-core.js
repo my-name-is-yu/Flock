@@ -115,7 +115,7 @@ export async function api(path, body, { method = body ? 'POST' : 'GET', signal }
   if (method !== 'GET') headers.set('X-Flock-Action', '1');
   if (body) headers.set('Content-Type', 'application/json');
   const response = await fetch(`/api/${path}`, {
-    method, headers, credentials: 'same-origin', signal, body: body ? JSON.stringify(body) : undefined,
+    method, headers, credentials: 'same-origin', signal, body: body instanceof Blob ? body : body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status, data });

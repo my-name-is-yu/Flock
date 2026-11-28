@@ -1,15 +1,24 @@
 #pragma once
 
 #include <cstddef>
+#include <string_view>
 
 namespace flockv0::limits::messages {
 inline constexpr std::size_t maxBodyBytes = 16'000;
 inline constexpr std::size_t maxWaitAnswerBytes = 8'000;
-inline constexpr std::size_t maxAttachments = 4;
-inline constexpr std::size_t maxImageBytes = 2 * 1024 * 1024;
+inline constexpr std::size_t maxAttachments = 8;
+inline constexpr std::size_t maxImageBytes = 10 * 1024 * 1024;
+inline constexpr std::size_t maxFileBytes = 50 * 1024 * 1024;
+inline constexpr std::size_t maxEncodedFilesBytes = maxAttachments * ((maxFileBytes + 2) / 3 * 4);
 inline constexpr std::size_t maxEncodedImageBytes = (maxImageBytes + 2) / 3 * 4;
 inline constexpr std::size_t maxEncodedImagesBytes = maxAttachments * maxEncodedImageBytes;
 static_assert(maxWaitAnswerBytes <= maxBodyBytes);
+}
+
+namespace flockv0::limits::messages {
+inline bool isAttachmentImage(std::string_view mime) {
+    return mime == "image/png" || mime == "image/jpeg" || mime == "image/gif" || mime == "image/webp";
+}
 }
 
 namespace flockv0::limits::mcp {

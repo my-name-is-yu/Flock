@@ -5,111 +5,35 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-async function exercise(resizeScreenshot, stageScreenshots) {
+async function exercise(stageAttachments) {
   const check = (value, message) => { if (!value) throw new Error(message); };
-  const attachmentLimit = 4;
-  async function picture(width, height, type, noisy = false) {
-    const canvas = new OffscreenCanvas(width, height);
-    const context = canvas.getContext('2d', { alpha: false });
-    if (noisy) {
-      const image = context.createImageData(width, height);
-      let seed = 17;
-      for (let offset = 0; offset < image.data.length; offset += 4) {
-        seed ^= seed << 13;
-        seed ^= seed >>> 17;
-        seed ^= seed << 5;
-        image.data[offset] = seed & 255;
-        image.data[offset + 1] = (seed >>> 8) & 255;
-        image.data[offset + 2] = (seed >>> 16) & 255;
-        image.data[offset + 3] = 255;
-      }
-      context.putImageData(image, 0, 0);
-    }
-    const blob = await canvas.convertToBlob({ type });
-    const extension = type === 'image/png' ? 'png' : type === 'image/webp' ? 'webp' : 'jpg';
-    return new File([blob], `Screen.${extension}`, { type });
-  }
-  async function dimensions(blob) {
-    const bitmap = await createImageBitmap(blob);
-    const { width, height } = bitmap;
-    bitmap.close();
-    return [width, height].join('x');
-  }
-
-  const small = await picture(48, 24, 'image/png');
-  check(await resizeScreenshot(small) === small, 'A fitting PNG should keep its original bytes');
-  const smallJpeg = await picture(48, 24, 'image/jpeg');
-  check(await resizeScreenshot(smallJpeg) === smallJpeg, 'A fitting JPEG should keep its original bytes');
-  const smallWebp = await picture(48, 24, 'image/webp');
-  check(smallWebp.type === 'image/webp', 'Test runtime must encode a WebP blob');
-  const transcodedWebp = await resizeScreenshot(smallWebp);
-  check(transcodedWebp.type === 'image/png' || transcodedWebp.type === 'image/jpeg',
-    'A WebP image should transcode to PNG or JPEG');
-  const transparentWebp = new OffscreenCanvas(48, 24);
-  transparentWebp.getContext('2d').fillRect(0, 0, 12, 12);
-  const transparentWebpFile = new File([await transparentWebp.convertToBlob({ type: 'image/webp' })], 'Clear.webp', { type: 'image/webp' });
-  const transparentWebpResult = await resizeScreenshot(transparentWebpFile);
-  check(transparentWebpResult.type === 'image/png', 'A transparent WebP should transcode to PNG');
-  const webpDraft = { images: [] };
-  await stageScreenshots(webpDraft, [smallWebp], attachmentLimit, () => true);
-  check(webpDraft.images.length === 1 && /\.(png|jpg)$/.test(webpDraft.images[0].attachment.name) &&
-    webpDraft.images[0].attachment.mimeType === transcodedWebp.type,
-    'Staged WebP should use a transcoded PNG or JPEG attachment');
-  for (const image of webpDraft.images) URL.revokeObjectURL(image.preview);
-
-  const wide = await picture(3840, 2160, 'image/png');
-  const resized = await resizeScreenshot(wide);
-  check(await dimensions(resized) === '2048x1152', 'A 4K PNG should scale down and retain its aspect ratio');
-
-  const tall = await picture(1800, 3200, 'image/jpeg');
-  check(await dimensions(await resizeScreenshot(tall)) === '1152x2048', 'A tall JPEG should scale down');
-
-  const transparent = new OffscreenCanvas(3840, 2160);
-  const transparentContext = transparent.getContext('2d');
-  transparentContext.fillStyle = 'white';
-  transparentContext.fillRect(0, 0, 100, 100);
-  const transparentFile = new File([await transparent.convertToBlob()], 'Transparent.png', { type: 'image/png' });
-  const transparentResult = await resizeScreenshot(transparentFile);
-  const transparentBitmap = await createImageBitmap(transparentResult);
-  const sample = new OffscreenCanvas(100, 100).getContext('2d');
-  sample.drawImage(transparentBitmap, 0, 0);
-  transparentBitmap.close();
-  check(transparentResult.type === 'image/png' && sample.getImageData(0, 0, 1, 1).data[3] === 255 &&
-    sample.getImageData(90, 90, 1, 1).data[3] === 0, 'Resizing must preserve opaque and transparent pixels');
-
-  const dense = await picture(2048, 2048, 'image/png', true);
-  check(dense.size > 2 * 1024 * 1024 && dense.size < 20 * 1024 * 1024, 'Dense source must exercise the byte limit');
-  const prepared = await resizeScreenshot(dense);
-  check(prepared.type === 'image/jpeg' && prepared.size <= 2 * 1024 * 1024, 'Dense PNG should fit as a JPEG');
-  check((await dimensions(prepared)).split('x').every((edge) => Number(edge) <= 2048), 'Dense output dimensions should fit');
-
-  const mismatch = new File([smallJpeg], 'mismatch.png', { type: 'image/png' });
-  const corrupt = new File([await small.slice(0, 16).arrayBuffer()], 'corrupt.png', { type: 'image/png' });
-  for (const file of [mismatch, corrupt]) {
-    const draft = { images: [] };
-    await stageScreenshots(draft, [file], attachmentLimit, () => true);
-    check(draft.images.length === 0 && draft.error, 'Invalid image should not be staged');
-  }
-
+  const canvas = new OffscreenCanvas(3840, 2160);
+  canvas.getContext('2d').fillRect(0, 0, 16, 16);
+  const source = await canvas.convertToBlob({ type: 'image/webp' });
+  check(source.type === 'image/webp', 'Test runtime should encode WebP');
+  const picture = new File([source], 'Original.webp', { type: source.type });
+  const report = new File([new Uint8Array([0, 65, 255])], 'Report.bin', { type: 'application/octet-stream' });
+  const oversize = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'Large.webp', { type: source.type });
   const draft = { images: [] };
-  const unnamedType = new File([small], '画'.repeat(55) + '.png');
-  await stageScreenshots(draft, [dense, wide, tall, unnamedType, small], attachmentLimit, () => true);
-  check(draft.images.length === 4 && draft.error === 'Attach up to 4 images per message.', 'Composer should keep four images');
-  const { attachment, preview } = draft.images[0];
-  const previewBlob = await fetch(preview).then((response) => response.blob());
-  check(attachment.name === 'Screen.jpg' && attachment.mimeType === previewBlob.type &&
-    atob(attachment.dataBase64).length === previewBlob.size && previewBlob.size <= 2 * 1024 * 1024,
-  'The attachment and preview should use the prepared JPEG');
-  check(new TextEncoder().encode(draft.images[3].attachment.name).length === 126,
-    'An unknown MIME should be sniffed and a long filename should be truncated by UTF-8 length');
-  for (const image of draft.images) URL.revokeObjectURL(image.preview);
+  await stageAttachments(draft, [oversize, picture, report], 8, () => true);
+  check(draft.images.length === 2 && draft.error.startsWith('Large.webp:'), 'Oversized image must be identified');
+  for (const [index, original] of [picture, report].entries()) {
+    const { attachment, preview } = draft.images[index];
+    const restored = Uint8Array.from(atob(attachment.dataBase64), (byte) => byte.charCodeAt(0));
+    const bytes = new Uint8Array(await original.arrayBuffer());
+    check(attachment.name === original.name && attachment.mimeType === original.type &&
+      restored.length === bytes.length && restored.every((byte, i) => byte === bytes[i]),
+    'Staged attachment must match the original file');
+    check(Boolean(preview) === (original === picture), 'Only the WebP needs an image preview');
+    if (preview) URL.revokeObjectURL(preview);
+  }
 
   const stale = { images: [] };
   let current = true;
-  const staging = stageScreenshots(stale, [small], attachmentLimit, () => current);
+  const staging = stageAttachments(stale, [report], 8, () => current);
   current = false;
   await staging;
-  check(stale.images.length === 0 && !stale.error, 'An image should be dropped when its draft changes');
+  check(stale.images.length === 0 && !stale.error, 'A file should be dropped when its draft changes');
 }
 
 const directory = mkdtempSync(join(tmpdir(), 'flock-screenshot-resize-'));
@@ -117,9 +41,9 @@ const assets = new URL('../assets/', import.meta.url);
 const readAsset = (path) => readFileSync(new URL(`.${path}`, assets));
 const module = readAsset('/composer-screenshots.mjs');
 const html = `<!doctype html><script type="module">
-  import { resizeScreenshot, stageScreenshots } from '/composer-screenshots.mjs';
+  import { stageAttachments } from '/composer-screenshots.mjs';
   try {
-    await (${exercise})(resizeScreenshot, stageScreenshots);
+    await (${exercise})(stageAttachments);
     await fetch('/result?passed');
   } catch (error) {
     await fetch('/result?error=' + encodeURIComponent(error.message));
@@ -133,12 +57,16 @@ function appFixtures() {
     if (typeof path === 'string' && path.startsWith('/result?')) return realFetch(path, options);
     if (path === '/api/bots') return Response.json([bot]);
     if (path === '/api/inbox') return Response.json({ items: [] });
+    if (path === '/api/messages') {
+      window.attachmentSubmission = JSON.parse(await options.body.text());
+      return Response.json({ messageId: 1, status: 'received' });
+    }
     if (path.startsWith('/api/schedules?')) return Response.json({ active: [], history: [], canManage: true });
     if (path.startsWith('/api/view?')) {
       return Response.json({
         bot, events: [], olderBefore: 0, presence: 'idle', activeSessions: [], activeTasks: [], parallelTasks: [],
         sessionTasks: [], sessionsBefore: 0, sessionCursor: 0, waits: [], canDecide: true,
-        composerPerson: 'local-owner', limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 4 },
+        composerPerson: 'local-owner', limits: { messageBytes: 16000, waitAnswerBytes: 8000, attachments: 8 },
       });
     }
     return Response.json({ error: 'unknown_path' }, { status: 404 });
@@ -155,7 +83,7 @@ async function exerciseComposerDrop() {
     check(predicate(), message);
   }
   await waitFor(() => byId('composer') && !byId('composer-container').hidden, 'Composer did not appear');
-  check(byId('screenshot-input').accept === 'image/png,image/jpeg,image/webp', 'File input must accept WebP images');
+  check(byId('screenshot-input').accept === '', 'File input should accept general files');
   const canvas = new OffscreenCanvas(8, 8);
   canvas.getContext('2d').fillRect(0, 0, 8, 8);
   const blob = await canvas.convertToBlob({ type: 'image/webp' });
@@ -174,12 +102,27 @@ async function exerciseComposerDrop() {
   composer.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
   check(!composer.classList.contains('dragover'), 'Drop did not clear dragover');
   await waitFor(() => byId('screenshot-previews').childElementCount === 1, 'Dropped WebP image did not stage');
-  check(byId('notice').textContent === 'Add a message to send images.' && byId('send').disabled,
+  check(byId('notice').textContent === 'Add a message to send files.' && byId('send').disabled,
     'Staging images without text did not show the guidance notice');
   byId('message').value = 'Please review';
   byId('message').dispatchEvent(new Event('input', { bubbles: true }));
   check(!byId('send').disabled && byId('notice').textContent === '',
     'Typing a message did not enable send and clear the image notice');
+  const generalFile = new DataTransfer();
+  generalFile.items.add(new File([new Uint8Array([0, 65, 255])], 'Report.bin', { type: 'application/octet-stream' }));
+  const picker = byId('screenshot-input');
+  picker.addEventListener('click', (event) => event.preventDefault());
+  byId('attach-screenshots').click();
+  picker.files = generalFile.files;
+  picker.dispatchEvent(new Event('change', { bubbles: true }));
+  await waitFor(() => byId('screenshot-previews').childElementCount === 2, 'General file did not stage');
+  byId('send').click();
+  await waitFor(() => window.attachmentSubmission, 'Composer did not send the staged attachments');
+  const sent = window.attachmentSubmission;
+  check(sent.text === 'Please review' && sent.attachments.length === 2 &&
+    sent.attachments[0].name === 'Dropped.webp' && sent.attachments[0].mimeType === 'image/webp' &&
+    sent.attachments[1].name === 'Report.bin' && sent.attachments[1].mimeType === 'application/octet-stream' &&
+    sent.attachments[1].dataBase64 === 'AEH/', 'Message request changed the selected files');
 }
 const appHtml = readAsset('/index.html').toString().replace('<script type="module" src="/app.js"></script>', `
   <script>(${appFixtures})();</script>

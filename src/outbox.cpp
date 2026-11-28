@@ -77,6 +77,8 @@ OutboxInstruction readInstruction(const Json& data, const RecordDecoder& row) {
                            .conflicting = row.get<bool>(data, "conflicting"),
                            .source = std::nullopt};
     if (const auto source = row.find(data, "source"); source != data.end()) item.source = decodeOutboxSource(*source, row.nested("source"));
+    if (const auto files = row.find(data, "attachments"); files != data.end())
+        item.attachments = decodeAttachmentRefs(*files, row.nested("attachments"));
     return item;
 }
 
@@ -207,7 +209,20 @@ Json instructionJson(const OutboxInstruction& item) {
                  {"revisionId", nullableId(item.revisionId)},
                  {"conflicting", item.conflicting}};
     if (item.source) data["source"] = sourceJson(*item.source);
+    if (!item.attachments.empty()) data["attachments"] = attachmentRefsJson(item.attachments);
     return data;
+}
+
+Json attachmentRefsJson(const std::vector<TaskAttachmentRef>& refs) {
+    Json data = Json::array();
+    for (const auto& ref : refs) data.push_back({{"messageId", ref.messageId}, {"attachmentId", ref.attachmentId}});
+    return data;
+}
+
+std::vector<TaskAttachmentRef> decodeAttachmentRefs(const Json& data, const RecordDecoder& row) {
+    return readArray<TaskAttachmentRef>(data, row, [](const Json& item, const RecordDecoder& entry) {
+        return TaskAttachmentRef{entry.get<Id>(item, "messageId"), entry.get<std::string>(item, "attachmentId")};
+    });
 }
 
 OutboxInstruction decodeOutboxInstruction(const Json& data, const RecordDecoder& row) {
@@ -281,6 +296,7 @@ Json outboxPayload(const OutboxAction& outbox) {
     if (command.receipt) data["receipt"] = runJson(*command.receipt);
     if (outbox.stop) writeStopPayload(data, *outbox.stop);
     for (const auto& item : outbox.instructions) data["instructions"].push_back(instructionJson(item));
+    if (!outbox.attachments.empty()) data["attachments"] = attachmentRefsJson(outbox.attachments);
     for (const auto& source : outbox.sourceResultRefs) data["sourceResultRefs"].push_back(sourceJson(source));
     return data;
 }
@@ -351,6 +367,8 @@ Outbox decodeOutboxRow(const Statement& columns) {
         command.instruction = columns.string(9);
     }
     outbox.instructions = readArray(row.require(data, "instructions"), row.nested("instructions"), readInstruction);
+    if (const auto files = row.find(data, "attachments"); files != data.end())
+        outbox.attachments = decodeAttachmentRefs(*files, row.nested("attachments"));
     outbox.contextIds = readContext(row.require(data, "contextIds"), row.nested("contextIds"));
     outbox.sourceResultRefs = readArray(row.require(data, "sourceResultRefs"), row.nested("sourceResultRefs"), readSource);
     outbox.destinationAction = row.optional<bool>(data, "destinationAction").value_or(false);

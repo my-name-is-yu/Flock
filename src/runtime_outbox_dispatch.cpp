@@ -33,6 +33,7 @@
 #include "flock/outbox.hpp"
 #include "flock/outbox_instruction.hpp"
 #include "bot_lifecycle_storage.hpp"
+#include "attachment_storage.hpp"
 #include "conversation_turns.hpp"
 #include "database.hpp"
 #include "flock/policy.hpp"
@@ -136,6 +137,7 @@ Command runtime::OutboxDispatch::command(const TaskData& task, const Outbox& act
     Command c{action.command};
     c.authGeneration = action.authGeneration;
     c.ownerBotId = task.botId;
+    c.attachmentCount = action.attachments.size();
     if (action.phase == OutboxPhase::started && c.tool != CommandTool::answer_session_question)
         c.instruction = SessionPrompts::dispatchedWorkPrompt(action);
     c.config = task.config;
@@ -212,11 +214,12 @@ AssignedRun runtime::OutboxDispatch::recordRunAssignment(const TaskData& task, c
     }
     auto sources = Json::array();
     for (const auto& source : action.sourceResultRefs) sources.push_back(sourceJson(source));
-    database.writeJournal(task.id, JournalKind::run_started,
-                          {{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
-                           {"actionId", cmd.actionId},
-                           {"revisionId", revisionJson(action.revisionId)},
-                           {"sourceResultRefs", std::move(sources)}});
+    Json entry{{"run", destination ? destinationRunJson(*destination) : assignedRunJson(run)},
+               {"actionId", cmd.actionId},
+               {"revisionId", revisionJson(action.revisionId)},
+               {"sourceResultRefs", std::move(sources)}};
+    if (!action.attachments.empty()) entry["attachmentDelivery"] = "accepted_by_t3";
+    database.writeJournal(task.id, JournalKind::run_started, entry);
     return run;
 }
 
@@ -348,6 +351,7 @@ void runtime::OutboxDispatch::applyDelivery(Id id, const Outbox& action, Deliver
             run.detail.reset();
             run.retryAt.reset();
             recordRunAssignment(task, action, outcome.run, &run);
+            task.initialAttachments.clear();
             return true;
         }
         if (accepted) {
@@ -363,6 +367,8 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
 )SQL",
                                   {outcome.run.runId, *action.sessionParticipationId, task.sourceMessageId.value()});
                 instructionDelivery(task, action);
+                if (action.command.tool == CommandTool::delegate || action.command.tool == CommandTool::start_in_session)
+                    task.initialAttachments.clear();
                 if ((action.command.tool == CommandTool::delegate || action.command.tool == CommandTool::start_in_session) &&
                     !task.replanning) {
                     task.newSessionRequired = false;
@@ -403,7 +409,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
     const auto id = task.id;
     const bool destination = action.destinationAction;
     const auto applyT3Delivery = [&](Delivery observed) {
-        if (!destination && observed.kind == Delivery::Kind::Settings)
+        if (!destination && observed.kind == Delivery::Kind::Settings && action.attachments.empty())
             observed.detail = "Check the Bot’s Session settings and the T3 connection in Flock settings.";
         applyDelivery(id, action, std::move(observed), task.generation);
     };
@@ -517,6 +523,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                 }
             }
             cmd.instruction = action.command.instruction;
+            cmd.attachmentCount = action.attachments.size();
         } catch (const Conflict& error) {
             return applyDelivery(id, action, {Delivery::Kind::Settings, {}, error.what(), true});
         }
@@ -540,6 +547,7 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
                         {"config", cmd.config},
                         {"environmentId", cmd.environmentId}};
     if (cmd.sessionOrigin) payload["delegatedFrom"] = sessionOriginJson(*cmd.sessionOrigin);
+    if (!action.attachments.empty()) payload["attachments"] = attachmentRefsJson(action.attachments);
     const auto assess = [&](const TaskData& current, bool claim) {
         const auto origin = policyApprovals.taskPolicyOrigin(current);
         if (usesExistingSession) {
@@ -612,6 +620,8 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
                 action.sessionParticipationId = participant.number(0);
         }
         if (sendsWork) cmd.instruction = prompts.prepareStandingContext(action, current, clock());
+        if (!action.attachments.empty())
+            cmd.attachments = attachments.taskAttachments(cmd.ownerBotId, action.attachments, policy.secretRedactor(cmd.ownerBotId));
         if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
         // A refused send is retried until T3 accepts it. One entry per action is enough for the history.
         if (!database
@@ -733,6 +743,9 @@ bool runtime::OutboxDispatch::queueAction(TaskData& task, const std::string& id,
     action.revisionId = task.currentRevision;
     const Id taskId = task.id;
     action.instructions = std::move(prompt.pending);
+    if (tool == CommandTool::delegate || tool == CommandTool::start_in_session) action.attachments = task.initialAttachments;
+    for (const auto& item : action.instructions)
+        action.attachments.insert(action.attachments.end(), item.attachments.begin(), item.attachments.end());
     action.contextIds = std::move(prompt.contextIds);
     action.sourceResultRefs = std::move(prompt.resultReferences);
     action.destinationAction = destination != nullptr;

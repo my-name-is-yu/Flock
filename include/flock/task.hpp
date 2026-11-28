@@ -105,6 +105,7 @@ struct TaskData {
     bool replanning = false, queuedInT3 = false, cancelledByBotPause = false;
     std::optional<std::string> replanningDetail{}, cancellationDetail{};
     std::vector<OutboxInstruction> pendingInstructions{}, cancelledInstructions{};
+    std::vector<TaskAttachmentRef> initialAttachments{};
     std::optional<PendingRunReport> pendingRunReport{};
     std::optional<std::int64_t> t3CheckAt{};
     std::optional<WorkSession> selectedSession{};

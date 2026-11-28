@@ -170,6 +170,7 @@
   to { opacity: 1; transform: none; }
 }
 .screenshot-preview img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
+.screenshot-preview > span { display: block; padding: .5rem 2rem .5rem .5rem; overflow-wrap: anywhere; max-height: 100%; overflow: hidden; }
 .screenshot-preview .remove-screenshot {
   position: absolute; top: .2rem; right: .2rem; width: 1.65rem; height: 1.65rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-full); background: var(--raised); font-size: 1rem;
