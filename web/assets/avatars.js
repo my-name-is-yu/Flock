@@ -1,5 +1,5 @@
-import { DEFAULT_COLOR, getExample, renderAvatarSvg, validateAvatar } from '/vendor/open-bot-avatar/index.js';
-import { mountAvatar } from '/vendor/open-bot-avatar/dom/index.js';
+import { DEFAULT_COLOR, getExample, renderAvatarSvg, validateAvatar } from './vendor/open-bot-avatar/index.js';
+import { mountAvatar } from './vendor/open-bot-avatar/dom/index.js';
 
 export const AVATAR_SHAPES = [
   ['mug', 'Mug'],

@@ -1,4 +1,4 @@
-import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 
 const errors = new Map([
   ['bot_busy', 'Finish or stop this Bot’s active work, then try again.'],

@@ -27,6 +27,7 @@ SINGLE_OWNERS = (
 )
 SCRIPT_OWNERS = (
     (re.compile(r"\bfunction (node|element)\(tag\b"), "web/assets/dom.js", "create elements with node from dom.js"),
+    (re.compile(r"""^import [^;]*'/""", re.MULTILINE), None, "import page scripts by relative path, as in './dom.js'"),
 )
 
 # Components wired in Store::Impl may refer to each other in a cycle only inside these groups.
@@ -103,7 +104,7 @@ def violations(root):
         text = path.read_text(errors="surrogateescape")
         for pattern, owner, advice in SCRIPT_OWNERS:
             if relative.as_posix() != owner and pattern.search(text):
-                found.append(f"{relative}: {advice}; only {owner} does this directly")
+                found.append(f"{relative}: {advice}" + (f"; only {owner} does this directly" if owner else ""))
     for layer in (*ALLOWED, "tests"):
         allowed = ALLOWED.get(layer)
         for path in sorted((root / layer).rglob("*")):
