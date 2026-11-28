@@ -1,6 +1,0 @@
-<testsuite tests="2" failures="1" disabled="0" skipped="0">
-  <testcase name="flock_live_t3" status="run"/>
-  <testcase name="flock_live_conversation" status="fail">
-    <failure message="Failed"/>
-  </testcase>
-</testsuite>

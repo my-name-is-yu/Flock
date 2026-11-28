@@ -129,10 +129,10 @@ struct FakeMcp : McpTools {
         ++calls;
         return {{{"observed", "invoked"}}, invokeFails};
     }
-    Json readResource(std::string_view, std::string_view) override {
+    Json readResource(std::string_view, std::string_view uri) override {
         ++reads;
         if (onRead) onRead();
-        return {{"invocations", calls.load()}};
+        return {{"invocations", calls.load()}, {"uri", uri}};
     }
 };
 
@@ -659,53 +659,22 @@ void storeRemainsResponsiveDuringSessionEventRead() {
           "The batch lost a Session event or Store read result");
 }
 
-struct Measurement {
-    int conversationAttempts, botToolAttempts;
-    std::chrono::milliseconds elapsed;
-};
-
-Measurement measure(const std::vector<Decision>& reads, bool batch, Fixture& f) {
-    const auto delay = [] { std::this_thread::sleep_for(200ms); };
-    f.t3.onSearch = f.t3.onReadiness = f.t3.onEvents = f.mcp->onRead = delay;
-    const auto start = std::chrono::steady_clock::now();
-    f.receive(batch ? reads : std::vector<Decision>{reads.front()});
-    if (!batch)
-        for (auto read = reads.begin() + 1; read != reads.end(); ++read) f.model.followUps.push_back({{*read}});
+void batchMcpReadsKeepAttemptAccountingAndResults() {
+    Fixture f;
+    const auto otherRead = call("mcp_read_resource", {{"server", "fixture"}, {"uri", "fixture://other"}});
+    f.receive({readResource, otherRead});
     f.runtime->runConversations();
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
-    f.checkFinished(batch ? 2 : static_cast<int>(reads.size()) + 1);
-    const auto id = std::to_string(f.message);
-    const auto purposes = Json::parse(
-        f.query("SELECT json_group_object(purpose,n) FROM (SELECT purpose,count(*) n FROM model_attempts WHERE message_id=" + id +
-                " GROUP BY purpose)"));
-    check(purposes.size() == 1 + static_cast<std::size_t>(purposes.contains("bot_tool")),
-          "Measurement included unexpected attempt purposes");
-    const auto& evidence = f.model.turns.back();
-    check(evidence.size() == reads.size(), "The model did not see every measured read");
-    for (std::size_t i = 0; i < reads.size(); ++i)
-        check(evidence[i].at("tool") == reads[i].tool && evidence[i].at("result").at("ok") == true,
-              "A measured read failed or reached the model out of order");
-    return {purposes.at("conversation_turn"), purposes.value("bot_tool", 0), elapsed};
-}
+    f.checkFinished(2);
 
-void measureBatches() {
-    std::cout << "| Scenario | Mode | Conversation attempts | Bot tool attempts | Wall ms |\n"
-                 "| --- | --- | ---: | ---: | ---: |\n";
-    const auto compare = [](std::string_view scenario, const auto& makeReads, int botAttempts) {
-        for (const bool batch : {false, true}) {
-            Fixture f;
-            const auto m = measure(makeReads(f), batch, f);
-            std::cout << "| " << scenario << " | " << (batch ? "batch" : "baseline") << " | " << m.conversationAttempts << " | "
-                      << m.botToolAttempts << " | " << m.elapsed.count() << " |\n";
-            check(m.botToolAttempts == botAttempts, "Measurement disagreed with Bot tool attempt accounting");
-        }
-    };
-    compare("Session search + readiness", [](Fixture&) { return std::vector{search, readiness}; }, 0);
-    compare("Four conversation reads", [](Fixture& f) { return std::vector{search, readiness, sessionEvents(f), call("find_tasks")}; }, 0);
-    compare(
-        "Bot tool reads",
-        [](Fixture&) { return std::vector{readResource, call("mcp_read_resource", {{"server", "fixture"}, {"uri", "fixture://other"}})}; },
-        2);
+    const auto results = f.results();
+    const auto& modelReads = f.model.turns.back();
+    check(f.mcp->reads == 2 &&
+              f.query("SELECT count(*) FROM model_attempts WHERE purpose='bot_tool' AND message_id=" + std::to_string(f.message)) == "2",
+          "The two MCP reads did not each record one Bot tool attempt");
+    check(results.size() == 2 && modelReads.size() == 2 && results[0].at("data").at("uri") == "fixture://data" &&
+              results[1].at("data").at("uri") == "fixture://other" && modelReads[0].at("result") == results[0] &&
+              modelReads[1].at("result") == results[1],
+          "The MCP read results did not reach the model in their original slots");
 }
 }
 
@@ -714,10 +683,6 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "gateway-only-cancel") {
             gatewayOnlyCancelDoesNotCancelBatchSibling();
             std::cout << "Gateway-only batch cancel acceptance passed\n";
-            return 0;
-        }
-        if (argc == 2 && std::string_view(argv[1]) == "--measure") {
-            measureBatches();
             return 0;
         }
         mixedReads();
@@ -746,6 +711,7 @@ int main(int argc, char** argv) {
         }
         singleEventReadRecoversFromFailedWrites();
         storeRemainsResponsiveDuringSessionEventRead();
+        batchMcpReadsKeepAttemptAccountingAndResults();
         std::cout << "Conversation batch acceptance passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

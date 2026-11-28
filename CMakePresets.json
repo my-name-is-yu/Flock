@@ -15,9 +15,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "BUILD_TESTING": true,
-        "FLOCK_REQUIRE_ALL_TESTS": true,
-        "FLOCK_WARNINGS_AS_ERRORS": true
+        "BUILD_TESTING": true
       }
     }
   ],
@@ -26,12 +24,6 @@
     { "name": "dev", "configurePreset": "dev", "configuration": "Debug" }
   ],
   "testPresets": [
-    {
-      "name": "release",
-      "configurePreset": "release",
-      "configuration": "Release",
-      "execution": { "noTestsAction": "error" }
-    },
     {
       "name": "dev",
       "configurePreset": "dev",

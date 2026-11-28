@@ -4,30 +4,14 @@ set -eu
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$source_dir"
 
-if [ "$#" -eq 1 ] && [ "$1" = --changed-only ]; then
-    set -- t3/ ':(glob)app/model*' ':(glob)app/chatgpt*' src/conversation_agent.cpp \
-        src/runtime.cpp src/runtime_components.hpp \
-        include/flock/bot_change.hpp include/flock/intake.hpp include/flock/json.hpp \
-        include/flock/model.hpp include/flock/model_error.hpp include/flock/person.hpp include/flock/runtime.hpp \
-        include/flock/session_question.hpp include/flock/store.hpp include/flock/t3.hpp \
-        include/flock/t3_command.hpp include/flock/t3_session.hpp include/flock/types.hpp ':(glob)tests/live_*'
-    base=$(git merge-base origin/main HEAD)
-    changed=$(git diff --name-only --no-renames "$base" -- "$@")
-    if [ -z "$changed" ]; then
-        changed=$(git ls-files --others --exclude-standard -- "$@")
-    fi
-    if [ -z "$changed" ]; then
-        printf '%s\n' 'live gate not required'
-        exit 0
-    fi
-elif [ "$#" -ne 0 ]; then
-    printf 'Usage: %s [--changed-only]\n' "$0" >&2
+if [ "$#" -ne 0 ]; then
+    printf 'Usage: %s\n' "$0" >&2
     exit 2
 fi
 
 build_dir="$source_dir/build-live"
 cmake -S "$source_dir" -B "$build_dir" -DBUILD_TESTING=ON -DFLOCK_LIVE_TESTS=ON
-cmake --build "$build_dir" --config Debug
+cmake --build "$build_dir" --config Debug --target flock_live_t3 flock_live_conversation
 
 temp_root=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
 report_dir=$(mktemp -d "$temp_root/flock-live.XXXXXXXX")

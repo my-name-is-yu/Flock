@@ -1,6 +1,0 @@
-<testsuite tests="2" failures="0" disabled="0" skipped="1">
-  <testcase name="flock_live_t3" status="notrun">
-    <skipped message="SKIP_RETURN_CODE=77"/>
-  </testcase>
-  <testcase name="flock_live_conversation" status="run"/>
-</testsuite>

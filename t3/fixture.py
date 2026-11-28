@@ -732,7 +732,9 @@ class Fixture(BaseHTTPRequestHandler):
             requested_run = args["runId"]
             assert requested_run in (run, "follow-up-run")
             delegated = args["untilDelegatedWorkSettled"]
-            timed_out = status not in terminal or (delegated and state.get("multiHoldSettlement", False))
+            delegated_pending = state.get("multiHoldSettlement", False) or any(
+                child_status not in terminal for child_status in state.get("multiDelegatedChildStatuses", []))
+            timed_out = status not in terminal or (delegated and delegated_pending)
             wait_run = "continued-run" if evidence == "restarted" and requested_run == run else requested_run
             result = {"threadId": thread, "runId": wait_run, "status": status, "timedOut": timed_out}
             if delegated and not timed_out:
