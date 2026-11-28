@@ -40,16 +40,19 @@
 #include "flock/policy.hpp"
 #include "flock/secret_requests.hpp"
 #include "flock/store.hpp"
+#include "flock/store_options.hpp"
 
 #include <filesystem>
 
 namespace flockv0 {
 struct Store::Impl {
+    Store& store;
+    StoreOptions options;
     Database database;
     const std::filesystem::path path;
-    Policy permissions;
-    BotAccess botAccess;
-    SecretRequests secretRequests;
+    Policy permissions{store};
+    BotAccess botAccess{store};
+    SecretRequests secretRequests{store};
     ConversationMessages conversationMessages{database, permissions, webIdentity};
     ChannelDeliveryQueue channelDeliveries{database, permissions};
     SessionParticipationRecords sessionParticipations{database};
@@ -118,9 +121,9 @@ struct Store::Impl {
     WaitStorage waitStorage{database, journalStorage};
     TaskRecords taskRecords{database, journalStorage, outboxStorage, waitStorage};
     SecretStorage secretStorage{database, path.parent_path()};
-    MemoryStorage memoryStorage;
+    MemoryStorage memoryStorage{database, secretStorage, permissions, conversationMessages, std::move(options.memorySeed)};
     BotLifecycleStorage botLifecycle{database};
-    AutomationStorage automationStorage;
+    AutomationStorage automationStorage{database, secretStorage, botLifecycle, permissions, taskOperations};
     AttachmentStorage attachments{database};
     ConversationContextStorage conversationContextStorage{database, secretStorage, attachments};
     WebIdentityState webIdentity;
@@ -144,7 +147,7 @@ struct Store::Impl {
                                                             sessionSendReceipts};
     SessionReadStorage sessionReadStorage{database,          secretStorage,  sessionParticipations, permissions, conversationMessages,
                                           channelConnectors, policyApprovals};
-    BotSetupStorage botSetup;
+    BotSetupStorage botSetup{store, database, secretStorage, std::move(options.saveBotSetup), std::move(options.botSetupCatalog)};
     Impl(Store&, std::filesystem::path path, StoreOptions);
 };
 
