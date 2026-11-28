@@ -5,6 +5,7 @@
 #include "bot_lifecycle_storage.hpp"
 #include "bot_settings_storage.hpp"
 #include "bot_setup_storage.hpp"
+#include "channel_connectors.hpp"
 #include "channel_delivery_queue.hpp"
 #include "channel_storage.hpp"
 #include "conversation_context_storage.hpp"
@@ -49,6 +50,8 @@ struct Store::Impl {
     ConversationMessages conversationMessages{database, permissions, webIdentity};
     ChannelDeliveryQueue channelDeliveries{database, permissions};
     SessionParticipationRecords sessionParticipations{database};
+    ChannelConnectors channelConnectors{database, permissions, webIdentity};
+    ChannelNotices channelNotices{database, channelConnectors, permissions, journalStorage, channelDeliveries};
     BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
     ConversationStorage conversationTurns{database,
                                           attachments,
@@ -78,7 +81,8 @@ struct Store::Impl {
                                           webIdentity,
                                           conversationMessages,
                                           channelDeliveries,
-                                          sessionParticipations};
+                                          sessionParticipations,
+                                          channelConnectors};
     ConversationTools conversationTools{database,           attachments, conversationTurns, conversationMessages, permissions,  path,
                                         botSettingsStorage, modelCalls,  policyApprovals,   sessionReadStorage,   secretStorage};
     SessionMessageStorage sessionMessageStorage{database,
@@ -119,11 +123,11 @@ struct Store::Impl {
                               permissions, taskOperations, policyApprovals, inboxDecisions};
     GitStorage gitStorage{database,    secretStorage,        taskRecords,  journalStorage,  webIdentity,
                           permissions, conversationMessages, botLifecycle, policyApprovals, sessionParticipations};
-    ChannelStorage channelStorage{database,       path, permissions, webIdentity, journalStorage, channelDeliveries, conversationMessages,
-                                  policyApprovals};
+    ChannelStorage channelStorage{database, path, permissions, conversationMessages, policyApprovals, channelConnectors, channelNotices};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
-    PolicyApprovals policyApprovals{database,    secretStorage,        webIdentity,  taskRecords,    waitStorage,
-                                    permissions, conversationMessages, botLifecycle, channelStorage, inboxDecisions};
+    PolicyApprovals policyApprovals{database,          secretStorage,  webIdentity,          taskRecords,
+                                    waitStorage,       permissions,    conversationMessages, botLifecycle,
+                                    channelConnectors, channelNotices, inboxDecisions};
     SessionParticipationStorage sessionParticipationStorage{database,          path,
                                                             secretStorage,     taskRecords,
                                                             webIdentity,       permissions,
@@ -131,8 +135,8 @@ struct Store::Impl {
                                                             conversationTools, sessionMessageStorage,
                                                             botLifecycle,      taskOperations,
                                                             policyApprovals,   sessionParticipations};
-    SessionReadStorage sessionReadStorage{database,       secretStorage,  sessionParticipations, permissions, conversationMessages,
-                                          channelStorage, policyApprovals};
+    SessionReadStorage sessionReadStorage{database,          secretStorage,  sessionParticipations, permissions, conversationMessages,
+                                          channelConnectors, policyApprovals};
     BotSetupStorage botSetup;
     Impl(Store&, std::filesystem::path path, StoreOptions);
 };

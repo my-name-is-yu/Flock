@@ -30,11 +30,9 @@ SCRIPT_OWNERS = (
     (re.compile(r"""^import [^;]*'/""", re.MULTILINE), None, "import page scripts by relative path, as in './dom.js'"),
 )
 
-# Components wired in Store::Impl may refer to each other in a cycle only inside these groups.
-STORAGE_CYCLES = (
-    {"conversationTools", "conversationTurns", "sessionMessageStorage", "sessionParticipationStorage"},
-    {"channelStorage", "policyApprovals"},
-)
+# Components wired in Store::Impl may refer to each other in a cycle only inside this group. Its four classes are one
+# module, the turn engine: finishing a turn flushes state that the tool and Session classes hold, and they finish turns.
+STORAGE_CYCLES = ({"conversationTools", "conversationTurns", "sessionMessageStorage", "sessionParticipationStorage"},)
 STORAGE_MEMBER = re.compile(r"^\s+\w+\s+(\w+)\{([^;]*)\};", re.MULTILINE)
 
 

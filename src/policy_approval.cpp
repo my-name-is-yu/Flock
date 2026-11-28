@@ -22,7 +22,7 @@
 #include "flock/task.hpp"
 #include "policy_origin.hpp"
 #include "bot_lifecycle_storage.hpp"
-#include "channel_storage.hpp"
+#include "channel_connectors.hpp"
 #include "inbox_storage.hpp"
 
 #include <algorithm>
@@ -64,7 +64,7 @@ PolicyOrigin PolicyApprovals::policyOrigin(const conversation::Message& message)
     if (background) return origin;
     if (message.principalSource != conversation::PrincipalSource::channel) {
         origin.requester = conversationMessages.actor(message).id;
-    } else if (channelStorage.channelMessageAuthorized(message.id, message.bot)) {
+    } else if (channelConnectors.messageAuthorized(message.id, message.bot)) {
         const auto& id = message.admittedActor.id;
         const bool canSignIn =
             webIdentity.resolve ? webIdentity.resolve(id).has_value() : id == localOwner.id && !permissions.requiresIdentity();
@@ -277,7 +277,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
     }
     policy_storage::audit(database, Person{}, origin.bot, "approval_requested",
                           {{"itemId", card}, {"action", action}, {"target", resource.target}});
-    if (origin.anchor) channelStorage.channelApprovalNotice(origin.anchor);
+    if (origin.anchor) channelNotices.approvalWaiting(origin.anchor);
     return ApprovalGate::waiting;
 }
 

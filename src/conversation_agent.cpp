@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "channel_connectors.hpp"
 #include "session_participation_records.hpp"
 #include "channel_delivery_queue.hpp"
 #include "conversation_messages.hpp"
@@ -888,7 +889,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
-    if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
+    if (!message.channelScope.empty() && channelConnectors.messageAuthorized(message.id, message.bot))
         channelDeliveries.reply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
@@ -919,7 +920,7 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
-        if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot)) return true;
+        if (!message.channelScope.empty() && channelConnectors.messageAuthorized(message.id, message.bot)) return true;
     } else if (permissions.allows(conversationMessages.actor(message), Action::bot_talk, message.bot))
         return true;
     if (const auto attempt = modelCalls.takeReservedConversationCall(message.id)) modelCalls.releaseModelCall(attempt);
