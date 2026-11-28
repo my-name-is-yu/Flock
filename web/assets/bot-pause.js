@@ -1,5 +1,5 @@
-import { accentColor } from '/avatars.js';
-import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+import { accentColor } from './avatars.js';
+import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 
 export function mountBotPause(dialog, save) {
   const title = dialog.querySelector('#bot-pause-title');

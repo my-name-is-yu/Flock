@@ -1,5 +1,5 @@
-import { actionButton, row, rowLabel, setSettingsStatus } from '/settings-ui.js';
-import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+import { actionButton, row, rowLabel, setSettingsStatus } from './settings-ui.js';
+import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 import { node } from './dom.js';
 
 const $ = (id) => document.getElementById(id);

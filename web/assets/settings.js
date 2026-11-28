@@ -1,15 +1,15 @@
-import '/tooltip.js';
-import { actionLabel, actionLabels } from '/action-labels.mjs';
+import './tooltip.js';
+import { actionLabel, actionLabels } from './action-labels.mjs';
 import {
   browserNotificationsEnabled, listenForBrowserNotifications, notificationPermission, onNotificationPreferenceChange,
   setBrowserNotifications,
-} from '/browser-notifications.mjs';
+} from './browser-notifications.mjs';
 import {
   confirmSetting, loadInstallation, postSettings, renderRemoteMachines, showInstallationUnavailable, statusBadge,
-} from '/installation-settings.js';
-import { showAvatar } from '/avatars.js';
-import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
-import { quietSavedStatus } from '/settings-ui.js';
+} from './installation-settings.js';
+import { showAvatar } from './avatars.js';
+import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from './settings-ui.js';
+import { quietSavedStatus } from './settings-ui.js';
 import { node } from './dom.js';
 
 const $ = (id) => document.getElementById(id);

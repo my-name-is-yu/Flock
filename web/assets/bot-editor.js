@@ -4,9 +4,9 @@ import {
   AVATAR_SHAPES,
   resolveAvatar,
   showAvatar,
-} from '/avatars.js';
-import { createProjectPicker } from '/project-picker.js';
-import { enableBackdropDismiss } from '/dialog-backdrop.mjs';
+} from './avatars.js';
+import { createProjectPicker } from './project-picker.js';
+import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 
 // A preset only seeds the new Bot's SOUL.md; what the Bot does is up to the user afterwards.
 const PRESETS = [

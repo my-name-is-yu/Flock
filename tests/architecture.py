@@ -69,6 +69,10 @@ class ArchitectureTest(unittest.TestCase):
                 result = self.check({"web/assets/dom.js": define, "web/assets/settings.js": copy})
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("web/assets/settings.js: create elements with node from dom.js", result.stderr)
+        self.assertEqual(self.check({"web/assets/app.js": "import { node } from './dom.js';\n"}).returncode, 0)
+        result = self.check({"web/assets/app.js": "import { node } from '/dom.js';\n"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("web/assets/app.js: import page scripts by relative path", result.stderr)
 
     def test_storage_components_cycle_only_in_recorded_groups(self):
         def wiring(extra=""):

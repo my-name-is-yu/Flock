@@ -1,7 +1,7 @@
-import '/tooltip.js';
-import { accentColor } from '/avatars.js';
-import { listenForBrowserNotifications } from '/browser-notifications.mjs';
-import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from '/settings-ui.js';
+import './tooltip.js';
+import { accentColor } from './avatars.js';
+import { listenForBrowserNotifications } from './browser-notifications.mjs';
+import { actionButton, row, rowLabel, setSettingsStatus, settingsNavigation } from './settings-ui.js';
 import { node } from './dom.js';
 
 const botId = decodeURIComponent(location.pathname.split('/')[2]);
