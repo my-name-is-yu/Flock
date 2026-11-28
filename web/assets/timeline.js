@@ -56,8 +56,12 @@ import {
 
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-const instructionTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'medium', hourCycle: 'h23' });
 const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
+const instructionTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'medium', hourCycle: 'h23' });
+const instructionStamp = (value) => {
+  const date = new Date(value * 1000);
+  return `${shortDay.format(date)} ${clock.format(date)}`;
+};
 const readingPositions = new Map();
 const timelineKey = (botId) => JSON.stringify([botId]);
 
@@ -626,10 +630,21 @@ function eventCard(event, context, place, report) {
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
-    if (data.instructionAcceptedAt != null)
-      extras.push(node('p', 'msg-note', `Instruction accepted · ${instructionTime.format(data.instructionAcceptedAt * 1000)}`));
-    if (data.instructionDeliveredAt != null)
-      extras.push(node('p', 'msg-note', `Delivery to the next T3 Run confirmed · ${instructionTime.format(data.instructionDeliveredAt * 1000)}`));
+    if (data.instructionAcceptedAt != null || data.instructionDeliveredAt != null) {
+      const acceptedAt = data.instructionAcceptedAt;
+      const deliveredAt = data.instructionDeliveredAt;
+      const currentTime = deliveredAt ?? acceptedAt;
+      const currentState = deliveredAt != null ? 'T3 accepted for next Run' : 'Flock accepted';
+      const note = node('p', 'msg-note', `${currentState} · ${instructionStamp(currentTime)}`);
+      const details = [];
+      if (acceptedAt != null) details.push(`Flock accepted ${instructionTime.format(new Date(acceptedAt * 1000))}`);
+      if (deliveredAt != null)
+        details.push(`T3 accepted this instruction for the next Run ${instructionTime.format(new Date(deliveredAt * 1000))}`);
+      const description = details.join(' · ');
+      note.title = description;
+      note.append(node('span', 'sr-only', `Full delivery timing: ${description}`));
+      extras.push(note);
+    }
     if (['request', 'conversation_message'].includes(event.kind)) {
       for (const run of context.parallelTasks.get(event.taskId) ?? []) {
         bubble.append(verificationLine(run, true));
