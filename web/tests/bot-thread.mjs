@@ -15,7 +15,8 @@ function fixtures() {
   ];
   const message = (id, fromBotId, textHtml) => ({ id, time: time + id, data: { fromBotId, textHtml } });
   window.dmRequests = [];
-  window.fetch = async (path) => {
+  window.sentMessages = [];
+  window.fetch = async (path, { body } = {}) => {
     if (path === '/api/bots') return Response.json([scout, reviewer]);
     if (path === '/api/inbox') return Response.json({ items: [] });
     if (path.startsWith('/api/schedules?')) return Response.json({ active: [], history: [], canManage: true });
@@ -34,6 +35,10 @@ function fixtures() {
         message(39, 'scout', '<p>Is it ready?</p>'),
         message(40, 'reviewer', '<p><strong>Ready</strong>. See the <a href="https://example.com">report</a>.</p>'),
       ] });
+    }
+    if (path === '/api/messages') {
+      sentMessages.push(JSON.parse(body));
+      return Response.json({ messageId: 99 });
     }
     return Response.json({ error: 'unknown_path' }, { status: 404 });
   };
@@ -113,6 +118,15 @@ async function exercise() {
   await waitFor(() => !panel.hidden, 'The thread did not reopen');
   history.back();
   await waitFor(() => panel.hidden && !params().has('thread'), 'Back did not close the thread');
+
+  row.click();
+  await waitFor(() => !panel.hidden, 'The thread did not reopen before sending');
+  const message = $('#message');
+  message.value = 'Thanks, both';
+  message.dispatchEvent(new Event('input'));
+  $('#composer').requestSubmit();
+  await waitFor(() => panel.hidden && sentMessages.length === 1, 'Sending from the composer did not return to the conversation');
+  check(sentMessages[0].botId === 'scout' && !params().has('thread'), 'The message did not go to the open Bot');
 }
 
 const index = (await readAsset('/index.html')).replace('<script type="module" src="/app.js"></script>', `
