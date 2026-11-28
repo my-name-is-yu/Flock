@@ -9,7 +9,6 @@
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
-#include "task_events.hpp"
 #include "task_records.hpp"
 #include "task_operations.hpp"
 #include "session_read_storage.hpp"
@@ -208,10 +207,23 @@ ConversationReplyStatus effectStatus(const Json& actions) {
 }
 }
 
+bool conversation::allowsTurnTool(const Message& message, std::string_view tool) {
+    if (!message.botOrigin) return true;
+    constexpr std::string_view personTools[]{
+        "answer_task_question", "withdraw_task_question", botSetupTool,           "request_bot_change",
+        "write_memory",         "revert_memory_edit",     "read_memory",          "memory_history",
+        "request_secret_input", "list_secrets",           "compact_conversation", "continue_fresh_session",
+        "create_schedule",      "list_schedules",         "remove_schedule",      "create_reminder",
+        "create_trigger",       "workspace_write_file",   "mcp_call_tool"};
+    if (std::ranges::find(personTools, tool) != std::ranges::end(personTools)) return false;
+    // Direct Bot messages already have a smaller tool set than Session participants.
+    return !message.routing.contains("botMessage") || (!isBotTool(tool) && std::ranges::find(webTools, tool) == webTools.end());
+}
+
 const char* ConversationTurns::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
-    if (message.routing.contains("botMessage")) return "Another Bot's message cannot answer a question for the person";
+    if (message.botOrigin) return "Another Bot's message cannot answer a question for the person";
     const auto asked = waitStorage.waitAnchor(task.id, wait->id);
     if (asked >= message.id) return "That question opened after this message was sent, so this message cannot answer it";
     if (message.replyTo && (!message.question || message.question->messageId != asked))
@@ -225,23 +237,36 @@ std::optional<TaskData> ConversationTurns::wokenTask(const Message& message) con
     const auto wake = message.routing.find("sessionWake");
     if (wake == message.routing.end() || !wake->contains("taskId")) return std::nullopt;
     auto task = taskRecords.load(wake->at("taskId").get<Id>());
-    const bool unconfirmed = field(*wake, "reason") == "unknown";
-    if (task.botId != message.bot || task.state != TaskState::deciding || (!task.actionId.empty() && !unconfirmed) || task.activeRun)
+    if (task.botId != message.bot || task.state != TaskState::deciding || !task.actionId.empty() || task.activeRun ||
+        !task.pendingInstructions.empty())
         return std::nullopt;
-    const auto event = TaskEvents(database).currentEvent(task);
-    if (!event.is_null() && event.at("consumed") != true) return std::nullopt;
+    auto current = database.query(R"SQL(
+SELECT 1 FROM events WHERE id=? AND task_id=? AND consumed=1
+  AND EXISTS (SELECT 1 FROM messages WHERE id=? AND client_message_id=?)
+)SQL",
+                                  {task.eventId, task.id, message.id, taskWakeClientId(task.id, task.eventId)});
+    if (!current.next()) return std::nullopt;
     return task;
 }
 
-std::optional<TurnRunner::WorkLearningSource> TurnRunner::wokenLearningSource(const TaskData& task) {
-    if (!task.lastRun || task.newSessionRequired || !memoryStorage.canLearnFrom(task)) return std::nullopt;
+namespace {
+std::optional<std::pair<Id, RunReportEntry>> currentWakeReport(Database& database, const TaskData& task) {
+    if (!task.lastRun || task.newSessionRequired) return std::nullopt;
     auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
     if (!row.next()) return std::nullopt;
-    const auto report = decodeRunReport(row.number(0), row.json(1));
+    const auto id = row.number(0);
+    auto report = decodeRunReport(id, row.json(1));
     if (!report.matches(*task.lastRun) || report.revisionId != task.currentRevision || report.resultRunId.empty() ||
-        report.evidence.availability != RunEvidence::Availability::Available || report.evidence.report.empty())
+        report.evidence.availability != RunEvidence::Availability::Available || !conversation_storage::hasText(report.evidence.report))
         return std::nullopt;
-    return WorkLearningSource{row.number(0), report.resultRunId};
+    return std::pair{id, std::move(report)};
+}
+}
+
+std::optional<TurnRunner::WorkLearningSource> TurnRunner::wokenLearningSource(const TaskData& task) {
+    if (const auto current = currentWakeReport(database, task); current && memoryStorage.canLearnFrom(task))
+        return WorkLearningSource{current->first, current->second.resultRunId};
+    return std::nullopt;
 }
 
 Json TurnRunner::applyWokenTaskDecision(const Message& message, const Decision& decision, Seconds now) {
@@ -256,7 +281,6 @@ Json TurnRunner::applyWokenTaskDecision(const Message& message, const Decision& 
     } else {
         const auto learnings = args.find("learnings");
         if (args.size() != (learnings == args.end() ? 1u : 2u)) throw ToolError("Provide a report and optional learnings");
-        if (!task->pendingInstructions.empty()) throw ToolError("The task has new user input to process before completion");
         const auto source = learnings == args.end() ? std::nullopt : wokenLearningSource(*task);
         if (learnings != args.end() && !source) throw ToolError("This task's Session report cannot be learned from");
         const auto completion = taskRecords.completeWithReport(
@@ -839,8 +863,18 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                                        {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
     if (auto woken = wokenTask(message)) {
-        settleUndecided(*woken, field(message.routing.at("sessionWake"), "reason"), taskRecords, waitStorage);
-        if (!terminal(*woken)) taskRecords.save(*woken);
+        const auto reason = field(message.routing.at("sessionWake"), "reason");
+        const auto report = route == reply && reason == "finished" ? currentWakeReport(database, *woken) : std::nullopt;
+        if (report && report->second.status == "completed") {
+            taskRecords.completeWithReport(*woken, report->second.evidence.report, "Nobody asked for more work after the Session finished");
+        } else {
+            const auto note = route != reply         ? "Flock could not finish reviewing this task."
+                              : reason == "failed"   ? "The Session failed."
+                              : reason == "finished" ? "The Session finished without a readable report for this request."
+                                                     : "This task stopped before its work finished.";
+            waitStorage.wait(*woken, ModelQuestionWait{}, std::string(note) + " Reply with what to do next, or cancel it.");
+            taskRecords.save(*woken);
+        }
     }
     Json actions = Json::array();
     std::set<Id> touched;
@@ -960,20 +994,23 @@ void TurnRunner::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, co
     };
     const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
-    // Another Bot's message is not the person's request, so it cannot change Bots, settings or memory.
-    const bool fromBot = message.routing.contains("botMessage");
     auto tools = notification ? std::vector<std::string>{"reply", "read_tool_result"} : turnTools;
     if (gitHost && notification) {
         appendGitNotificationTools(message.routing.at("gitEvent"), tools);
-    } else if (gitHost && web)
-        tools.insert(tools.end(), gitTools().begin(), gitTools().end());
+    } else if (gitHost && web) {
+        if (message.botOrigin)
+            appendReadOnlyGitTools(tools);
+        else
+            tools.insert(tools.end(), gitTools().begin(), gitTools().end());
+    }
     if (web) tools.emplace_back("message_bot");
-    if (web && !fromBot) {
+    if (web) {
         tools.insert(tools.end(), webTools.begin(), webTools.end());
         tools.insert(tools.end(), botToolNames().begin(), botToolNames().end());
     }
-    if (botSetup && !fromBot && (message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted))
+    if (botSetup && (message.principalSource == PrincipalSource::web || message.principalSource == PrincipalSource::trusted))
         tools.emplace_back(botSetupTool);
+    if (message.botOrigin) std::erase_if(tools, [&](const auto& tool) { return !allowsTurnTool(message, tool); });
     if (!message.channelScope.empty()) tools.insert(tools.end(), channelTools.begin(), channelTools.end());
     bool shouldVerifyFollowup = false;
     if (gitHost && notification) {
@@ -996,9 +1033,9 @@ void TurnRunner::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, co
         if (notification) {
             const auto& event = message.routing.at("gitEvent");
             const auto task = taskRecords.load(event.at("taskId").get<Id>());
-            if (taskRecords.externalWaitingNote(task)) {
+            if (task.actionId.empty() && !task.activeRun && task.pendingInstructions.empty() && taskRecords.externalWaitingNote(task)) {
                 offered.push_back("wait_for_event");
-                if (task.pendingInstructions.empty() && gitStorage.gitNotificationCanComplete(message)) offered.push_back("complete");
+                if (gitStorage.gitNotificationCanComplete(message)) offered.push_back("complete");
             }
             if (const auto followup = gitHost ? gitStorage.gitPrFollowup(message, intake) : std::nullopt) {
                 switch (followup->status) {
@@ -1040,9 +1077,7 @@ void TurnRunner::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, co
         std::vector<std::vector<ModelCall>> steps;
         const bool setupDeliversItsReply = calls.size() == 2 && calls[0].tool == botSetupTool && calls[1].tool == "reply";
         if (setupDeliversItsReply) return std::vector<std::vector<ModelCall>>{calls};
-        std::vector<std::string> names;
-        for (const auto& call : calls) names.push_back(call.tool);
-        for (const auto& indexes : tool_batch::planSteps(names)) {
+        for (const auto& indexes : tool_batch::planSteps(calls)) {
             auto& step = steps.emplace_back();
             for (const auto index : indexes) step.push_back(calls[index]);
         }
@@ -1213,7 +1248,8 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                          .config = message.routing.at("config"),
                          .images = std::move(images),
                          .learningRunId = learningRunId,
-                         .cacheScope = Json::array({"conversation", message.bot, message.channelScope}).dump()};
+                         .cacheScope = Json::array({"conversation", message.bot, message.channelScope}).dump(),
+                         .gitReadOnly = message.botOrigin};
                 transaction.commit();
             }
             ConversationModelCheckpoint checkpoint{0, step, Json::object(), ConversationModelFailure{{}, ModelErrorCode::inference_failed}};

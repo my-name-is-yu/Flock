@@ -43,6 +43,7 @@ constexpr std::array kinds{
     std::pair{JournalKind::bot_setup_updated, std::string_view{"bot_setup_updated"}},
     std::pair{JournalKind::cancelling, std::string_view{"cancelling"}},
     std::pair{JournalKind::delivery_superseded, std::string_view{"delivery_superseded"}},
+    std::pair{JournalKind::delivery_unconfirmed, std::string_view{"delivery_unconfirmed"}},
     std::pair{JournalKind::git_mutation, std::string_view{"git_mutation"}},
     std::pair{JournalKind::git_webhook, std::string_view{"git_webhook"}},
     std::pair{JournalKind::inbox_decision, std::string_view{"inbox_decision"}},

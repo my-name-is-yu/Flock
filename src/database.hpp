@@ -44,6 +44,7 @@ enum class JournalKind {
     bot_setup_updated,
     cancelling,
     delivery_superseded,
+    delivery_unconfirmed,
     git_mutation,
     git_webhook,
     inbox_decision,

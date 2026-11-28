@@ -11,6 +11,7 @@
 
 namespace flockv0 {
 struct Decision;
+struct ModelCall;
 }
 
 namespace flockv0::tool_batch {
@@ -19,22 +20,10 @@ enum class ConversationRead { none, store, session, environment_readiness };
 
 CallClass classify(const Decision&);
 ConversationRead conversationRead(std::string_view tool);
-bool batchable(std::string_view tool);
-
-struct Candidate {
-    std::size_t slot;
-    const Decision& decision;
-};
-
-struct PlannedCall {
-    std::size_t slot;
-    std::vector<std::size_t> predecessors;
-};
-
-std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls);
+bool batchRead(const Decision&);
 
 using StepCallIndexes = std::vector<std::size_t>;
-std::vector<StepCallIndexes> planSteps(std::span<const std::string> tools);
+std::vector<StepCallIndexes> planSteps(std::span<const ModelCall> calls);
 
 std::string turnCallKey(Id message, int step, std::optional<std::size_t> index = std::nullopt);
 }

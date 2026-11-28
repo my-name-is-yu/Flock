@@ -71,7 +71,8 @@ public:
     // Starts a turn for the Bot that sent `source`, in the same conversation and with the same authority.
     Id enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry&, std::string_view clientId);
     // Wakes the conversation that started a task, with the authority of the message that started it.
-    Id enqueueTaskWake(Id sourceMessage, ConversationWakeEntry, std::string_view clientId);
+    Id enqueueTaskWake(Id sourceMessage, ConversationWakeEntry, Id eventId);
+    static std::string taskWakeClientId(Id taskId, Id eventId);
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                                        const Json& attachments) const;
     std::vector<std::pair<std::string, Id>> pendingConversations(unsigned limit, Seconds now) const;

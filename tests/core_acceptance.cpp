@@ -133,6 +133,7 @@ struct SimulatedT3 : T3 {
     bool delayLaunchRunId = false;
     bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
+    std::optional<Delivery> nextAnswerOutcome, nextWorkOutcome;
     Delivery unconfirmedDelivery;
     std::string expectedBranch = "main";
     std::map<std::string, Observation> runs;
@@ -161,6 +162,7 @@ struct SimulatedT3 : T3 {
         check(cmd.authGeneration == generation, "OAuth generation missing from committed send");
         if (cmd.tool == CommandTool::answer_session_question) {
             if (std::exchange(failNextAnswerRead, false)) return {Delivery::Kind::Unknown, {}, "T3 question read failed", true};
+            if (auto outcome = std::exchange(nextAnswerOutcome, std::nullopt)) return *outcome;
             ++replies;
             check(cmd.questionId == "branch-question" && cmd.answers["branch"] == expectedBranch, "wrong T3 answer");
             runs.at(cmd.target.runId) = {};
@@ -168,6 +170,7 @@ struct SimulatedT3 : T3 {
             return {Delivery::Kind::Accepted, {}, {}};
         }
         check(cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos, "missing full action marker");
+        if (auto outcome = std::exchange(nextWorkOutcome, std::nullopt)) return *outcome;
         if (rejectWork && rejectWork(cmd))
             return {Delivery::Kind::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
         const auto serial = launches + follows + selectedStarts + 1;
@@ -265,6 +268,7 @@ struct Fixture {
     bool requireT3Connection;
     std::map<std::string, BotNotes> notes{{"alpha", {"Initial SOUL", "ALPHA_ONLY"}}, {"beta", {"Second SOUL", "BETA_ONLY"}}};
     std::map<std::string, std::vector<PeerBot>, std::less<>> peers;
+    IntakeResolver intake;
 
     explicit Fixture(bool requireConnection = false) : requireT3Connection(requireConnection) {
         directory = scratch.path;
@@ -276,10 +280,15 @@ struct Fixture {
     }
     void restart() {
         runtime.reset();
-        store = std::make_unique<Store>(directory / "state.db",
-                                        StoreOptions{.memorySeed = [&](std::string_view id) { return notes.at(std::string(id)).memory; }});
+        StoreOptions storage{.memorySeed = [&](std::string_view id) { return notes.at(std::string(id)).memory; }};
+        if (intake)
+            storage.saveBotSetup = [](Store&, std::string_view, const BotSetupEdit&, const Json&) {
+                throw std::runtime_error("Unexpected Bot setup write");
+            };
+        store = std::make_unique<Store>(directory / "state.db", std::move(storage));
         RuntimeOptions options{[&] { return now; }};
         options.requireT3Connection = requireT3Connection;
+        options.intake = intake;
         options.peers = [&](std::string_view source) {
             const auto found = peers.find(source);
             return found == peers.end() ? std::vector<PeerBot>{} : found->second;
@@ -399,6 +408,89 @@ void selectedWorkRechecksConnectionAfterApproval() {
     f.wait(task, "user_question");
     check(f.t3.seen.empty() && f.logs(task, "policy_action_closed") == 1,
           "A previously approved selected Session sent work after its connection was revoked");
+}
+
+void deniedFollowUpRequiresNewPersonInput() {
+    Fixture f;
+    Id id = 0;
+    f.model.script = [&](const ModelInput& input) {
+        return id ? converse(input, "send_to_task", id, {{"instruction", "Run the second check"}}) : converse(input, "start_task", 0, {});
+    };
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "original", "Check the release");
+    f.runtime->runConversations();
+    id = TaskList(*f.store).tasks("alpha").at(0).task.id;
+    f.reach(id, "running");
+    ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "follow-up", "Run the second check");
+    f.runtime->runConversations();
+    check(Tasks(*f.store).task(id).task.pendingInstructions.size() == 1, "The follow-up instruction was not recorded");
+    PolicyRules{*f.store}.setMode(localOwner, "supervised");
+    f.t3.finish("run-1");
+    const auto approval = [&] {
+        const auto item = Inbox(*f.store).inbox(localOwner).at(0);
+        check(item.at("itemKind") == "policy_approval" && item.at("taskId") == id, "The follow-up lost its policy approval");
+        return InboxTarget{item.at("botId"),  InboxKind::policy_approval, item.at("itemId"),          item.at("waitId"),
+                           item.at("taskId"), item.at("targetRevision"),  item.at("targetGeneration")};
+    };
+    f.wait(id, "policy_approval");
+    const auto first = approval();
+    Inbox(*f.store).decideInbox(localOwner, first, "deny");
+    const auto wait = f.wait(id, "user_question");
+    f.restart();
+    for (int i = 0; i < 12; ++i) {
+        f.now += 5;
+        f.runtime->tick();
+    }
+    const auto stopped = Tasks(*f.store).task(id);
+    check(stopped.wait && stopped.wait->id == wait && stopped.task.pendingInstructions.size() == 1 && !stopped.pendingAction &&
+              f.t3.seen.size() == 1 && f.logs(id, "policy_action_closed") == 1 && f.logs(id, "send_started") == 1,
+          "Denied follow-up requeued, lost its instructions or sent work after restart");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(stopped.task, wait), "answer", {{"text", "Retry the second check"}});
+    f.wait(id, "policy_approval");
+    const auto fresh = approval();
+    check(fresh.itemId != first.itemId && f.t3.seen.size() == 1, "New person input reused the denied approval");
+    Inbox(*f.store).decideInbox(localOwner, fresh, "allow_once");
+    f.t3.nextWorkOutcome = Delivery{Delivery::Kind::Busy, {}, "The Session has other work", true};
+    f.runtime->tick();
+    const auto deferred = Tasks(*f.store).task(id);
+    const auto attempted = f.t3.seen.back();
+    check(deferred.pendingAction && deferred.pendingAction->phase == OutboxPhase::ready && f.t3.follows == 0,
+          "A definitely unsent, approved action lost its retry");
+    f.now += 5;
+    f.reach(id, "running");
+    check(f.t3.follows == 1 && f.t3.seen.back().actionId == attempted.actionId && f.t3.seen.size() == 3 &&
+              f.t3.seen.back().instruction.find("Retry the second check") != std::string::npos &&
+              f.t3.seen.back().instruction.find("Run the second check") != std::string::npos,
+          "The newly approved follow-up did not deliver both the preserved instruction and the explicit reply");
+}
+
+void approvedNewLaunchUsesCurrentProfileAfterDenial() {
+    Fixture f;
+    std::string provider = "before-denial";
+    f.intake = [&](std::string_view bot, std::string_view request) {
+        return Intake{std::string(bot), std::string(request), "e", "p", {{"session", {{"providerInstanceId", provider}}}}};
+    };
+    f.restart();
+    PolicyRules(*f.store).setMode(localOwner, "supervised");
+    const auto id = TaskIntake(*f.store).submit({"alpha", "Check the release", "e", "p"}, &localOwner);
+    const auto decide = [&](std::string_view operation) {
+        const auto item = Inbox(*f.store).inbox(localOwner).at(0);
+        check(item.at("itemKind") == "policy_approval" && item.at("taskId") == id, "The launch lost its approval");
+        Inbox(*f.store).decideInbox(localOwner,
+                                    {item.at("botId"), InboxKind::policy_approval, item.at("itemId"), item.at("waitId"), id,
+                                     item.at("targetRevision"), item.at("targetGeneration")},
+                                    operation);
+    };
+    f.wait(id, "policy_approval");
+    decide("deny");
+    const auto question = f.wait(id, "user_question");
+    provider = "after-denial";
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, question), "answer",
+                                  {{"text", "Continue using the current profile"}});
+    f.wait(id, "policy_approval");
+    decide("allow_once");
+    f.reach(id, "running");
+    check(f.t3.seen.size() == 1 && f.t3.seen.front().config.at("session").at("providerInstanceId") == provider,
+          "The newly approved launch used the Bot's old profile");
 }
 
 void disconnectBlocksSendingAndRetry() {
@@ -736,6 +828,7 @@ void launchReceiptSurvivesRecovery() {
 void unconfirmedDeliveryAcrossRestart() {
     Fixture f;
     const auto id = f.submit();
+    const auto queued = f.submit("Next request in the same project");
     f.reach(id, "sending");
     f.t3.delayLaunchRunId = true;
     f.t3.hasReconciledRun = false;
@@ -757,15 +850,80 @@ void unconfirmedDeliveryAcrossRestart() {
     f.runtime->tick();
     const auto unresolved = Tasks(*f.store).task(id);
     check(f.t3.seen.size() == 1 && f.t3.reconciles == 2 && unresolved.pendingAction &&
-              unresolved.pendingAction->phase == OutboxPhase::started && unresolved.task.state == TaskState::deciding &&
-              Inbox(*f.store).inbox(localOwner, "alpha").empty(),
+              unresolved.pendingAction->phase == OutboxPhase::started && unresolved.task.state == TaskState::sending &&
+              f.task(queued)["state"] == "queued" && Inbox(*f.store).inbox(localOwner, "alpha").empty(),
           "An inconclusive check reopened the send or put the task in Needs you");
 
     f.restart();
+    f.t3.hasReconciledRun = true;
     f.now += 5;
-    f.reach(id, "waiting");
-    check(f.t3.seen.size() == 1 && Tasks(*f.store).task(id).wait->reason() == WaitReason::user_question && f.model.calls == 0,
-          "An unconfirmed delivery was sent again or did not ask the person what to do");
+    f.reach(id, "running");
+    check(f.t3.seen.size() == 1 && f.t3.reconciles == 3 && f.t3.recovery.back().actionId == original.actionId && f.model.calls == 0 &&
+              f.task(id)["activeRun"]["runId"] == "run-1" && f.logs(id, "run_started") == 1 && f.task(queued)["state"] == "queued",
+          "Late confirmation did not recover the original Run with the project slot held");
+}
+
+void busyFollowUpWaitsForItsOwnDelivery() {
+    Fixture f;
+    const auto id = f.submit();
+    f.reach(id, "running");
+    f.t3.finish("run-1", "interrupted");
+    const auto wait = f.wait(id, "user_question");
+    TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, wait), "answer", {{"text", "Continue"}});
+    f.reach(id, "sending");
+    f.t3.nextWorkOutcome = Delivery{Delivery::Kind::Busy, {}, "T3 is busy", true};
+    f.runtime->tick();
+    const auto first = f.t3.seen.back();
+    auto pending = Tasks(*f.store).task(id).pendingAction;
+    check(first.tool == CommandTool::follow_up && pending && pending->phase == OutboxPhase::ready && f.t3.follows == 0,
+          "A busy outbound preflight did not keep the unsent follow-up ready");
+    const auto queued = f.submit("Wait until the earlier Run settles");
+    f.now += 5;
+    f.t3.loseAcknowledgement = true;
+    f.t3.hasReconciledRun = false;
+    f.runtime->tick();
+    pending = Tasks(*f.store).task(id).pendingAction;
+    check(pending && pending->phase == OutboxPhase::started && f.t3.seen.back().actionId == first.actionId && f.t3.follows == 1,
+          "An uncertain follow-up did not retain the original action");
+    f.restart();
+    f.now += 5;
+    f.runtime->tick();
+    check(f.task(id)["state"] == "sending" && f.task(queued)["state"] == "queued" && f.t3.seen.size() == 3,
+          "An unconfirmed follow-up resent work or released the project slot");
+    f.t3.hasReconciledRun = true;
+    f.now += 5;
+    f.reach(id, "running");
+    check(f.t3.follows == 1 && f.t3.recovery.back().actionId == first.actionId && f.task(id)["activeRun"]["runId"] == "run-2" &&
+              f.logs(id, "run_started") == 2 && f.logs(id, "send_started") == 2,
+          "Late follow-up delivery did not attach exactly one Run to the saved action");
+}
+
+void rejectedAnswerKeepsItsRun() {
+    for (const auto kind : {Delivery::Kind::QuestionGone, Delivery::Kind::NotAccepted}) {
+        Fixture f;
+        const auto id = f.submit();
+        f.reach(id, "running");
+        f.t3.question("run-1");
+        const auto asked = f.wait(id, "user_question");
+        TaskControl(*f.store).operate(localOwner, TaskTarget::from(Tasks(*f.store).task(id).task, asked), "answer", {{"text", "main"}});
+        f.reach(id, "sending");
+        f.t3.nextAnswerOutcome = Delivery{kind, {}, "The saved answer no longer applies", true};
+        f.runtime->tick();
+        const auto rejected = Tasks(*f.store).task(id);
+        check(!rejected.pendingAction && rejected.task.activeRun && rejected.task.activeRun->ref.runId == "run-1" &&
+                  f.logs(id, "session_answered") == 0,
+              "A rejected answer stayed dispatchable or lost the assigned Run");
+        f.t3.runs.at("run-1").question.requestId = "updated-question";
+        f.restart();
+        f.now += 5;
+        f.runtime->tick();
+        f.wait(id, "user_question");
+        check(f.t3.seen.size() == 2 && f.t3.replies == 0 && f.t3.reconciles == 0,
+              "The rejected answer was retried while observing the next question");
+        f.t3.finish("run-1");
+        f.reach(id, "completed");
+        check(f.logs(id, "report") == 1, "The original Run did not finish after its answer was rejected");
+    }
 }
 
 void unsentAnswerRecoversAutomatically() {
@@ -991,6 +1149,52 @@ void conversationTaskLaunchesItsRequest() {
           "the conversation task did not launch its request with the saved criterion and source");
 }
 
+void conversationWakeNeedsAReviewedResultToAutoComplete() {
+    struct Scenario {
+        const char* status;
+        bool modelFails;
+        bool readable = true;
+    };
+    for (const auto& [status, modelFails, readable] : {Scenario{"completed", false}, Scenario{"completed", true}, Scenario{"failed", false},
+                                                       Scenario{"failed", true}, Scenario{"completed", false, false}}) {
+        Fixture f;
+        ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work", "Check the release");
+        bool reviewed = false;
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            if (!input.event.contains("sessionWake")) return converse(input, "start_task", 0, {{"doneWhen", "Tests pass"}});
+            reviewed = true;
+            if (modelFails) throw ModelError("The model is unavailable", false);
+            return {"reply", {{"text", "Here is the Session result."}}, "Report the result"};
+        };
+        f.runtime->runConversations();
+        const auto id = TaskList(*f.store).tasks("alpha").at(0).task.id;
+        f.reach(id, "running");
+        f.t3.finish("run-1", status);
+        if (!readable) {
+            f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+            f.t3.recoverEvidence = [](const RunRef&, std::string_view) {
+                return RunEvidence{RunEvidence::Availability::ReportUnavailable, {}, {}, "Unavailable"};
+            };
+        }
+        const bool succeeded = std::string_view(status) == "completed";
+        if (!succeeded) f.t3.runs.at("run-1").report = "Tests failed";
+        for (int i = 0; i < 6 && !reviewed; ++i) {
+            f.now += 10;
+            f.runtime->tick();
+            f.runtime->runConversations();
+        }
+        check(reviewed && f.logs(id, "report") == 1, "the task wake lost its Session report");
+        if (succeeded && !modelFails && readable) {
+            check(f.task(id).at("state") == "completed" && lastTaskEvent(*f.store, id, "completed").at("data").at("text") == "checked",
+                  "a normal review did not close the task with its Session report");
+        } else {
+            check(f.task(id).at("state") == "waiting" && f.task(id).at("wait").at("reason") == "user_question" &&
+                      f.logs(id, "completed") == 0,
+                  "a failed Session or review let the task close automatically");
+        }
+    }
+}
+
 void wakeTurnInstructionBecomesOneFollowUp() {
     Fixture f;
     ConversationIntake(*f.store).receive(localOwner, {"alpha", "", "e", "p"}, "work", "Check the release");
@@ -1073,6 +1277,10 @@ int main() {
              {"discard expired question after connection recovery", connectionRecoveryDiscardsExpiredSessionQuestion},
              {"delivery recovery", recoveredDelivery},
              {"unconfirmed delivery across restart", unconfirmedDeliveryAcrossRestart},
+             {"denied follow-up requires new person input", deniedFollowUpRequiresNewPersonInput},
+             {"new launch uses the current Bot profile after denial", approvedNewLaunchUsesCurrentProfileAfterDenial},
+             {"busy follow-up waits for its own delivery", busyFollowUpWaitsForItsOwnDelivery},
+             {"rejected answer keeps its Run", rejectedAnswerKeepsItsRun},
              {"launch receipt recovery", launchReceiptSurvivesRecovery},
              {"retry unsent Session answer", unsentAnswerRecoversAutomatically},
              {"cancel during delivery", cancelDuringDelivery},
@@ -1089,6 +1297,7 @@ int main() {
              {"cancellation with unavailable report", missingReportDoesNotBlockCancellation},
              {"project owners on task pages", taskPagesShowProjectOwners},
              {"Conversation task launches its request", conversationTaskLaunchesItsRequest},
+             {"conversation wake requires a reviewed result for automatic completion", conversationWakeNeedsAReviewedResultToAutoComplete},
              {"Recovered Run accepts its original question", recoveredRunAcceptsQuestion},
              {"wake turn instruction becomes one follow-up", wakeTurnInstructionBecomesOneFollowUp},
              {"Session question accepts the shown choice", sessionQuestionAcceptsTheShownChoice},

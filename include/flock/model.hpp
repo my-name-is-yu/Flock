@@ -35,6 +35,7 @@ struct ModelInput {
     std::string learningRunId{};
     // Requests with the same scope share a prompt prefix. Sent only as a hashed cache key, never in the prompt.
     std::string cacheScope{};
+    bool gitReadOnly = false;
 };
 class Model {
 public:

@@ -24,6 +24,7 @@ struct Param {
     const char* description;
     bool required = true;
     std::vector<Choice> choices = {};
+    bool writeOnly = false;
 };
 struct Tool {
     const char* description;
@@ -97,12 +98,12 @@ const std::vector<std::pair<std::string_view, Tool>>& specs() {
             "Issue action.",
             true,
             {{"list", "read"}, {"read", "read"}, {"list_comments", "read"}, {"create", "issues"}, {"update", "issues"}}},
-           {"issueNumber", "integer", "Required for read, list_comments and update.", false},
-           {"title", "string", "Required to create. Optional to update.", false},
-           {"body", "string", "Issue description for create or update.", false},
+           {"issueNumber", "integer", "Exact issue number for operations on a single issue.", false},
+           {"title", "string", "Required to create. Optional to update.", false, {}, true},
+           {"body", "string", "Issue description for create or update.", false, {}, true},
            {"state", "string", "State filter for list or new state for update.", false, {{"open"}, {"closed"}, {"all"}}},
-           {"labels", "array", "Labels. For update, replaces the current list.", false},
-           {"assignees", "array", "Usernames. For update, replaces the current list.", false},
+           {"labels", "array", "Labels. For update, replaces the current list.", false, {}, true},
+           {"assignees", "array", "Usernames. For update, replaces the current list.", false, {}, true},
            {"page", "integer", "Start at 1 and use nextPage to continue, even when items is empty.", false}}}},
     };
     return tools;
@@ -112,6 +113,12 @@ const Tool* findSpec(std::string_view name) {
     const auto& tools = specs();
     const auto tool = std::ranges::find_if(tools, [&](const auto& entry) { return entry.first == name; });
     return tool != tools.end() ? &tool->second : nullptr;
+}
+
+bool supportsRead(const Tool& spec) {
+    return spec.operation == "read" || std::ranges::any_of(spec.params, [](const Param& param) {
+               return std::ranges::any_of(param.choices, [](const Choice& choice) { return choice.operation == "read"; });
+           });
 }
 
 const Json* notificationTarget(const Tool& spec, const Json& event) {
@@ -149,6 +156,11 @@ std::string_view gitOperation(const Decision& call) {
     return {};
 }
 
+void appendReadOnlyGitTools(std::vector<std::string>& tools) {
+    for (const auto& [name, spec] : specs())
+        if (supportsRead(spec)) tools.emplace_back(name);
+}
+
 void appendGitNotificationTools(const Json& event, std::vector<std::string>& tools) {
     for (const auto& [name, spec] : specs())
         if (notificationTarget(spec, event)) tools.emplace_back(name);
@@ -162,9 +174,10 @@ bool gitNotificationToolAllowed(const Decision& call, const Json& event) {
     return argument != call.args.end() && *argument == *target;
 }
 
-Json gitToolSchema(std::string_view name) {
+Json gitToolSchema(std::string_view name, bool readOnly) {
     const auto* spec = findSpec(name);
     if (!spec) throw std::out_of_range("Unknown Git tool");
+    if (readOnly && !supportsRead(*spec)) throw std::out_of_range("Git tool does not support reading");
     Json properties{{"host", {{"type", "string"}, {"description", "Connected Git host, for example github.com."}}}};
     Json required = {"host"};
     if (name != "git_find_repos") {
@@ -176,10 +189,12 @@ Json gitToolSchema(std::string_view name) {
     auto readActions = Json::array();
     auto writeActions = Json::array();
     for (const auto& param : spec->params) {
+        if (readOnly && param.writeOnly) continue;
         Json property{{"type", param.type}, {"description", param.description}};
         if (property["type"] == "integer") property["minimum"] = 1;
         if (property["type"] == "array") property["items"] = {{"type", "string"}};
         for (const auto& choice : param.choices) {
+            if (readOnly && !choice.operation.empty() && choice.operation != "read") continue;
             property["enum"].push_back(choice.value);
             if (choice.operation == "read")
                 readActions.push_back(choice.value);
@@ -190,7 +205,7 @@ Json gitToolSchema(std::string_view name) {
         if (param.required) required.push_back(param.name);
     }
     const bool mayRead = spec->operation == "read" || !readActions.empty();
-    if (spec->operation != "read") {
+    if (!readOnly && spec->operation != "read") {
         properties["reason"] = {{"type", "string"},
                                 {"minLength", 1},
                                 {"maxLength", limits::model::maxDecisionReasonBytes},
@@ -202,13 +217,14 @@ Json gitToolSchema(std::string_view name) {
     if (name == "git_manage_issue") properties["page"]["maximum"] = 10000;
     Json parameters{
         {"type", "object"}, {"properties", std::move(properties)}, {"required", std::move(required)}, {"additionalProperties", false}};
-    if (name == "git_manage_issue") {
+    if (!readOnly && name == "git_manage_issue") {
         Json writeRequired = {"reason", "taskId"};
         parameters["oneOf"] =
             Json::array({{{"properties", {{"action", {{"enum", std::move(readActions)}}}}}, {"not", {{"required", {"reason"}}}}},
                          {{"properties", {{"action", {{"enum", std::move(writeActions)}}}}}, {"required", std::move(writeRequired)}}});
     }
-    return {
-        {"type", "function"}, {"name", name}, {"description", spec->description}, {"strict", false}, {"parameters", std::move(parameters)}};
+    const auto* description =
+        readOnly && name == "git_manage_issue" ? "List or read issues and comments using repository:read." : spec->description;
+    return {{"type", "function"}, {"name", name}, {"description", description}, {"strict", false}, {"parameters", std::move(parameters)}};
 }
 }

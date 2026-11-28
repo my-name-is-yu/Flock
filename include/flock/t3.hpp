@@ -24,7 +24,7 @@ struct SessionEventPage;
 struct SessionMetadata;
 
 struct Delivery {
-    enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
+    enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted, Busy } kind = Kind::Unknown;
     RunRef run;
     std::string detail;
     bool definitelyUnsent = false;

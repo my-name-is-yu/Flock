@@ -4,6 +4,7 @@
 #include "flock/task_list.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "http_session_fixture.hpp"
+#include "../../tests/fake_git.hpp"
 #include "flock/decision_errors.hpp"
 #include "flock/identity.hpp"
 #include "flock/tasks.hpp"
@@ -632,12 +633,18 @@ void sessionInvitations() {
         std::string thread = "thread";
         std::map<std::string, Json> events, receipts;
         int wakes = 0, invitations = 0;
-        bool inviteOnly = false;
+        bool inviteOnly = false, personReplied = false;
 
         ModelTurn decide(const ModelInput& input) override {
             if (!input.event.contains("sessionWake") && !input.event.contains("sessionInvitation")) return decideSession(input);
-            check(std::ranges::find(input.tools, "write_memory") == input.tools.end(),
-                  "A Session event let a person who cannot manage the Bot change its memory");
+            for (const auto* tool : {"write_memory", "revert_memory_edit", "request_bot_change", "create_schedule", "answer_task_question",
+                                     "withdraw_task_question", "workspace_write_file", "mcp_call_tool", "git_open_pr", "git_comment"})
+                check(std::ranges::find(input.tools, tool) == input.tools.end(),
+                      "The invited Bot inherited the Session requester's authority");
+            for (const auto* tool : {"expand_context", "check_environment_readiness", "workspace_read_file", "mcp_read_resource"})
+                check(std::ranges::find(input.tools, tool) != input.tools.end(), "The invited Bot lost an ordinary read tool");
+            check(input.gitReadOnly && std::ranges::find(input.tools, "git_manage_issue") != input.tools.end(),
+                  "The invited Bot lost Git reads");
             return decideSession(input);
         }
 
@@ -649,7 +656,20 @@ void sessionInvitations() {
             if (event.contains("sessionWake")) {
                 check(!event.contains("sessionInvitation") && bot == "Triage Bot",
                       "An invitation was reused as a wake, or woke the wrong Bot");
-                if (steps.empty()) ++wakes;
+                Json args{{"host", git_fixture::hostName}, {"repo", git_fixture::repoName}};
+                if (steps.empty()) {
+                    ++wakes;
+                    args["action"] = "list";
+                    return {{{"git_manage_issue", std::move(args), {}}}};
+                }
+                const auto& result = steps.back().at("result");
+                if (steps.size() == 1) {
+                    check(result.value("ok", false), "Could not read Git issues from the Bot's wake: " + result.dump());
+                    args.update(Json{{"action", "create"}, {"taskId", 1}, {"title", "Do not create"}});
+                    return {{{"git_manage_issue", std::move(args), "Create an issue during the wake"}}};
+                }
+                check(result == Json{{"ok", false}, {"error", "Git changes need a message from the person"}},
+                      "A write through a read-capable Git tool was not rejected: " + result.dump());
                 return reply();
             }
             const auto invite = [&](const std::string& recipient) -> ModelTurn {
@@ -662,6 +682,19 @@ void sessionInvitations() {
                 return {{{"leave_session", {{"environmentId", "env-1"}, {"threadId", "thread"}}, "Leave the Session"}}};
             }
             if (event.at("text") == "Rejoin the Session") return reply();
+            if (event.at("text") == "Open my Bot settings") {
+                for (const auto* tool : {"write_memory", "request_bot_change", "answer_task_question", "git_open_pr"})
+                    check(std::ranges::find(input.tools, tool) != input.tools.end(), "The person's reply lost their conversational tools");
+                check(!input.gitReadOnly, "The person's reply inherited the invited Bot's Git restrictions");
+                if (steps.empty()) {
+                    return {{{"write_memory",
+                              {{"baseVersion", event.at("memoryVersion")}, {"content", "Owner's note"}, {"summary", "Remember owner note"}},
+                              {}}}};
+                }
+                check(steps.back().at("result").at("version") == 1, "The person's reply could not edit their Bot's memory");
+                personReplied = true;
+                return reply();
+            }
             if (steps.empty() && event.contains("sessionInvitation")) {
                 ++invitations;
                 events[bot] = event;
@@ -699,10 +732,12 @@ void sessionInvitations() {
         return {std::string(bot), std::string(request), "env-1", "bot-project", {{"botDisplayName", names.at(bot)}}};
     };
     for (const auto* bot : {"release", "triage", "settings", "specialist", "broken"}) BotAccess{store}.setMember(alice, bot, bob.id, true);
+    BotAccess{store}.setOwner(bob, "triage");
     const auto token = T3Connections(store).connect("env-1", bob.id, 4173);
     const auto server = startWeb(store, 0, cb);
     Mcp mcp(*server, token);
     const auto soul = [](std::string_view) { return std::string{}; };
+    auto gitHost = std::make_shared<git_fixture::FakeHost>();
     const RuntimeOptions options{.peers = [](std::string_view bot) -> std::vector<PeerBot> {
                                      if (bot == "release") return {peer("triage"), peer("broken"), peer("specialist")};
                                      if (bot == "triage") return {peer("settings")};
@@ -710,6 +745,7 @@ void sessionInvitations() {
                                      if (bot == "specialist") return {peer("release")};
                                      return {};
                                  },
+                                 .gitHost = gitHost,
                                  .intake = cb.intake};
     auto runtime = std::make_unique<Runtime>(store, model, t3, soul, options);
     PolicyRules{store}.setMode(alice, "supervised");
@@ -782,9 +818,18 @@ void sessionInvitations() {
           "The Web timeline lost the wake's Session, reason, or original request");
     check(std::ranges::any_of(timeline,
                               [&](const Json& row) {
-                                  return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == wake->at("id");
+                                  return row.at("kind") == "conversation_reply" &&
+                                         row.at("data").at("replyToMessageId") == wake->at("id") && row.at("data").at("text") == "Done.";
                               }),
           "The wake's normal Bot reply was missing from the Web timeline");
+    check(gitHost->hostCalls == 1, "The wake executed more than its Git read");
+    const auto inviteReply = std::ranges::find_if(timeline, [&](const Json& row) {
+        return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == first.at("messageId");
+    });
+    check(inviteReply != timeline.end(), "The invited Bot's reply is missing");
+    WebConversationIntake(store).receiveWeb(bob, cb.intake("triage", ""), "person-reply", "Open my Bot settings", inviteReply->at("id"));
+    runtime->runConversations();
+    check(model.personReplied, "The person could not reply to the invited Bot");
 
     const auto reject = [&](const char* request, const char* recipient, std::string_view error) {
         model.target = recipient;

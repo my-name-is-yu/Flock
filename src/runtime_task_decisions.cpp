@@ -49,6 +49,7 @@ bool runtime::TaskDecisions::continueFreshSession(const TaskData& task, const Js
     if (task.projectId.empty() || !task.freshContextRequested || !RunReports::hasSettledRun(task) || task.pendingInstructions.empty())
         return false;
     return updates.change(task, [&](TaskData& current) {
+        if (!current.actionId.empty()) return false;
         auto event = taskEvents.currentEvent(current);
         if (!event.is_null() && event.at("consumed") != true && (event.at("kind") != "result" || event.contains("userAnswer")))
             return false;
@@ -60,8 +61,7 @@ bool runtime::TaskDecisions::continueFreshSession(const TaskData& task, const Js
         if (event.contains("id")) updates.recordDecision(current, event, decision, action);
         updates.consumeEvent(current);
         if (launchDefaults && tool == CommandTool::delegate) applyLaunchDefaults(current, *launchDefaults);
-        dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
-        return true;
+        return dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
     });
 }
 
@@ -78,10 +78,8 @@ void runtime::TaskDecisions::launch(const TaskData& task, const Json& event, con
         updates.consumeEvent(current);
         const auto action = actionId();
         updates.recordDecision(current, event, decision, action);
-        if (!current.runTargets().empty())
-            dispatch.queueDestinations(current, action, instruction, args, event);
-        else
-            dispatch.queueAction(current, action, CommandTool::delegate, instruction, args, event);
+        if (current.runTargets().empty()) return dispatch.queueAction(current, action, CommandTool::delegate, instruction, args, event);
+        dispatch.queueDestinations(current, action, instruction, args, event);
         return true;
     });
 }
@@ -97,18 +95,23 @@ bool runtime::TaskDecisions::answerSessionQuestion(const TaskData& task, const J
             answer = shown->value;
     const Json args{{"requestId", question.target.requestId}, {"answers", sessionQuestionAnswers(question.fields, {{asked.id, answer}})}};
     return updates.change(task, [&](TaskData& current) {
-        if (!current.question || current.question->target.requestId != question.target.requestId) return false;
+        if (!current.actionId.empty() || !current.question || current.question->target.requestId != question.target.requestId) return false;
         updates.consumeEvent(current);
         const auto action = actionId();
         updates.recordDecision(current, event, {{"answer_session_question", args, "Send the person's answer"}}, action);
-        dispatch.queueAction(current, action, CommandTool::answer_session_question, "", args, event);
-        return true;
+        return dispatch.queueAction(current, action, CommandTool::answer_session_question, "", args, event);
     });
 }
 
 void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, const Json* launchDefaults) {
     updates.change(task, [&](TaskData& current) {
         const bool idle = current.actionId.empty() && !current.activeRun;
+        const auto& kind = event.at("kind");
+        if (kind == "policy_outcome" && !event.contains("userAnswer")) {
+            updates.consumeEvent(current);
+            settleUndecided(current, "denied", taskRecords, waitStorage, field(event, "text"));
+            return true;
+        }
         // A reply to a stopped task is the person's next instruction. The Session prompt carries its text.
         const bool answered = event.contains("userAnswer") && (!current.projectId.empty() || current.selectedSession);
         if (idle && (!current.pendingInstructions.empty() || answered)) {
@@ -119,10 +122,8 @@ void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, con
             updates.recordDecision(current, event, decision, action);
             updates.consumeEvent(current);
             if (launchDefaults && tool == CommandTool::delegate) applyLaunchDefaults(current, *launchDefaults);
-            dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
-            return true;
+            return dispatch.queueAction(current, action, tool, "Continue this Flock task.", decision.args, event);
         }
-        const auto& kind = event.at("kind");
         if (kind == "question" && current.question && current.question->fields.size() == 1 && !event.contains("userAnswer")) {
             // Show the Session's own question to the person. Their answer goes back to the Session.
             const auto& first = current.question->fields.front();
@@ -151,7 +152,6 @@ void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, con
                             : kind == "external_check" ? "check_due"
                                                        : "unknown";
         if (!current.sourceMessageId) {
-            // An unconfirmed delivery leaves its action pending, and only the person can say whether to send it again.
             if (idle || (reason == std::string_view("unknown") && !current.activeRun))
                 settleUndecided(current, reason, taskRecords, waitStorage, field(event, "text"));
             else if (kind == "question")
@@ -162,7 +162,7 @@ void runtime::TaskDecisions::handle(const TaskData& task, const Json& event, con
         conversationTurns.enqueueTaskWake(
             *current.sourceMessageId,
             {run ? run->environmentId : current.environmentId, run ? run->ref.threadId : std::string{}, "", reason, 0, current.id},
-            "task-wake:" + std::to_string(current.id) + ":" + event.at("id").dump());
+            event.at("id").get<Id>());
         return true;
     });
 }

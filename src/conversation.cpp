@@ -196,12 +196,16 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
     return id;
 }
 
-Id ConversationTurns::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
+std::string ConversationTurns::taskWakeClientId(Id taskId, Id eventId) {
+    return "task-wake:" + std::to_string(taskId) + ":" + std::to_string(eventId);
+}
+
+Id ConversationTurns::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, Id eventId) {
     const auto source = conversationMessages.load(sourceMessage);
     auto routing = source.routing;
     routing.erase("sessionInvitation");
     wake.sourceMessageId = source.id;
-    return enqueueWake(source, std::move(routing), wake, clientId);
+    return enqueueWake(source, std::move(routing), wake, taskWakeClientId(wake.taskId, eventId));
 }
 
 std::vector<std::pair<std::string, Id>> ConversationTurns::pendingConversations(unsigned limit, Seconds now) const {

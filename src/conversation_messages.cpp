@@ -28,6 +28,7 @@ LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
                     {row.string(5), row.number(6) != 0},
                     static_cast<PrincipalSource>(row.number(7)),
                     std::nullopt};
+    message.botOrigin = botOrigin(message);
     if (!message.replyTo || message.replyTo >= id) return message;
     auto anchor = database.query(R"SQL(
 SELECT q.id,q.task_id FROM journal target
@@ -48,6 +49,26 @@ WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND q.wait_reason='us
                                   message.channelScope, message.channelScope});
     if (anchor.next()) message.question = conversation::QuestionAnchor{anchor.number(0), anchor.number(1)};
     return message;
+}
+
+bool ConversationMessages::botOrigin(const Message& message) const {
+    const auto* routing = &message.routing;
+    Json parentRouting;
+    auto id = message.id;
+    while (true) {
+        if (routing->contains("botMessage") || routing->contains("sessionInvitation")) return true;
+        const auto wake = routing->find("sessionWake");
+        if (wake == routing->end()) return false;
+        // Wakes inherit their stored source. A person's reply remains their own message.
+        const auto source = conversation_storage::integer(*wake, "sourceMessageId");
+        if (source <= 0 || source >= id) return true;
+        auto parent = database.query("SELECT routing FROM messages WHERE id=? AND bot_id=? AND person_id=?",
+                                     {source, message.bot, message.admittedActor.id});
+        if (!parent.next()) return true;
+        parentRouting = parent.json(0);
+        routing = &parentRouting;
+        id = source;
+    }
 }
 
 Person ConversationMessages::actor(const Message& message) const {

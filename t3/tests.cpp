@@ -515,9 +515,15 @@ int main(int argc, char** argv) {
         follow.instruction = std::string(700, 'x') + "\n\n[Flock action ID: " + follow.actionId + "]";
         for (const auto* scenario : {"manual-active", "server-input-result"}) {
             fixture({{"scenario", scenario}});
-            check(adapter->send(follow).kind == Delivery::Kind::NotAccepted, std::string("Follow-up accepted in ") + scenario);
+            const auto busy = adapter->send(follow);
+            check(busy.kind == Delivery::Kind::Busy && busy.definitelyUnsent, std::string("Follow-up accepted in ") + scenario);
         }
-        check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy or unrelated Run");
+        fixture({{"scenario", "settled"}, {"threadArchived", true}});
+        const auto archived = adapter->send(follow);
+        check(archived.kind == Delivery::Kind::Settings && archived.definitelyUnsent,
+              "a follow-up to an archived Session was retried and not shown to the person");
+        fixture({{"threadArchived", false}});
+        check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy, unrelated or archived Run");
         fixture({{"scenario", "settled"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" && delivery.run.runId == "follow",

@@ -45,6 +45,12 @@ bool slotFailed(const Json& slot) {
     const bool wrapsSessionRead = slot.is_object() && slot.contains("result");
     return actionFailed(slot) || (wrapsSessionRead && actionFailed(slot.at("result")));
 }
+
+Json skippedCall(std::string_view reason) {
+    auto result = toolFailure(reason);
+    result["notRun"] = true;
+    return result;
+}
 }
 
 void TurnResults::save(Id message, int step, const Json& results) {
@@ -55,8 +61,7 @@ void TurnResults::save(Id message, int step, const Json& results) {
                                  {message, step});
     std::vector<std::pair<int, std::size_t>> skipped;
     while (queued.next()) skipped.emplace_back(static_cast<int>(queued.number(0)), static_cast<std::size_t>(queued.number(1)));
-    auto notRun = toolFailure("Not run because an earlier action in the same response failed.");
-    notRun["notRun"] = true;
+    const auto notRun = skippedCall("Not run because an earlier action in the same response failed.");
     for (const auto& [later, calls] : skipped) database.exec(saveStepResult, {Json(std::vector<Json>(calls, notRun)), message, later});
 }
 
@@ -95,11 +100,10 @@ class ConversationTools::ToolBatch {
 public:
     ToolBatch(ConversationTools& store, const conversation::Message& message, const ToolContext& tools, int step,
               const std::vector<ModelCall>& calls, const ConversationCallContext& ctx, const StoreRead& readStore)
-        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx), readStore_(readStore),
-          blocked_(calls.size()) {}
+        : store_(store), message_(message), tools_(tools), step_(step), calls_(calls), ctx_(ctx), readStore_(readStore) {}
 
     bool run() {
-        std::vector<tool_batch::Candidate> pending;
+        std::vector<std::size_t> pending;
         {
             std::lock_guard lock(store_.database.mutex);
             flushResults();
@@ -119,17 +123,15 @@ public:
                 recoverSlot(result, call);
                 if (!result.is_null()) continue;
                 result = admissionFailure(call);
-                if (result.is_null()) pending.push_back({slot, call});
+                if (result.is_null()) pending.push_back(slot);
             }
             store_.database.exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?", {results, message_.id, step_});
             transaction.commit();
         }
 
-        for (const auto& wave : tool_batch::planWaves(pending)) {
-            const auto reserved = reserveWave(wave);
-            if (!reserved) return false;
-            executeWave(*reserved);
-        }
+        const auto reserved = reserveCalls(pending);
+        if (!reserved) return false;
+        executeCalls(*reserved);
         return finish();
     }
 private:
@@ -140,7 +142,6 @@ private:
     const std::vector<ModelCall>& calls_;
     const ConversationCallContext& ctx_;
     const StoreRead& readStore_;
-    std::vector<bool> blocked_;
     bool approvalWaiting_ = false;
 
     bool authorize() { return !ctx_.shutdown.stop_requested() && store_.conversationTurns.authorizeTurn(message_); }
@@ -151,12 +152,9 @@ private:
 
     Json admissionFailure(const ModelCall& call) {
         if (!call.rejection.empty()) return toolFailure(call.rejection);
+        if (!conversation::allowsTurnTool(message_, call.tool)) return toolFailure("This action needs a message from the person");
         const bool standaloneBotCall = calls_.size() == 1 && isBotTool(call.tool);
-        if (!standaloneBotCall && !tool_batch::batchable(call.tool)) {
-            auto result = toolFailure("Reply after reviewing these results.");
-            result["notRun"] = true;
-            return result;
-        }
+        if (!standaloneBotCall && !tool_batch::batchRead(call)) return skippedCall("Reply after reviewing these results.");
         try {
             if (isBotTool(call.tool)) store_.validateBotTool(tools_, call);
             return nullptr;
@@ -169,13 +167,9 @@ private:
         }
     }
 
-    std::optional<std::vector<std::size_t>> reserveWave(const std::vector<tool_batch::PlannedCall>& wave) {
+    std::optional<std::vector<std::size_t>> reserveCalls(const std::vector<std::size_t>& pending) {
         std::vector<std::pair<std::size_t, ProviderState>> eligible;
-        for (const auto& [slot, predecessors] : wave) {
-            if (std::ranges::any_of(predecessors, [&](auto earlier) { return blocked_[earlier]; })) {
-                blocked_[slot] = true;
-                continue;
-            }
+        for (const auto slot : pending) {
             if (ctx_.shutdown.stop_requested()) return std::nullopt;
             eligible.emplace_back(slot, providerState(tools_.settings, calls_[slot]));
         }
@@ -217,7 +211,6 @@ private:
         const auto gate = store_.policyApprovals.approveAction(origin, *resource, key, payload, now, false, ApprovalWait::defer);
         if (gate == ApprovalGate::waiting) {
             approvalWaiting_ = true;
-            blocked_[slot] = true;
             return false;
         }
         if (gate != ApprovalGate::allow) {
@@ -236,7 +229,7 @@ private:
         return tool_batch::turnCallKey(message_.id, step_, slot);
     }
 
-    void executeWave(const std::vector<std::size_t>& reserved) {
+    void executeCalls(const std::vector<std::size_t>& reserved) {
         std::vector<std::future<void>> workers;
         workers.reserve(reserved.size());
         for (const auto slot : reserved) {

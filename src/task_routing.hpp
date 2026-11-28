@@ -78,6 +78,8 @@ public:
     TaskChange taskChange(const conversation::Message&, const Json& args, const TaskData& task, const TaskDestinations& linked);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
 private:
+    static std::string selectT3Project(const std::vector<T3Project>&, std::string_view preferred, std::string_view remembered);
+
     Database& database;
     const Policy& permissions;
     WaitStorage& waitStorage;

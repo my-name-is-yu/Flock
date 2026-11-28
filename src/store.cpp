@@ -418,9 +418,10 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
         updated["userAnswer"] = answer;
         updated["userQuestion"] = wait->text;
         for (const auto* metadata : {"id", "failures", "retryAt", "evidence", "consumed"}) updated.erase(metadata);
+        const auto answerId = journalStorage.journal(id, entry);
+        if (field(updated, "kind") == "policy_outcome") updated["policyReply"] = {{"anchor", answerId}, {"personId", actor.id}};
         taskEvents.consumeEvent(task);
         taskEvents.event(task, "answer/" + std::to_string(waitId), updated);
-        journalStorage.journal(id, entry);
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }

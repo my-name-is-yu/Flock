@@ -120,7 +120,7 @@ public:
 };
 
 enum class NotesRecovery { Restore, Edit };
-enum class NotesFailurePoint { Planning, Dispatch };
+enum class NotesFailurePoint { Planning, Dispatch, ProfileDefaults };
 
 void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesFailurePoint failure) {
     TemporaryDirectory temp;
@@ -128,7 +128,9 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
     createBot(folder / "release", botConfig(), "Release role", "");
     createBot(folder / "triage", botConfig(), "Triage role", "");
     const Bots bots(folder);
-    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); }});
+    Store store(temp.path / "tasks.db", {.memorySeed = [&](std::string_view bot) { return bots.initialMemory(bot); },
+                                         .saveBotSetup = [](Store&, std::string_view, const BotSetupEdit&,
+                                                            const Json&) { throw std::runtime_error("unexpected Bot setup write"); }});
     const auto due = utc(2026, 1, 2, 0, 0);
     const Json schedule = {{"kind", "schedule"}, {"cron", "0 0 * * *"}, {"timezone", "Etc/UTC"}, {"request", "Daily check"}};
     for (const auto* bot : {"release", "triage"})
@@ -137,7 +139,7 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
         std::filesystem::rename(folder / "release", folder / "release.saved");
         std::filesystem::create_symlink("release", folder / "release");
     };
-    if (failure == NotesFailurePoint::Planning) makeNotesUnreadable();
+    if (failure != NotesFailurePoint::Dispatch) makeNotesUnreadable();
     Automations(store).fireDueAutomations(due);
 
     const Id release = TaskList(store).tasks("release").at(0).task.id;
@@ -146,6 +148,8 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
     NotesT3 t3;
     RuntimeOptions options;
     options.clock = [&] { return due; };
+    const bool profileDefaultsFail = failure == NotesFailurePoint::ProfileDefaults;
+    if (profileDefaultsFail) options.intake = [&](std::string_view bot, std::string_view request) { return bots.get(bot).intake(request); };
     Runtime runtime(store, model, t3, [&](std::string_view bot) { return bots.soul(bot); }, options);
     std::string savedAction;
     if (failure == NotesFailurePoint::Dispatch) {
@@ -161,7 +165,7 @@ void unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery recovery, NotesF
           "unreadable automation notes prevented a healthy Bot from running in the same project");
     const auto paused = Tasks(store).task(release);
     check(paused.task.state == TaskState::waiting && paused.wait && paused.wait->reason() == WaitReason::bot_notes_unavailable &&
-              !paused.task.actionId.empty() && (savedAction.empty() || paused.task.actionId == savedAction) &&
+              paused.task.actionId.empty() == profileDefaultsFail && (savedAction.empty() || paused.task.actionId == savedAction) &&
               paused.task.projectId == Tasks(store).task(triage).task.projectId,
           "the unreadable Bot's request lost its workspace or recovery action");
 
@@ -1250,7 +1254,7 @@ void savedSettingsStayReadableUnderARestrictiveUmask() {
 int main() {
     try {
         configuredSchedules();
-        for (const auto failure : {NotesFailurePoint::Planning, NotesFailurePoint::Dispatch}) {
+        for (const auto failure : {NotesFailurePoint::Planning, NotesFailurePoint::Dispatch, NotesFailurePoint::ProfileDefaults}) {
             unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Restore, failure);
             unavailableAutomationNotesDoNotOwnTheProject(NotesRecovery::Edit, failure);
         }

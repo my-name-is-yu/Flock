@@ -244,6 +244,7 @@ CallOutcome TurnRunner::executeBotSetup(const Message& message, int step, const 
             authorization.commit();
             return stop;
         }
+        if (!allowsTurnTool(message, decision.tool)) throw Conflict("This action needs a message from the person");
         if (auto applied = botSetup.recorded(key)) {
             authorization.commit();
             result = std::move(*applied);
@@ -281,6 +282,7 @@ CallOutcome TurnRunner::executeConversationBotChange(const Message& message, int
     {
         std::lock_guard lock(database.mutex);
         try {
+            if (!allowsTurnTool(message, decision.tool)) throw ToolError("This action needs a message from the person");
             if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
             const auto& args = decision.args;
             const auto operation = toolText(args, "operation", 32);
@@ -457,6 +459,7 @@ CallOutcome TurnRunner::executeLocalConversationCall(const Message& message, int
 std::optional<Json> TurnRunner::applyLocalConversationCall(const Message& message, int step, const Decision& decision, std::string_view key,
                                                            Seconds now, ApprovalWait waitMode, const WorkSession* selectedSession,
                                                            const TaskDestinations& linked, const BotTools& settings) {
+    if (!allowsTurnTool(message, decision.tool)) return toolFailure("This action needs a message from the person");
     if (const auto resource = conversationCallResource(message, decision)) {
         using enum Action;
         const bool writesMemory = resource->action == private_memory_write || resource->action == shared_memory_write;

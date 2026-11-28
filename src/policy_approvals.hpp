@@ -48,6 +48,7 @@ public:
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation, const Json& payload, Seconds now,
                                bool claim = true, ApprovalWait = ApprovalWait::pause);
     void consumePolicyApproval(std::string_view operation);
+    void keepUnsentTaskApproval(const TaskData&, std::string_view action, Id readyGeneration, bool sendStarted, Seconds now);
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
     Json policyApprovalCards(const Person&, std::string_view bot);

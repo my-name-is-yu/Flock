@@ -30,7 +30,12 @@ struct Message {
     Person admittedActor;
     PrincipalSource principalSource = PrincipalSource::gitWebhook;
     std::optional<QuestionAnchor> question;
+    // Set when the message came from a Bot or a Session and not from the person.
+    bool botOrigin = false;
 };
+
+// Whether a turn for this message may use the tool. Changes that need the person's own request are refused to other origins.
+bool allowsTurnTool(const Message&, std::string_view tool);
 }
 
 namespace flockv0::conversation_storage {
