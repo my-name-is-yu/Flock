@@ -601,6 +601,7 @@ private:
         } catch (const BotBusy&) {
             return error(res, 409, "bot_busy");
         }
+        if (callbacks_.botDeleted) callbacks_.botDeleted();
         changes_.rescan();
         reply(res, 200, {{"ok", true}});
     }

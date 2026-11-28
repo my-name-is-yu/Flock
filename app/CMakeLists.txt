@@ -9,6 +9,7 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
 endif()
 
 add_library(flock_app_support STATIC
+  bot_skills.cpp
   bot_tools.cpp
   bots.cpp
   chatgpt.cpp

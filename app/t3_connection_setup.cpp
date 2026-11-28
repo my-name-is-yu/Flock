@@ -1,4 +1,6 @@
 #include "t3_connection_setup.hpp"
+#include "bot_skills.hpp"
+#include "bots.hpp"
 #include "flock/environment.hpp"
 #include "flock/settings_access.hpp"
 #include "settings_system.hpp"
@@ -69,7 +71,8 @@ T3SetupResult connectT3(const std::filesystem::path& home, const T3ConnectReques
     const T3SetupLock setup;
     Store store(home / "flock.sqlite3");
     SettingsAccess access(store, std::getenv(environment::webIdentitiesFile));
-    const auto resolve = access.identities().resolvePerson;
+    const auto identities = access.identities();
+    const auto& resolve = identities.resolvePerson;
     const auto verifyAccess = [&] {
         if (access.enabled() && !resolve(localOwner.id)) throw Conflict("Keep a Web identity for local-owner to connect T3.");
         if (requester && !access.canManageInstallation(*requester))
@@ -105,6 +108,7 @@ T3SetupResult connectT3(const std::filesystem::path& home, const T3ConnectReques
                 });
         },
         stop);
+    syncT3BotSkills(home, store, Bots(home / "bots"), identities.resolveRoot);
     return {std::move(login.environmentId), connectionPort, savedPort != connectionPort, std::move(providers)};
 }
 

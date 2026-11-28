@@ -1,4 +1,5 @@
 #include "t3_setup.hpp"
+#include "bot_skills.hpp"
 #include "flock/environment.hpp"
 #include "flock/json.hpp"
 #include "flock/types.hpp"
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -64,6 +66,11 @@ bool installed(const std::string& command) {
         start = end + 1;
     }
     return false;
+}
+
+bool codexAvailable() {
+    if (const auto command = setting(environment::codexCli); !command.empty()) return installed(command);
+    return installed("codex") || fs::is_regular_file(userPath(environment::codexConfig, ".codex/config.toml"));
 }
 
 bool runProvider(std::vector<std::string> args, std::string_view input = {}, std::string* output = nullptr) {
@@ -294,7 +301,7 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
     std::optional<Json> replacementClaude;
     try {
         connect([&](std::string_view token) {
-            if (installed(setting(environment::codexCli, "codex"))) {
+            if (codexAvailable()) {
                 codex = editCodex(url, token, owns);
                 providers.emplace_back("codex");
             }
@@ -341,7 +348,7 @@ std::vector<std::string> configureT3Providers(std::string_view url, const std::f
 }
 
 bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
-    if (installed(setting(environment::codexCli, "codex")) && !editCodex({}, {}, owns).changed()) return true;
+    if (codexAvailable() && !editCodex({}, {}, owns).changed()) return true;
     return installed(setting(environment::claudeCli, "claude")) && !ownsClaudeServer(readClaudeServer(), owns);
 }
 
@@ -356,6 +363,25 @@ void removeT3Providers(const OwnsBearer& owns) {
     } catch (...) {
         codex.restore();
         throw;
+    }
+}
+
+void syncT3ProviderSkills(const OwnsBearer& owns, const Json& bots) {
+    try {
+        if (editCodex({}, {}, owns).changed())
+            exportBotSkills(userPath("FLOCK_CODEX_SKILLS_DIR", ".agents/skills"), bots);
+    } catch (const std::exception& error) {
+        std::cerr << "Could not synchronize Codex Bot skills: " << error.what() << '\n';
+    }
+    try {
+        if (ownsClaudeServer(readClaudeServer(), owns)) {
+            const auto directory = setting("CLAUDE_CONFIG_DIR");
+            const auto root = directory.empty() ? userPath("FLOCK_CLAUDE_SKILLS_DIR", ".claude/skills")
+                                                : fs::path(setting("FLOCK_CLAUDE_SKILLS_DIR", (fs::path(directory) / "skills").string()));
+            exportBotSkills(root, bots);
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "Could not synchronize Claude Code Bot skills: " << error.what() << '\n';
     }
 }
 

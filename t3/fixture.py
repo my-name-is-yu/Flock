@@ -1038,6 +1038,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
     skill_paths = (directory / ".claude" / "skills", directory / ".agents" / "skills")
+    reviewer_skills = [path / "flock-reviewer" / "SKILL.md" for path in skill_paths]
     env.pop("FLOCK_CLAUDE_SKILLS_DIR", None)
     env.pop("FLOCK_CODEX_SKILLS_DIR", None)
     t3_home = directory / "t3-fixture-home"
@@ -1065,7 +1066,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         with urllib.request.urlopen(request, timeout=5):
             pass
 
-    def connect(environment, flags, restart=False, expected_error=None, rewritten=True, source="url"):
+    def connect(environment, flags, restart=False, expected_error=None, rewritten=True, source="url", can_see_bot=True):
         server.state["claimedEnvironment"] = environment
         target = {"url": ["connect", server.origin + "/mcp"], "local": ["connect"],
                   "saved": ["reconnect", environment]}[source]
@@ -1102,7 +1103,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
             }
         assert token.encode() not in (state / "flock.sqlite3").read_bytes()
-        assert not any(path.exists() for path in skill_paths), "CLI setup created skill directories"
+        for file in reviewer_skills[0 if has_claude else 1:]:
+            if not can_see_bot:
+                assert not file.exists(), "A skill exposed a Bot unavailable to the MCP connection"
+                continue
+            contents = file.read_text()
+            assert "`bot` set to `reviewer`" in contents and token not in contents
         return token
 
     working_command = command
@@ -1207,15 +1213,22 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     ]))
     identities.chmod(0o600)
     env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+    with sqlite3.connect(state / "flock.sqlite3") as db:
+        db.execute("INSERT INTO bot_owners(bot,person) VALUES('reviewer','local-owner')")
+    for skill in reviewer_skills:
+        skill.unlink()
 
-    def settings(path="", body=None, credential=admin_credential):
+    def api(path, body=None, credential=admin_credential):
         origin = f"http://127.0.0.1:{port}"
-        request = urllib.request.Request(origin + "/api/settings" + path,
+        request = urllib.request.Request(origin + "/api" + path,
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Origin":origin, "Content-Type":"application/json", "X-Flock-Action":"1",
                      "Authorization":credential})
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.load(response)
+
+    def settings(path="", body=None, credential=admin_credential):
+        return api("/settings" + path, body, credential)
 
     def await_t3_settings(predicate):
         deadline = time.monotonic() + 8
@@ -1235,7 +1248,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 assert selector.select(8), "Flock did not listen on the saved port"
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
-            assert not any(path.exists() for path in skill_paths), "Web startup created skill directories"
+            assert all(file.is_file() for file in reviewer_skills), "Startup did not restore missing skills"
 
             server.state["claimedEnvironment"] = "env-local-web"
             server.state["descriptorEnvironment"] = "env-wrong"
@@ -1264,7 +1277,25 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
 
             authorized = connect_web({"source": "local"})["env-local-web"]
             assert authorized["label"] == "T3 fixture" and not authorized["expired"]
-            assert not any(path.exists() for path in skill_paths), "Web setup created skill directories"
+            assert all(file.is_file() for file in reviewer_skills)
+
+            moss_profile = {"name": "Moss", "avatar": {"kind": "shape", "example": "sprout"}}
+            status, bot = api("/bots", moss_profile)
+            assert status == 201 and bot["id"] == "moss"
+            moss_skills = [path / "flock-moss" / "SKILL.md" for path in skill_paths]
+            assert all(file.is_file() for file in moss_skills)
+            assert api("/bots/profile", {"botId": bot["id"], "name": "Fern"})[0] == 200
+            fern_skills = [next(path.glob("flock-fern-*/SKILL.md")) for path in skill_paths]
+            assert all("`bot` set to `moss`" in file.read_text() for file in fern_skills)
+            assert not any(file.exists() for file in moss_skills)
+            assert api("/bots/delete", {"botId": bot["id"]})[0] == 200
+            assert not any(file.exists() for file in fern_skills)
+            status, replacement = api("/bots", moss_profile)
+            assert status == 201 and replacement["id"] != bot["id"]
+            assert not any(file.exists() for file in moss_skills)
+            for path in skill_paths:
+                replacement_skill = next(path.glob("flock-moss-*/SKILL.md"))
+                assert f"`bot` set to `{replacement['id']}`" in replacement_skill.read_text()
             credential_file = next(file for file in credential_dir.glob("*.json")
                                    if json.loads(file.read_text())["environmentId"] == "env-local-web")
             expired = json.loads(credential_file.read_text())
@@ -1296,7 +1327,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             profile = directory / "second-flock" / "bots" / "reviewer"
             profile.mkdir(parents=True)
             (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
-            connect("env-1", ["--port", str(port)], restart=True)
+            connect("env-1", ["--port", str(port)], restart=True, can_see_bot=False)
             configs = codex_config.read_bytes(), claude_config.read_bytes()
             subprocess.run(working_command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
