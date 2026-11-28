@@ -13,8 +13,10 @@ import {
   botQuery,
   bots,
   byId,
+  closeDetail,
   composition,
   dayFormat,
+  decisions,
   elements,
   findPanel,
   fullTime,
@@ -22,9 +24,16 @@ import {
   motionAnimations,
   motionEaseOut,
   noHover,
+  openDetail,
+  openNewBot,
+  operate,
   reducedMotion,
+  refreshBots,
+  render,
+  renderComposer,
   screenshotsFor,
   sendingMessages,
+  setNotice,
   sidebarViewer,
   timelineHeight,
   view,
@@ -43,9 +52,6 @@ import {
   runMotion,
   waitText,
 } from './app-core.js';
-import { renderComposer, setNotice } from './composer.js';
-import { closeDetail, openDetail, openNewBot } from './bot-detail.js';
-import { decisions, operate, refreshBots, render } from './app.js';
 
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });

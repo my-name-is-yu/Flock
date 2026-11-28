@@ -115,6 +115,9 @@ if(BUILD_TESTING)
   add_test(NAME flock_web_external_mcp COMMAND flock_web_external_mcp_tests)
   set_tests_properties(flock_web_external_mcp PROPERTIES TIMEOUT 30)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_web_page_scripts
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" --expose-internals "${PROJECT_SOURCE_DIR}/scripts/check-page-scripts.js"
+              "${CMAKE_CURRENT_SOURCE_DIR}/assets")
     add_test(NAME flock_web_chat_grouping
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat-grouping.mjs")
     add_test(NAME flock_web_find_match_time

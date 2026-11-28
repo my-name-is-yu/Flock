@@ -7,7 +7,9 @@ import {
   closedQuestion,
   composerLimit,
   composition,
+  decisions,
   elements,
+  headerFocusTarget,
   notices,
   screenshotAnchor,
   screenshotDrafts,
@@ -18,8 +20,6 @@ import {
 } from './app-state.js';
 import { button, waitLabel, waitText } from './app-core.js';
 import { nextSuggestion, timelineAtEnd } from './timeline.js';
-import { headerFocusTarget } from './bot-detail.js';
-import { decisions } from './app.js';
 
 export function setNotice(context, text, isError = false, { quiet = false } = {}) {
   notices.set(context.id, { text, isError, quiet });

@@ -1,10 +1,7 @@
 import { showAvatar } from './avatars.js';
 import { waitLabels } from './conversation-copy.mjs';
 import { node } from './dom.js';
-import { coalescedRefresh } from './live-updates.js';
 import {
-  assignMenu,
-  assignView,
   bots,
   byId,
   conversationActions,
@@ -19,11 +16,6 @@ import {
   view,
   workspace,
 } from './app-state.js';
-import { openBotSettings, renderBots } from './sidebar.js';
-import { renderHeader } from './activity.js';
-import { backToLatest, rememberReadingPosition, resetConversationJump } from './timeline.js';
-import { closeDetail } from './bot-detail.js';
-import { readTimeline, refreshView, render, subscribeToView } from './app.js';
 
 const motionSpring = 'cubic-bezier(0.22, 1.2, 0.36, 1)';
 export function cancelMotion(el) {
@@ -64,7 +56,8 @@ export function save(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); }
   catch {}
 }
-export let connection = 'loading';
+const savedPins = saved('flock-pins', []);
+export const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 
 export function button(text, className, click) {
   const el = node('button', className, text);
@@ -130,14 +123,6 @@ export async function api(path, body, { method = body ? 'POST' : 'GET', signal }
   if (viewer !== null) responseViewers.set(data, viewer);
   return data;
 }
-
-export function setConnection(state) {
-  if (connection === state) return;
-  connection = state;
-  elements.connection.dataset.state = state;
-  elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
-  renderHeader();
-}
 const mainElement = byId('main');
 export function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
@@ -152,7 +137,7 @@ export function closeConversationActions(focus = false) {
   conversationActions.open = false;
   if (focus) conversationActionsTrigger.focus({ preventScroll: true });
 }
-function conversationUrl(botId) {
+export function conversationUrl(botId) {
   const url = new URL(location.href);
   if (botId) url.searchParams.set('bot', botId);
   else url.searchParams.delete('bot');
@@ -170,7 +155,7 @@ export function animateTimelineContent(kind) {
     ], { duration: 210, easing: motionEaseOut });
   }
 }
-function animateViewTransition(kind) {
+export function animateViewTransition(kind) {
   const inner = elements.conversation.querySelector('.conversation-inner');
   const profileHeading = byId('profile-heading');
   for (const target of [inner, elements.timeline, elements['profile-avatar-button'], profileHeading]) {
@@ -193,53 +178,5 @@ function animateViewTransition(kind) {
       { opacity: .5, transform: 'translateY(4px) scale(.96)' },
       { opacity: 1, transform: 'none' },
     ], { duration: 220, easing: motionSpring });
-  }
-}
-export function selectBot(botId, { updateHistory = true } = {}) {
-  assignMenu(null);
-  closeConversationActions();
-  openNavigation(false);
-  if (view?.id === botId) {
-    if (view.source || view.pendingSource) backToLatest();
-    else renderBots();
-    return;
-  }
-  const prevBotId = view?.id ?? null;
-  resetConversationJump(view);
-  rememberReadingPosition();
-  closeDetail();
-  const existing = view?.id === botId ? view : null;
-  assignView(botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false } : null);
-  const url = conversationUrl(botId);
-  if (url.href !== location.href) {
-    if (updateHistory) history.pushState(null, '', url);
-    else history.replaceState(null, '', url);
-  }
-  save('flock-selected-bot', botId);
-  render('bottom');
-  if (prevBotId && prevBotId !== botId) animateViewTransition('bot-switch');
-  const context = view;
-  if (context) {
-    context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh((scroll, animationGeneration) =>
-      readTimeline(context, () => refreshView(context, scroll, animationGeneration)));
-    void context.refresh(context.data ? undefined : 'bottom');
-  }
-  subscribeToView();
-}
-export function selectLocation() {
-  const params = new URLSearchParams(location.search);
-  const requested = params.get('bot');
-  const bot = bots.find((entry) => entry.id === requested);
-  const wantsSettings = params.get('settings') === '1';
-  const preferred = saved('flock-selected-bot', null);
-  const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
-  selectBot(selectedBot, { updateHistory: false });
-  if (wantsSettings) {
-    const url = conversationUrl(selectedBot);
-    url.searchParams.delete('settings');
-    history.replaceState(history.state, '', url);
-    if (bot && view?.id === bot.id) openBotSettings(bot.id);
   }
 }

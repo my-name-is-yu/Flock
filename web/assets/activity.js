@@ -2,12 +2,24 @@ import { actionLabel, approvalSummary } from './action-labels.mjs';
 import { accentColor, presenceMotion, showAvatar } from './avatars.js';
 import { pendingKindLabels, sessionEndLabels, stateLabels } from './conversation-copy.mjs';
 import { node } from './dom.js';
-import { bots, byId, dayFormat, elements, fullTime, listLoaded, reducedMotion, sidebarIcons, view } from './app-state.js';
-import { button, changed, connection, openNavigation, runHref, waitLabel, waitText } from './app-core.js';
+import {
+  bots,
+  byId,
+  connection,
+  conversationFind,
+  dayFormat,
+  decisions,
+  elements,
+  fullTime,
+  listLoaded,
+  openDetail,
+  reducedMotion,
+  sidebarIcons,
+  view,
+} from './app-state.js';
+import { button, changed, openNavigation, runHref, waitLabel, waitText } from './app-core.js';
 import { skeletonRows, triggerRowReveal } from './sidebar.js';
 import { startedLabel } from './timeline.js';
-import { openDetail } from './bot-detail.js';
-import { conversationFind, decisions } from './app.js';
 
 let profileAvatar = null;
 let profileKey = '';

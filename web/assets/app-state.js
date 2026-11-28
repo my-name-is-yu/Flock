@@ -35,6 +35,7 @@ export let listLoaded = false;
 export let view = null;
 export let visibilityGeneration = 0;
 export let menu = null;
+export let connection = 'loading';
 export const responseViewers = new WeakMap();
 export const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
 export const showingComposer = (bot) => view?.id === bot;
@@ -96,6 +97,13 @@ export const visualViewport = window.visualViewport;
 export let syncRetry;
 
 export let sessionDateRefresh;
+
+// Provided by app.js at startup: what it mounts, and the operations that redraw or reload the page.
+export let openDetail, selectBot, decisions, botPause, botDeletion, conversationFind, closeDetail, renderComposer, setNotice, operate, render, refreshBots, openNewBot, headerFocusTarget, botEditor, liveUpdates;
+
+export function assignConnection(value) {
+  connection = value;
+}
 
 export function assignMenu(value) {
   menu = value;
@@ -183,4 +191,68 @@ export function assignSessionDateRefresh(value) {
 
 export function assignVisibilityGeneration(value) {
   visibilityGeneration = value;
+}
+
+export function assignOpenDetail(value) {
+  openDetail = value;
+}
+
+export function assignSelectBot(value) {
+  selectBot = value;
+}
+
+export function assignDecisions(value) {
+  decisions = value;
+}
+
+export function assignBotPause(value) {
+  botPause = value;
+}
+
+export function assignBotDeletion(value) {
+  botDeletion = value;
+}
+
+export function assignConversationFind(value) {
+  conversationFind = value;
+}
+
+export function assignCloseDetail(value) {
+  closeDetail = value;
+}
+
+export function assignRenderComposer(value) {
+  renderComposer = value;
+}
+
+export function assignSetNotice(value) {
+  setNotice = value;
+}
+
+export function assignOperate(value) {
+  operate = value;
+}
+
+export function assignRender(value) {
+  render = value;
+}
+
+export function assignRefreshBots(value) {
+  refreshBots = value;
+}
+
+export function assignOpenNewBot(value) {
+  openNewBot = value;
+}
+
+export function assignHeaderFocusTarget(value) {
+  headerFocusTarget = value;
+}
+
+export function assignBotEditor(value) {
+  botEditor = value;
+}
+
+export function assignLiveUpdates(value) {
+  liveUpdates = value;
 }

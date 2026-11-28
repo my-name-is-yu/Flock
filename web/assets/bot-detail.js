@@ -13,28 +13,35 @@ import {
   assignDetailOrigin,
   assignNotificationDestination,
   assignReopenSettingsOnClose,
+  botDeletion,
+  botEditor,
+  botPause,
   botQuery,
   bots,
   byId,
   conversationActionsTrigger,
+  decisions,
   detailNav,
   elements,
   finishingBotEditor,
   fullTime,
+  liveUpdates,
   narrow,
   notificationDestination,
+  operate,
   reducedMotion,
+  refreshBots,
+  selectBot,
   sidebar,
   sidebarShow,
   signatures,
   view,
   workspace,
 } from './app-state.js';
-import { api, button, changed, linkToRun, selectBot, waitLabel, waitText } from './app-core.js';
+import { api, button, changed, linkToRun, waitLabel, waitText } from './app-core.js';
 import { closeMenu, focusKey } from './sidebar.js';
 import { questionActions, readOnlyChoices, showConversationMessage } from './timeline.js';
 import { setNotice } from './composer.js';
-import { botDeletion, botEditor, botPause, decisions, liveUpdates, operate, refreshBots } from './app.js';
 
 export let detail = null;
 const settingsSections = {

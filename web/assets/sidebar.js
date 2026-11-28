@@ -5,23 +5,26 @@ import { placeRows } from './timeline-rows.js';
 import {
   assignMenu,
   assignSettingsReturnFocus,
+  botDeletion,
   botDraft,
+  botPause,
   bots,
   byId,
+  decisions,
   elements,
   listLoaded,
   menu,
+  openDetail,
   readState,
   reducedMotion,
   responseViewers,
+  selectBot,
   sidebar,
   sidebarIcons,
   sidebarViewer,
   view,
 } from './app-state.js';
-import { avatar, button, changed, save, selectBot } from './app-core.js';
-import { openDetail } from './bot-detail.js';
-import { botDeletion, botPause, decisions, pins } from './app.js';
+import { avatar, button, changed, pins, save } from './app-core.js';
 
 const activePresence = new Set(['working', 'thinking', 'waiting', 'paused']);
 const busyPresence = new Set(['working', 'thinking']);

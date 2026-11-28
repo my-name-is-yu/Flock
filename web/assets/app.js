@@ -13,25 +13,44 @@ import { enableBackdropDismiss } from './dialog-backdrop.mjs';
 import { refreshEventHistory } from './event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from './live-updates.js';
 import {
+  assignBotDeletion,
   assignBotDraft,
+  assignBotEditor,
+  assignBotPause,
   assignBots,
+  assignCloseDetail,
   assignComposition,
+  assignConnection,
+  assignConversationFind,
+  assignDecisions,
   assignDetailOrigin,
   assignDragDepth,
   assignFinishingBotEditor,
+  assignHeaderFocusTarget,
   assignListLoaded,
+  assignLiveUpdates,
+  assignMenu,
   assignMessageTap,
   assignNotificationDestination,
+  assignOpenDetail,
+  assignOpenNewBot,
+  assignOperate,
   assignPickerTarget,
   assignReadState,
+  assignRefreshBots,
+  assignRender,
+  assignRenderComposer,
   assignReopenSettingsOnClose,
   assignRosterRevision,
+  assignSelectBot,
   assignSessionDateRefresh,
+  assignSetNotice,
   assignSettingsReturnFocus,
   assignSidebarViewer,
   assignSyncRetry,
   assignTimelineHeight,
   assignTimelineWidth,
+  assignView,
   assignVisibilityGeneration,
   botQuery,
   bots,
@@ -41,6 +60,7 @@ import {
   composerDrafts,
   composerLimit,
   composition,
+  connection,
   conversationActions,
   conversationActionsTrigger,
   detailNav,
@@ -88,8 +108,16 @@ import {
   visualViewport,
   workspace,
 } from './app-state.js';
-import { api, closeConversationActions, openNavigation, save, saved, selectBot, selectLocation, setConnection } from './app-core.js';
-import { closeMenu, focusKey, openSettingsFromMenu, pinnedBotsInShortcutOrder, renderBots, scheduleReadCheck } from './sidebar.js';
+import { animateViewTransition, api, closeConversationActions, conversationUrl, openNavigation, pins, save, saved } from './app-core.js';
+import {
+  closeMenu,
+  focusKey,
+  openBotSettings,
+  openSettingsFromMenu,
+  pinnedBotsInShortcutOrder,
+  renderBots,
+  scheduleReadCheck,
+} from './sidebar.js';
 import { renderActivity, renderHeader } from './activity.js';
 import {
   backToLatest,
@@ -100,6 +128,7 @@ import {
   leaveConversationSource,
   messageBubble,
   nextSuggestion,
+  rememberReadingPosition,
   renderTimeline,
   resetConversationJump,
   showConversationMessage,
@@ -128,8 +157,73 @@ import {
   showDetailError,
 } from './bot-detail.js';
 
-const savedPins = saved('flock-pins', []);
-export const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
+// The parts of the page reach these through app-state.js, so they do not import this script.
+assignOpenDetail(openDetail);
+assignSelectBot(selectBot);
+assignCloseDetail(closeDetail);
+assignRenderComposer(renderComposer);
+assignSetNotice(setNotice);
+assignOperate(operate);
+assignRender(render);
+assignOpenNewBot(openNewBot);
+assignHeaderFocusTarget(headerFocusTarget);
+
+
+function setConnection(state) {
+  if (connection === state) return;
+  assignConnection(state);
+  elements.connection.dataset.state = state;
+  elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
+  renderHeader();
+}
+function selectBot(botId, { updateHistory = true } = {}) {
+  assignMenu(null);
+  closeConversationActions();
+  openNavigation(false);
+  if (view?.id === botId) {
+    if (view.source || view.pendingSource) backToLatest();
+    else renderBots();
+    return;
+  }
+  const prevBotId = view?.id ?? null;
+  resetConversationJump(view);
+  rememberReadingPosition();
+  closeDetail();
+  const existing = view?.id === botId ? view : null;
+  assignView(botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
+    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false } : null);
+  const url = conversationUrl(botId);
+  if (url.href !== location.href) {
+    if (updateHistory) history.pushState(null, '', url);
+    else history.replaceState(null, '', url);
+  }
+  save('flock-selected-bot', botId);
+  render('bottom');
+  if (prevBotId && prevBotId !== botId) animateViewTransition('bot-switch');
+  const context = view;
+  if (context) {
+    context.pageRead = Promise.resolve();
+    context.refresh = coalescedRefresh((scroll, animationGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, animationGeneration)));
+    void context.refresh(context.data ? undefined : 'bottom');
+  }
+  subscribeToView();
+}
+function selectLocation() {
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('bot');
+  const bot = bots.find((entry) => entry.id === requested);
+  const wantsSettings = params.get('settings') === '1';
+  const preferred = saved('flock-selected-bot', null);
+  const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
+  selectBot(selectedBot, { updateHistory: false });
+  if (wantsSettings) {
+    const url = conversationUrl(selectedBot);
+    url.searchParams.delete('settings');
+    history.replaceState(history.state, '', url);
+    if (bot && view?.id === bot.id) openBotSettings(bot.id);
+  }
+}
 
 // Observe the native click after a short, stationary press. Leave scrolling and selection to the browser.
 elements.timeline.addEventListener('pointerdown', (event) => {
@@ -196,7 +290,7 @@ detailNav.addEventListener('keydown', (event) => {
   selectSection(tabs[(next + tabs.length) % tabs.length].dataset.section, true);
 });
 
-export const botEditor = createBotEditor(elements['bot-editor'], {
+const botEditor = createBotEditor(elements['bot-editor'], {
   api,
   onDraft(draft) {
     assignBotDraft(draft);
@@ -229,8 +323,9 @@ export const botEditor = createBotEditor(elements['bot-editor'], {
     }
   },
 });
+assignBotEditor(botEditor);
 
-export const botDeletion = mountBotDeletion(byId('bot-delete'), {
+const botDeletion = mountBotDeletion(byId('bot-delete'), {
   remove: (botId) => api('bots/delete', { botId }),
   focusFallback: focusAfterBotDeletion,
   onDeleted(id) {
@@ -244,7 +339,9 @@ export const botDeletion = mountBotDeletion(byId('bot-delete'), {
     void refreshBots();
   },
 });
-export const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
+assignBotDeletion(botDeletion);
+const botPause = mountBotPause(byId('bot-pause'), setBotPaused);
+assignBotPause(botPause);
 
 elements['composer-banner-action'].addEventListener('click', async (event) => {
   const control = event.currentTarget;
@@ -271,7 +368,7 @@ elements['composer-banner-action'].addEventListener('click', async (event) => {
     if (view === context && !control.hidden) control.focus({ preventScroll: true });
   }
 });
-export function render(scroll, liveAfterId) {
+function render(scroll, liveAfterId) {
   decisions.setContext(view?.id, sidebarViewer);
   renderBots();
   renderHeader();
@@ -312,7 +409,7 @@ function mergeLatest(context, latest) {
 async function conversationPage(timeline, before) {
   return api(botQuery('conversation', timeline.id, before));
 }
-export async function refreshView(context, scroll, animationGeneration) {
+async function refreshView(context, scroll, animationGeneration) {
   const isCurrent = () => context === view &&
     (animationGeneration == null || (animationGeneration === visibilityGeneration && !document.hidden));
   if (!isCurrent()) return;
@@ -349,7 +446,7 @@ export async function refreshView(context, scroll, animationGeneration) {
     openSettingsFromMenu(context.id);
   }
 }
-export const refreshBots = coalescedRefresh(async () => {
+const refreshBots = coalescedRefresh(async () => {
   const revisionAtFetch = rosterRevision;
   try {
     const latest = await api('bots');
@@ -382,7 +479,8 @@ export const refreshBots = coalescedRefresh(async () => {
     retrySync();
   }
 });
-export function readTimeline(context, read) {
+assignRefreshBots(refreshBots);
+function readTimeline(context, read) {
   const next = (context.pageRead ?? Promise.resolve()).then(read, read);
   context.pageRead = next;
   return next;
@@ -430,7 +528,7 @@ async function loadSessions() {
   }
 }
 
-export function operate(context, task, operation, data) {
+function operate(context, task, operation, data) {
   const current = context.data?.waits.find((entry) => entry.id === task.id && entry.wait.id === task.wait.id);
   return submitConversationDecision(context, taskWaitDecision(context.id, task),
     current && taskWaitDecision(context.id, current), operation, data);
@@ -507,7 +605,7 @@ async function submit(event) {
     if (showingComposer(context.id)) renderComposer();
   }
 }
-export const conversationFind = mountConversationFind({
+const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
   panel: findPanel,
   readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, { signal }),
@@ -523,9 +621,10 @@ export const conversationFind = mountConversationFind({
     decisions.close({ focus: false });
   },
 });
+assignConversationFind(conversationFind);
 new ResizeObserver(updateFindOverlap).observe(findPanel);
 
-export const decisions = mountBoardInbox({
+const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
   onRefreshError: retrySync,
@@ -554,6 +653,7 @@ export const decisions = mountBoardInbox({
     setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
   },
 });
+assignDecisions(decisions);
 
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
@@ -908,14 +1008,15 @@ function catchUp() {
   void view?.refresh();
 }
 
-export const liveUpdates = createLiveUpdates(catchUp, (change) => {
+const liveUpdates = createLiveUpdates(catchUp, (change) => {
   if (change.list === true) void browserNotifications.refresh();
   if (document.hidden) return;
   if (change.list === true) void refreshBots();
   if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
 });
+assignLiveUpdates(liveUpdates);
 
-export function subscribeToView() {
+function subscribeToView() {
   browserNotifications.updateViewing();
   if (document.hidden) {
     liveUpdates.use(browserNotificationsEnabled() ? '/api/events' : null);
