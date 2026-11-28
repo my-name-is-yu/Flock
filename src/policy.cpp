@@ -492,12 +492,13 @@ void SecretRequests::submitSecret(const Person& actor, std::string_view bot, Id 
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
     Transaction tx(database.db);
-    policy_storage::fulfillSecret(database, storage.permissions, storage.secretStorage, storage.inboxStorage, actor, bot, request, value);
+    policy_storage::fulfillSecret(database, storage.permissions, storage.secretStorage, storage.inboxDecisions, actor, bot, request, value);
     tx.commit();
 }
 
-void policy_storage::fulfillSecret(Database& database, const Policy& permissions, SecretStorage& secretStorage, InboxStorage& inboxStorage,
-                                   const Person& actor, std::string_view bot, Id request, std::string_view value) {
+void policy_storage::fulfillSecret(Database& database, const Policy& permissions, SecretStorage& secretStorage,
+                                   InboxDecisions& inboxDecisions, const Person& actor, std::string_view bot, Id request,
+                                   std::string_view value) {
     if (!permissions.allows(actor, Action::bot_decide, bot)) throw AccessDenied{};
     auto row = database.query(R"SQL(
 SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending'
@@ -510,7 +511,7 @@ SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pendin
     secretStorage.redactor(bot).requirePublic(actor.id);
     policy_storage::audit(database, actor, bot, "supply_secret",
                           {{"requestId", request}, {"resourceKind", "secret"}, {"resourceId", name}});
-    inboxStorage.recordInboxDecision(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
+    inboxDecisions.record(actor, {std::string(bot), InboxKind::protected_input, request, 0, 0, 0, 0}, "supply");
     database.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?", {request});
     secretStorage.insert({row.string(0)}, value);
 }

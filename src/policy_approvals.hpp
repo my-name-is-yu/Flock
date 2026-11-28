@@ -29,15 +29,15 @@ struct Message;
 
 class BotLifecycleStorage;
 class ChannelStorage;
-class InboxStorage;
+class InboxDecisions;
 class PolicyApprovals {
 public:
     PolicyApprovals(Database& database, const SecretStorage& secretStorage, const WebIdentityState& webIdentity, TaskRecords& taskRecords,
                     WaitStorage& waitStorage, Policy& permissions, ConversationMessages& conversationMessages,
-                    BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage)
+                    BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxDecisions& inboxDecisions)
         : database(database), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords), waitStorage(waitStorage),
           permissions(permissions), conversationMessages(conversationMessages), botLifecycle(botLifecycle), channelStorage(channelStorage),
-          inboxStorage(inboxStorage) {}
+          inboxDecisions(inboxDecisions) {}
 
     Seconds now() const { return clock(); }
     void setClock(const std::function<Seconds()>& value) { clock = value; }
@@ -63,7 +63,7 @@ private:
     ConversationMessages& conversationMessages;
     BotLifecycleStorage& botLifecycle;
     ChannelStorage& channelStorage;
-    InboxStorage& inboxStorage;
+    InboxDecisions& inboxDecisions;
     std::function<Seconds()> clock = unixTime;
 };
 }

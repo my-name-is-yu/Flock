@@ -96,7 +96,7 @@ struct Store::Impl {
                                                 taskRunReports};
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
     TaskOperations taskOperations{database,   botLifecycle, permissions, journalStorage, outboxStorage, secretStorage,
-                                  taskEvents, taskRecords,  taskRouting, waitStorage,    inboxStorage};
+                                  taskEvents, taskRecords,  taskRouting, waitStorage,    inboxDecisions};
     TaskRouting taskRouting{database, permissions, waitStorage, sessionReadStorage};
     TaskRunReports taskRunReports{database, policyApprovals, journalStorage, outboxStorage};
     OutboxStorage outboxStorage{database};
@@ -111,7 +111,9 @@ struct Store::Impl {
     AttachmentStorage attachments{database};
     ConversationContextStorage conversationContextStorage{database, secretStorage, attachments};
     WebIdentityState webIdentity;
-    InboxStorage inboxStorage{database, secretStorage, taskRecords, waitStorage, permissions, taskOperations, policyApprovals};
+    InboxDecisions inboxDecisions{database, secretStorage};
+    InboxStorage inboxStorage{database,    secretStorage,  taskRecords,     waitStorage,
+                              permissions, taskOperations, policyApprovals, inboxDecisions};
     GitStorage gitStorage{database,    secretStorage,        taskRecords,  journalStorage,  webIdentity,
                           permissions, conversationMessages, botLifecycle, policyApprovals, sessionParticipationStorage};
     ChannelStorage channelStorage{
@@ -119,7 +121,7 @@ struct Store::Impl {
         policyApprovals};
     LocalMachineStorage localMachineStorage{database, permissions, webIdentity, taskRecords};
     PolicyApprovals policyApprovals{database,    secretStorage,        webIdentity,  taskRecords,    waitStorage,
-                                    permissions, conversationMessages, botLifecycle, channelStorage, inboxStorage};
+                                    permissions, conversationMessages, botLifecycle, channelStorage, inboxDecisions};
     SessionParticipationStorage sessionParticipationStorage{database,          path,
                                                             secretStorage,     taskRecords,
                                                             webIdentity,       permissions,
