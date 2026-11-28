@@ -863,6 +863,8 @@ void selectedTaskFilesSurviveRestart() {
     check(f.t3.sent.size() == 2 && !f.t3.reconciled.empty() && f.t3.reconciled.back().attachmentCount == 1 &&
               f.t3.reconciled.back().attachments.empty(),
           "Reconciliation lost the attachment reference or sent the file again");
+    f.t3.finish("run-2", "Follow-up complete");
+    f.reach(task, "completed");
 
     SecretRequests secrets(*f.store);
     constexpr auto protectedText = "fixture-key-for-file-dispatch";
