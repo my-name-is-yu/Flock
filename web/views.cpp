@@ -188,7 +188,9 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
         details["run"] = runView(data.at("run"), field(data, "environmentId"));
         renderMarkdown("report");
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
-        copyFields(details, data, {"text", "messageId", "replyToMessageId", "taskId", "route", "status", "deliveredToT3"});
+        copyFields(
+            details, data,
+            {"text", "messageId", "replyToMessageId", "taskId", "route", "status", "instructionAcceptedAt", "instructionDeliveredAt"});
         details["textHtml"] = markdown::toHtml(field(data, "text"), sensitive);
         if (kind == "conversation_message") {
             copyFields(details, data, {"attachmentCount", "imageAttachmentCount"});

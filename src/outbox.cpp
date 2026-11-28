@@ -36,7 +36,7 @@ constexpr std::array commandTools{
 constexpr std::array outboxPhases{
     std::pair{OutboxPhase::ready, "ready"sv},           std::pair{OutboxPhase::started, "started"sv},
     std::pair{OutboxPhase::accepted, "accepted"sv},     std::pair{OutboxPhase::closed, "closed"sv},
-    std::pair{OutboxPhase::superseded, "superseded"sv},
+    std::pair{OutboxPhase::superseded, "superseded"sv}, std::pair{OutboxPhase::unconfirmed, "unconfirmed"sv},
 };
 
 template <class T> void writeOptional(Json& object, std::string_view key, const std::optional<T>& value) {
@@ -423,6 +423,13 @@ bool OutboxStorage::setOutboxPhase(std::string_view id, OutboxPhase phase, std::
     else
         db_.exec("UPDATE outbox SET phase=? WHERE id=?", {outboxPhaseName(phase), id});
     return sqlite3_changes(db_.db) == 1;
+}
+
+void OutboxStorage::recordUnconfirmedAnswer(Id task, const Outbox& action) {
+    const auto& command = action.command;
+    if (setOutboxPhase(command.actionId, OutboxPhase::unconfirmed, OutboxPhase::started))
+        db_.writeJournal(task, JournalKind::answer_delivery_unconfirmed,
+                         {{"actionId", command.actionId}, {"requestId", command.questionId}, {"run", runJson(command.target)}});
 }
 
 bool OutboxStorage::startOutbox(const Outbox& action, std::string_view authGeneration) {

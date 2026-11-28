@@ -587,6 +587,11 @@ int main(int argc, char** argv) {
               "a follow-up to an archived Session was retried and not shown to the person");
         fixture({{"threadArchived", false}});
         check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy, unrelated or archived Run");
+        fixture({{"scenario", "settled"}, {"moveThreadOnQueueList", true}});
+        const auto moved = adapter->send(follow);
+        check(moved.kind == Delivery::Kind::Settings && moved.definitelyUnsent && effects("t3_thread_send").empty(),
+              "T3 received a follow-up after the Session moved projects during readiness checks");
+        fixture({{"moveThreadOnQueueList", false}, {"threadProjectId", "project"}});
         fixture({{"scenario", "settled"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" && delivery.run.runId == "follow",

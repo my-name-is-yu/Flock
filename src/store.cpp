@@ -460,11 +460,11 @@ Json Conversations::conversation(std::string_view bot, Id before, unsigned limit
 WITH visible AS NOT MATERIALIZED (
   SELECT id,task_id,conversation_bot_id FROM journal
   WHERE id<=?2
-    AND (?3=0 OR kind IN ('conversation_reply','report','completed')
+    AND (?3=0 OR kind IN ('conversation_reply','report','completed','answer_delivery_unconfirmed')
          OR (kind='waiting' AND wait_reason IN ('user_question','bot_notes_unavailable','auth','settings')))
     AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','session_participation_stop','bot_setup_undone'))
       OR (conversation_bot_id IS NULL
-        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
+        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','answer_delivery_unconfirmed')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
         AND (kind!='user_answer' OR user_answer_conversation IS NOT 1)))
 ), bot_page AS (
@@ -498,19 +498,18 @@ SELECT page.id,page.task_id,page.time,page.kind,
                     'name',json_extract(a.metadata,'$.name'),'mimeType',json_extract(a.metadata,'$.mimeType'),
                     'sizeBytes',json_extract(a.metadata,'$.sizeBytes')))
                 FROM (SELECT attachment_id,metadata FROM message_attachments WHERE message_id=m.id ORDER BY attachment_id) a
-            ) END,
-            'deliveredToT3',json(CASE WHEN (
-              WITH instructions AS (
-                SELECT kind,task_id,instruction_step AS step
-                FROM journal WHERE kind IN ('instruction_accepted','instruction_delivered')
-                AND message_id=m.id
-              )
-              SELECT min(EXISTS (
-                SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
-                AND d.task_id=i.task_id AND d.step=i.step
-              )) FROM instructions i WHERE i.kind!='instruction_delivered'
-            ) THEN 'true' ELSE 'false' END))) END,
-  channel.message_id IS NOT NULL,w.id,w.reason,w.data
+            ) END)) END,
+  channel.message_id IS NOT NULL,w.id,w.reason,w.data,
+  CASE WHEN m.id IS NOT NULL THEN (
+    SELECT json_object('instructionAcceptedAt',min(accepted_at),
+      'instructionDeliveredAt',CASE WHEN count(delivered_at)=count(*) THEN max(delivered_at) END)
+    FROM (
+      SELECT min(time) FILTER (WHERE kind='instruction_accepted') AS accepted_at,
+             min(time) FILTER (WHERE kind='instruction_delivered') AS delivered_at
+      FROM journal WHERE message_id=m.id AND kind IN ('instruction_accepted','instruction_delivered')
+      GROUP BY task_id,instruction_step HAVING accepted_at IS NOT NULL
+    )
+  ) END
 FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
@@ -528,6 +527,7 @@ ORDER BY page.id DESC)SQL",
             event["data"].update(
                 channels_.channelContext(rows.number(0), bot, nullptr, viewer ? std::string_view(viewer->id) : std::string_view{}));
         if (rows.number(6)) event["data"]["question"] = decodeWaitRow(rows, 6).text;
+        if (!rows.null(9)) event["data"].merge_patch(rows.json(9));
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(), result.end());

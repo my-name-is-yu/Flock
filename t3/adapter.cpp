@@ -915,7 +915,7 @@ FollowUp followUpReadiness(Client& client, const Command& command) {
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
     const auto& current = checked.at("thread");
-    if (boolean(current, "archived")) return FollowUp::SessionUnavailable;
+    if (field(current, "projectId") != command.projectId || boolean(current, "archived")) return FollowUp::SessionUnavailable;
     const bool unchanged = member(current, "activeRunId").is_null() && field(current, "latestRunId") == field(info, "latestRunId") &&
                            position(member(current, "pendingRequestCount")) == 0;
     return unchanged ? FollowUp::Ready : FollowUp::Busy;

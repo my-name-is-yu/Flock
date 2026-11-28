@@ -146,6 +146,7 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeTurn;
     std::function<void(const ModelInput&)> beforeComplete;
     std::function<Decision(const ModelInput&)> onResult;
+    std::function<Decision(const ModelInput&)> onWake;
     std::vector<ModelInput> turnInputs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
@@ -154,6 +155,7 @@ struct Script : Model {
             turnInputs.push_back(input);
             if (beforeTurn) beforeTurn(input);
             if (input.event.contains("sessionWake")) {
+                if (onWake) return onWake(input);
                 // A finished task wakes its conversation. Reuse the result hook with the woken task's report.
                 if (onResult && input.event.contains("task") && input.event.at("turn").empty()) {
                     auto woken = input;
@@ -565,7 +567,7 @@ void followUpCarriesTheReferencedReport() {
     check(f.t3.sent.back().tool == CommandTool::follow_up && f.t3.sent.back().target.threadId == "session-1" &&
               f.t3.sent.back().instruction.find("案2を実装") != std::string::npos &&
               f.t3.sent.back().instruction.find("Capture a fixture trace") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "the Session did not receive the referenced result");
 }
 
@@ -614,7 +616,7 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.t3.finish("run-1", "Measured with Quartz-717");
     f.advanceUntil([&] { return f.t3.sent.size() == 3; }, "the additional instruction did not continue the Session");
     check(f.t3.sent.back().target.threadId == "session-1" && f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
-              f.conversationMessage(added["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(added["messageId"]).contains("instructionDeliveredAt"),
           "continuation lost the additional instruction");
 }
 
@@ -1564,7 +1566,7 @@ void appendWaitsForSafeBoundary() {
     check(f.receive("format", "補足として表をCSV形式で出して") == message, "retry changed a durable receipt");
     f.tick(3);
     check(f.task(next)["state"] == "queued" && f.t3.sent.size() == 1 && f.t3.interrupted.empty() &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == false,
+              !f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "non-conflicting instruction ran before the safe boundary");
     f.restart();
     f.t3.finish("run-1", "Baseline evidence");
@@ -1574,7 +1576,7 @@ void appendWaitsForSafeBoundary() {
     check(work["runs"].size() == 2 && work["runs"][0]["threadId"] == work["runs"][1]["threadId"],
           "same-Session continuation changed Task provenance");
     check(f.t3.sent.back().instruction.find("CSV形式で") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true && f.task(next)["state"] == "queued",
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt") && f.task(next)["state"] == "queued",
           "continuation lost the user instruction or the project gate");
     f.t3.finish("run-2", "Latest CSV evidence");
     f.reach(id, "completed");
@@ -1599,7 +1601,7 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
     f.reach(id, "running");
     check(f.t3.sent.back().instruction.find("Export the table as CSV") != std::string::npos &&
               f.t3.sent.back().instruction.find("Add a chart") != std::string::npos &&
-              f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(message["messageId"]).contains("instructionDeliveredAt"),
           "the instructions were not both delivered");
 }
 
@@ -1638,12 +1640,18 @@ void deliveryWaitsForEveryTarget() {
     constexpr auto text = "Include CPU time in both measurements";
     f.script(text, {send(running), send(queued)});
     const Id message = f.receive("both-measurements", text).at("messageId");
+    const auto acceptedAt = lastTaskEvent(*f.store, running, "instruction_accepted").at("time");
+    check(f.conversationMessage(message).at("instructionAcceptedAt") == acceptedAt &&
+              !f.conversationMessage(message).contains("instructionDeliveredAt"),
+          "the accepted instruction did not show its acceptance time");
     f.t3.finish("run-1", "First measurement reached a safe point");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; }, "the first direction did not reach T3");
-    check(f.conversationMessage(message)["deliveredToT3"] == false, "the first delivery marked the whole message as sent");
+    check(!f.conversationMessage(message).contains("instructionDeliveredAt"), "the first delivery marked the whole message as sent");
     f.t3.finish(f.task(running).at("activeRun").at("runId").get<std::string>(), "First measurement complete");
     f.reach(queued, "running");
-    check(f.t3.sent.back().instruction.find(text) != std::string::npos && f.conversationMessage(message)["deliveredToT3"] == true,
+    const auto delivered = f.conversationMessage(message);
+    check(f.t3.sent.back().instruction.find(text) != std::string::npos && delivered.at("instructionAcceptedAt") == acceptedAt &&
+              delivered.at("instructionDeliveredAt") == lastTaskEvent(*f.store, queued, "instruction_delivered").at("time"),
           "the message was not marked as sent after the second delivery");
 }
 
@@ -1698,7 +1706,7 @@ void unknownSendThenScopeChange() {
               f.t3.sent.back().tool == CommandTool::follow_up &&
               f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
               f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
-              f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
+              f.conversationMessage(change["messageId"]).contains("instructionDeliveredAt"),
           "the replacement did not reconcile as one delivery for the new revision");
     const auto runs = f.task(id)["runs"];
     check(runs[0]["revisionId"] == before["currentRevision"] && runs[1]["revisionId"] == f.task(id)["currentRevision"] &&
@@ -1724,6 +1732,47 @@ std::string settleLearningTask(Fixture& f, Id task, std::string report) {
     f.t3.finish(runId, std::move(report));
     f.reach(task, "completed");
     return runId;
+}
+
+void failedReviewStepDoesNotAutoComplete() {
+    enum class Review { failed, unrelatedRead, recovered, successful };
+    for (const auto review : {Review::failed, Review::unrelatedRead, Review::recovered, Review::successful}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release and its dependency");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        const auto report = lastTaskEvent(*f.store, task, "report").at("id");
+        const auto dependency = task + 1;
+        f.model.onWake = [&, report](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            if (turn.empty()) {
+                if (review == Review::successful) return {"read_result", {{"messageId", report}}, "Read the current release report"};
+                return {"find_tasks", {{"taskId", dependency}}, "Check a release dependency"};
+            }
+            if (review == Review::successful) {
+                check(turn.front().at("result").at("ok") == true, "the release report was not readable");
+                return {"reply", {{"text", "I verified the release."}}, "Report the review result"};
+            }
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the dependency read did not fail");
+                if (review == Review::recovered) {
+                    check(TaskIntake(*f.store).submit(f.routing("Release dependency")) == dependency,
+                          "the dependency did not become available");
+                    return {"find_tasks", {{"taskId", dependency}}, "Retry the dependency check"};
+                }
+                if (review == Review::unrelatedRead) return {"read_result", {{"messageId", report}}, "Read the current release report"};
+                return {"reply", {{"text", "I couldn't verify the dependency."}}, "Report the blocked review"};
+            }
+            check(turn.back().at("result").at("ok") == true, "the second evidence read failed");
+            return {"reply", {{"text", "I finished my review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the review did not settle");
+        const bool canComplete = review == Review::recovered || review == Review::successful;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its dependency check");
+    }
 }
 
 Decision completeWithLearnings(const ModelInput& input, Json learnings) {
@@ -4455,6 +4504,7 @@ int main(int argc, char** argv) {
         queuedTurnsSeeEarlierReplies();
         requestsOfOneKindShareAPromptCacheScope();
         finishedTurnDoesNotHoldCompletion();
+        failedReviewStepDoesNotAutoComplete();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();

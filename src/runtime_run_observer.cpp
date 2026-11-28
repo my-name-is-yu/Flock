@@ -87,7 +87,10 @@ bool runtime::RunObserver::ingest(const TaskData& snapshot, const Observation& o
                 const auto action = outboxStorage.outbox(task);
                 const bool supersededAnswer = action && action->command.tool == CommandTool::answer_session_question;
                 if (supersededAnswer) {
-                    outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
+                    if (action->phase == OutboxPhase::started)
+                        outboxStorage.recordUnconfirmedAnswer(task.id, *action);
+                    else
+                        outboxStorage.setOutboxPhase(action->command.actionId, OutboxPhase::closed);
                     task.actionId.clear();
                     task.t3CheckAt.reset();
                 }

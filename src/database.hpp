@@ -59,6 +59,7 @@ enum class JournalKind {
     run_id_pending,
     run_started,
     session_answered,
+    answer_delivery_unconfirmed,
     session_destination_changed,
     session_lineage_unavailable,
     session_participation_stop,

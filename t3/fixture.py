@@ -421,6 +421,8 @@ class Fixture(BaseHTTPRequestHandler):
                     return {"items": [entry], "nextCursor": None}
                 return {"items": [], "nextCursor": None}
             assert args["action"] == "list" and args["threadId"] == "thread"
+            if state.get("moveThreadOnQueueList"):
+                state["threadProjectId"] = "other-project"
             return {"items": [], "nextCursor": None}
         if name == "t3_thread_list":
             if args.get("allProjects") is True:
@@ -585,6 +587,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state.get("personFinished") and state["botRunStatus"] == "queued":
                 active = None
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest,
+                                             "projectId": state.get("threadProjectId", "project"),
                                              "archived": state.get("threadArchived", False),
                                              "pendingRequestCount": count}
         if state.get("sessionWakeFixture"):
