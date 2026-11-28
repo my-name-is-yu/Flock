@@ -7,7 +7,7 @@
 
 namespace flockv0 {
 class Store;
-class ConversationStorage;
+class ConversationTurns;
 struct Intake;
 struct Person;
 
@@ -19,6 +19,6 @@ public:
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text, Id replyToMessageId = 0,
                  const Json& attachments = Json::array());
 private:
-    ConversationStorage& turns_;
+    ConversationTurns& turns_;
 };
 }

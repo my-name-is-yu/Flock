@@ -41,7 +41,8 @@ struct Runtime::Impl {
     Database& database;
     WaitStorage& waitStorage;
     ChannelStorage& channelStorage;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
+    TurnRunner& turnRunner;
     GitStorage& gitStorage;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;
@@ -64,8 +65,8 @@ struct Runtime::Impl {
     runtime::DatabaseLock lock;
 
     void runTurn(Id id) {
-        conversationTurns.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
-                                  options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
+        turnRunner.runTurn(id, model, t3, soul, options.clock, *options.botTools, options.gitHost.get(), options.applyBotChange,
+                           options.reconcileBotCreation, options.intake, options.peers, workers.stopToken());
     }
 
     void wakeExternalEvents() {
@@ -75,10 +76,11 @@ struct Runtime::Impl {
 
     Impl(StoreAccess::Impl& storage, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : database(storage.database), waitStorage(storage.waitStorage), channelStorage(storage.channelStorage),
-          conversationTurns(storage.conversationTurns), gitStorage(storage.gitStorage), taskEvents(storage.taskEvents),
-          taskRecords(storage.taskRecords), policy(storage.permissions), model(m), t3(adapter), soul(std::move(loader)),
-          options(withDefaultBotTools(std::move(opts))), maintenance(storage.database, storage.automationStorage, storage.policyApprovals,
-                                                                     options.clock, options.automationError, options.storageContention),
+          conversationTurns(storage.conversationTurns), turnRunner(storage.turnRunner), gitStorage(storage.gitStorage),
+          taskEvents(storage.taskEvents), taskRecords(storage.taskRecords), policy(storage.permissions), model(m), t3(adapter),
+          soul(std::move(loader)), options(withDefaultBotTools(std::move(opts))),
+          maintenance(storage.database, storage.automationStorage, storage.policyApprovals, options.clock, options.automationError,
+                      options.storageContention),
           prompts(storage.database, storage.secretStorage, storage.memoryStorage, storage.taskEvents, soul),
           updates(storage.database, storage.journalStorage, storage.taskEvents, storage.taskRecords),
           questions(storage.database, storage.waitStorage),

@@ -25,15 +25,15 @@ namespace conversation {
 struct Message;
 }
 
-class ChannelStorage;
+class ChannelConnectors;
 class PolicyApprovals;
 class SessionReadStorage {
 public:
     SessionReadStorage(Database& database, SecretStorage& secretStorage, const SessionParticipationRecords& sessionParticipations,
-                       Policy& permissions, ConversationMessages& conversationMessages, ChannelStorage& channelStorage,
+                       Policy& permissions, ConversationMessages& conversationMessages, ChannelConnectors& channelConnectors,
                        PolicyApprovals& policyApprovals)
         : database(database), secretStorage(secretStorage), sessionParticipations(sessionParticipations), permissions(permissions),
-          conversationMessages(conversationMessages), channelStorage(channelStorage), policyApprovals(policyApprovals) {}
+          conversationMessages(conversationMessages), channelConnectors(channelConnectors), policyApprovals(policyApprovals) {}
 
     ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
@@ -50,7 +50,7 @@ private:
     const SessionParticipationRecords& sessionParticipations;
     Policy& permissions;
     ConversationMessages& conversationMessages;
-    ChannelStorage& channelStorage;
+    ChannelConnectors& channelConnectors;
     PolicyApprovals& policyApprovals;
 };
 }

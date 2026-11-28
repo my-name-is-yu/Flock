@@ -1,4 +1,6 @@
 #include "store_access.hpp"
+#include "session_send_receipts.hpp"
+#include "turn_results.hpp"
 #include "t3_connected_environments.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_lifecycle.hpp"
@@ -403,7 +405,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 .next()) {
             auto result = replay();
             if (result.is_null()) result = apply();
-            conversationTools.saveTurnResults(message.id, step, Json::array({result}));
+            turnResults.save(message.id, step, Json::array({result}));
         }
         transaction.commit();
         return true;
@@ -615,7 +617,7 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
     // A send may have returned a receipt before its transaction hit SQLite contention.
     // Include that Run in the same stop transaction even if the conversation step is retried later.
     const SessionTarget stoppedTarget{environment, target.threadId};
-    sessionMessageStorage.recordPendingRuns(stoppedTarget);
+    sessionSendReceipts.recordPendingRuns(stoppedTarget);
 
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";
@@ -857,9 +859,9 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
             stop = stopSessionParticipation(sessionReadStorage, conversationMessages.actor(message), message.bot, target, SessionExit::left,
                                             message.id);
         } catch (const Conflict& error) {
-            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            turnResults.save(message.id, step, Json::array({toolFailure(error.what())}));
         } catch (const conversation_storage::ToolError& error) {
-            conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
+            turnResults.save(message.id, step, Json::array({toolFailure(error.what())}));
         }
         transaction.commit();
     }
@@ -869,7 +871,7 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     Transaction transaction(database.db);
     auto result = stopped.data();
     result["ok"] = true;
-    conversationTools.saveTurnResults(message.id, step, Json::array({result}));
+    turnResults.save(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
     if (message.principalSource == conversation::PrincipalSource::session && !sessionParticipations.activeOrigin(message) &&
         conversationTurns.isNextTurn(message.id)) {

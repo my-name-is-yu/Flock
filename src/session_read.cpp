@@ -18,7 +18,7 @@
 #include "policy_approvals.hpp"
 #include "policy_origin.hpp"
 #include "task_routing.hpp"
-#include "channel_storage.hpp"
+#include "channel_connectors.hpp"
 #include "secret_storage.hpp"
 
 #include <algorithm>
@@ -688,9 +688,8 @@ void SessionReadStorage::authorizeSessionHistory(const conversation::Message& me
 
 std::set<std::string> SessionReadStorage::connectedSessionEnvironments(const conversation::Message& message) {
     std::lock_guard lock(database.mutex);
-    if (!humanSessionRequest(message) &&
-        (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
-         !channelStorage.channelMessageAuthorized(message.id, message.bot)))
+    if (!humanSessionRequest(message) && (message.principalSource != conversation::PrincipalSource::channel ||
+                                          message.channelScope.empty() || !channelConnectors.messageAuthorized(message.id, message.bot)))
         return {};
     const auto actor = conversationMessages.actor(message);
     if (!permissions.allows(actor, Action::bot_settings, message.bot)) return {};

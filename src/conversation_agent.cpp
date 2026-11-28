@@ -1,4 +1,7 @@
 #include "conversation_call.hpp"
+#include "session_send_receipts.hpp"
+#include "turn_results.hpp"
+#include "channel_connectors.hpp"
 #include "session_participation_records.hpp"
 #include "channel_delivery_queue.hpp"
 #include "conversation_messages.hpp"
@@ -20,6 +23,7 @@
 #include "git_storage.hpp"
 #include "conversation_tools.hpp"
 #include "conversation_turns.hpp"
+#include "turn_runner.hpp"
 #include "channel_storage.hpp"
 #include "bot_settings_storage.hpp"
 #include "bot_setup_storage.hpp"
@@ -204,7 +208,7 @@ ConversationReplyStatus effectStatus(const Json& actions) {
 }
 }
 
-const char* ConversationStorage::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
+const char* ConversationTurns::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
     if (message.routing.contains("botMessage")) return "Another Bot's message cannot answer a question for the person";
@@ -217,7 +221,7 @@ const char* ConversationStorage::questionAnswerError(const TaskData& task, const
     return nullptr;
 }
 
-std::optional<TaskData> ConversationStorage::wokenTask(const Message& message) const {
+std::optional<TaskData> ConversationTurns::wokenTask(const Message& message) const {
     const auto wake = message.routing.find("sessionWake");
     if (wake == message.routing.end() || !wake->contains("taskId")) return std::nullopt;
     auto task = taskRecords.load(wake->at("taskId").get<Id>());
@@ -229,7 +233,7 @@ std::optional<TaskData> ConversationStorage::wokenTask(const Message& message) c
     return task;
 }
 
-std::optional<ConversationStorage::WorkLearningSource> ConversationStorage::wokenLearningSource(const TaskData& task) {
+std::optional<TurnRunner::WorkLearningSource> TurnRunner::wokenLearningSource(const TaskData& task) {
     if (!task.lastRun || task.newSessionRequired || !memoryStorage.canLearnFrom(task)) return std::nullopt;
     auto row = database.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1", {task.id});
     if (!row.next()) return std::nullopt;
@@ -240,8 +244,8 @@ std::optional<ConversationStorage::WorkLearningSource> ConversationStorage::woke
     return WorkLearningSource{row.number(0), report.resultRunId};
 }
 
-Json ConversationStorage::applyWokenTaskDecision(const Message& message, const Decision& decision, Seconds now) {
-    auto task = wokenTask(message);
+Json TurnRunner::applyWokenTaskDecision(const Message& message, const Decision& decision, Seconds now) {
+    auto task = conversationTurns.wokenTask(message);
     if (!task) throw ToolError("The task is no longer waiting for this conversation");
     const auto& args = decision.args;
     if (decision.tool == "wait_for_event") {
@@ -262,7 +266,7 @@ Json ConversationStorage::applyWokenTaskDecision(const Message& message, const D
     return {{"ok", true}, {"taskId", task->id}, {"effect", taskStateName(task->state)}};
 }
 
-Json ConversationStorage::taskState(const TaskData& task, const Message& message, bool fullContract) const {
+Json ConversationTurns::taskState(const TaskData& task, const Message& message, bool fullContract) const {
     const auto waiting = waitStorage.currentWait(task.id);
     auto wait = waiting ? waitView(*waiting) : Json(nullptr);
     if (waiting) wait["answerable"] = !questionAnswerError(task, message, waiting);
@@ -313,7 +317,7 @@ Json ConversationStorage::taskState(const TaskData& task, const Message& message
     return view;
 }
 
-TaskData ConversationStorage::ownTask(Id taskId, const Message& message) const {
+TaskData ConversationTurns::ownTask(Id taskId, const Message& message) const {
     auto row = database.query(R"SQL(
 SELECT t.id FROM tasks t LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
@@ -323,7 +327,7 @@ WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
     throw ToolError("No task with taskId " + std::to_string(taskId));
 }
 
-Json ConversationStorage::resultReference(Id messageId, const Message& message) const {
+Json ConversationTurns::resultReference(Id messageId, const Message& message) const {
     auto row = database.query(R"SQL(
 SELECT t.id,t.state,j.kind,j.data,t.request,coalesce(t.current_revision,0)
 FROM journal j JOIN tasks t ON t.id=j.task_id
@@ -362,7 +366,7 @@ std::optional<OutboxSource> sourceRef(const Json& result) {
 }
 }
 
-Json ConversationStorage::conversationSteps(const Message& message, int step, std::vector<ModelImage>& images) {
+Json TurnRunner::conversationSteps(const Message& message, int step, std::vector<ModelImage>& images) {
     Json turn = Json::array();
     auto steps = database.query("SELECT decision,result,step FROM conversation_steps WHERE message_id=? AND step<?"
                                 " AND result IS NOT NULL ORDER BY step",
@@ -408,8 +412,8 @@ Json ConversationStorage::conversationSteps(const Message& message, int step, st
     return turn;
 }
 
-Json ConversationStorage::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
-                                    const TaskDestinations& linked) {
+Json TurnRunner::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images,
+                           const TaskDestinations& linked) {
     if (message.principalSource == PrincipalSource::gitWebhook) {
         const auto& gitEvent = message.routing.at("gitEvent");
         const auto task = taskRecords.load(gitEvent.at("taskId").get<Id>());
@@ -451,7 +455,7 @@ ORDER BY id DESC LIMIT 1
         if (!listed.insert(taskId).second) return;
         const auto task = taskRecords.load(taskId);
         Json view = {{"taskId", taskId}, {"request", bounded(task.request, 800)}, {"environmentId", task.environmentId}};
-        view.update(taskState(task, message));
+        view.update(conversationTurns.taskState(task, message));
         if (localMachineStorage.hasMachines() && task.activeRun)
             view["activeSession"] = {{"threadId", task.activeRun->ref.threadId}, {"runId", task.activeRun->ref.runId}};
         if (task.sourceTaskId) view["sourceTaskId"] = *task.sourceTaskId;
@@ -564,7 +568,7 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     if (message.routing.contains("sessionOrigin")) event["sessionOrigin"] = message.routing.at("sessionOrigin");
     for (const auto* key : {"sessionWake", "sessionInvitation", "botMessage"})
         if (message.routing.contains(key)) event[key] = message.routing.at(key);
-    if (const auto woken = wokenTask(message))
+    if (const auto woken = conversationTurns.wokenTask(message))
         event["task"] = {{"taskId", woken->id},
                          {"request", bounded(scrub.text(woken->intent), 4000)},
                          {"doneWhen", bounded(scrub.text(effectiveDoneWhen(*woken)), 1600)},
@@ -579,8 +583,8 @@ WHERE j.id=?1 AND j.id<?2 AND (j.conversation_bot_id=?3 OR t.bot_id=?3)
     return {{"task", std::move(task)}, {"event", std::move(event)}, {"history", std::move(history)}};
 }
 
-Json ConversationStorage::applyTurnTool(const Message& message, int step, const Decision& decision, Seconds now,
-                                        const WorkSession* selectedSession, const TaskDestinations& linked, const BotTools& settings) {
+Json TurnRunner::applyTurnTool(const Message& message, int step, const Decision& decision, Seconds now, const WorkSession* selectedSession,
+                               const TaskDestinations& linked, const BotTools& settings) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -612,7 +616,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     if (std::ranges::find(webTools, tool) != webTools.end()) {
         if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
         if (tool == "continue_fresh_session") {
-            auto task = ownTask(identifier(args, "taskId", true), message);
+            auto task = conversationTurns.ownTask(identifier(args, "taskId", true), message);
             if (task.hasDestinations()) throw ToolError("Use a new request to run more work across T3 environments");
             if (terminal(task) || task.state == TaskState::cancelling) throw Conflict("Task is closed or stopping");
             const auto instruction =
@@ -637,19 +641,20 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     const auto expectGeneration = [&](const TaskData& task) {
         const auto expected = identifier(args, "generation", true, 0);
         if (expected != task.generation)
-            throw ToolError(
-                "stale",
-                {{"applied", 0}, {"taskId", task.id}, {"expected", {{"generation", expected}}}, {"current", taskState(task, message)}});
+            throw ToolError("stale", {{"applied", 0},
+                                      {"taskId", task.id},
+                                      {"expected", {{"generation", expected}}},
+                                      {"current", conversationTurns.taskState(task, message)}});
     };
     const auto active = [&](const TaskData& task) {
         if (terminal(task) || task.state == TaskState::cancelling)
             throw ToolError("The task is " + std::string(taskStateName(task.state)),
-                            {{"taskId", task.id}, {"current", taskState(task, message)}});
+                            {{"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}});
     };
     const auto source = [&](const TaskData* target) -> Json {
         const auto sourceId = identifier(args, "sourceResultMessageId", false);
         if (!sourceId) return nullptr;
-        const auto result = resultReference(sourceId, message);
+        const auto result = conversationTurns.resultReference(sourceId, message);
         if (target && (result.at("taskId") != target->id || result.at("revisionId") != target->currentRevision.value_or(0)))
             throw ToolError("sourceResultMessageId must be a result of this task's current revision");
         return result;
@@ -682,7 +687,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         return receipt;
     }
     if (tool == "send_to_task" || tool == "change_task") {
-        auto task = ownTask(identifier(args, "taskId", true), message);
+        auto task = conversationTurns.ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
         if (tool == "change_task" && task.hasDestinations())
@@ -697,9 +702,10 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         if (tool == "change_task") {
             const auto revision = identifier(args, "revisionId", true, 0);
             if (revision != task.currentRevision.value_or(0))
-                throw ToolError(
-                    "stale",
-                    {{"applied", 0}, {"taskId", task.id}, {"expected", {{"revisionId", revision}}}, {"current", taskState(task, message)}});
+                throw ToolError("stale", {{"applied", 0},
+                                          {"taskId", task.id},
+                                          {"expected", {{"revisionId", revision}}},
+                                          {"current", conversationTurns.taskState(task, message)}});
             change = taskRouting.taskChange(message, args, task, linked);
         }
         const bool conflicting =
@@ -710,13 +716,14 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     if (tool == "answer_task_question") {
         const auto taskId = identifier(args, "taskId", true);
         const auto waitId = identifier(args, "waitId", true);
-        const auto task = ownTask(taskId, message);
+        const auto task = conversationTurns.ownTask(taskId, message);
         const auto answer = text(args, "text", limits::messages::maxWaitAnswerBytes, true);
         const auto wait = waitStorage.currentWait(taskId);
         if (!wait || wait->id != waitId)
-            throw ToolError("That question is no longer open", {{"taskId", task.id}, {"current", taskState(task, message)}});
-        if (const auto error = questionAnswerError(task, message, wait))
-            throw ToolError(error, {{"taskId", task.id}, {"current", taskState(task, message)}});
+            throw ToolError("That question is no longer open",
+                            {{"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}});
+        if (const auto error = conversationTurns.questionAnswerError(task, message, wait))
+            throw ToolError(error, {{"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}});
         const TaskTarget target{bot, task.id, waitId, identifier(args, "revisionId", true, 0), identifier(args, "generation", true, 0)};
         taskOperations.operate(conversationMessages.actor(message), target, "answer", {{"text", answer}}, message.id,
                                InboxKind::user_question);
@@ -724,7 +731,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
         if (!permissions.allows(conversationMessages.actor(message), Action::bot_decide, bot)) throw AccessDenied{};
-        auto task = ownTask(identifier(args, "taskId", true), message);
+        auto task = conversationTurns.ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
         const bool record = tool == "record_task_blocker";
@@ -734,11 +741,11 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         else
             taskOperations.withdrawTaskQuestion(task, identifier(args, "waitId", true));
         const auto effect = record ? (reason.empty() ? "blocker_cleared" : "blocker_recorded") : "question_withdrawn";
-        return {{"ok", true}, {"effect", effect}, {"taskId", task.id}, {"current", taskState(task, message)}};
+        return {{"ok", true}, {"effect", effect}, {"taskId", task.id}, {"current", conversationTurns.taskState(task, message)}};
     }
     if (tool == "cancel_task") {
         if (hasDestinationSelector(args)) throw ToolError("Cancel one destination in a standalone cancel_task action");
-        const auto task = ownTask(identifier(args, "taskId", true), message);
+        const auto task = conversationTurns.ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
         taskOperations.operate(conversationMessages.actor(message), TaskTarget::from(task, 0), "cancel", Json::object());
@@ -746,7 +753,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         return {{"ok", true}, {"effect", state == TaskState::cancelled ? "cancelled" : "cancelling"}, {"taskId", task.id}};
     }
     if (tool == "read_result") {
-        const auto result = resultReference(identifier(args, "messageId", true), message);
+        const auto result = conversationTurns.resultReference(identifier(args, "messageId", true), message);
         const auto& body = result.at("text").get_ref<const std::string&>();
         std::size_t offset = 0;
         if (args.contains("offset")) {
@@ -775,7 +782,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         const auto viewTask = [&](const TaskData& task, bool fullContract) {
             const Id id = task.id;
             Json view = {{"taskId", id}, {"request", bounded(task.request, 300)}, {"environmentId", task.environmentId}};
-            view.update(taskState(task, message, fullContract));
+            view.update(conversationTurns.taskState(task, message, fullContract));
             auto result = database.query("SELECT id,kind FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled')"
                                          " ORDER BY id DESC LIMIT 1",
                                          {id});
@@ -783,7 +790,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
             return view;
         };
         if (const auto id = identifier(args, "taskId", false))
-            return {{"ok", true}, {"tasks", Json::array({viewTask(ownTask(id, message), true)})}};
+            return {{"ok", true}, {"tasks", Json::array({viewTask(conversationTurns.ownTask(id, message), true)})}};
 
         const auto search = text(args, "query", 400, false);
         const auto before = identifier(args, "before", false);
@@ -811,10 +818,10 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-void ConversationStorage::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
-                                     const conversation::QuestionAnchor* question) {
+void ConversationTurns::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
+                                   const conversation::QuestionAnchor* question) {
     using enum ConversationReplyRoute;
-    const bool pendingReceipt = sessionMessageStorage.persistPendingReceipt(message.id);
+    const bool pendingReceipt = sessionSendReceipts.persistPending(message.id);
     if (route == session_access || route == access || route == channel_access || route == bot_paused) {
         auto pending = database.query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
@@ -825,12 +832,11 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
         std::vector<int> steps;
         while (pending.next()) steps.push_back(static_cast<int>(pending.number(0)));
         for (const auto step : steps)
-            conversationTools.saveTurnResults(
-                message.id, step,
-                Json::array({secretStorage.redactor(message.bot)
-                                 .record({{"ok", false},
-                                          {"delivery", "not_accepted"},
-                                          {"error", "The turn ended before the T3 Session message was sent."}})}));
+            turnResults.save(message.id, step,
+                             Json::array({secretStorage.redactor(message.bot)
+                                              .record({{"ok", false},
+                                                       {"delivery", "not_accepted"},
+                                                       {"error", "The turn ended before the T3 Session message was sent."}})}));
     }
     if (auto woken = wokenTask(message)) {
         settleUndecided(*woken, field(message.routing.at("sessionWake"), "reason"), taskRecords, waitStorage);
@@ -888,17 +894,17 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .suggestions = suggestions.is_array() && !suggestions.empty() ? scrub.payload(suggestions) : Json(),
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
-    if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
+    if (!message.channelScope.empty() && channelConnectors.messageAuthorized(message.id, message.bot))
         channelDeliveries.reply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
-    conversationTools.discardPendingResults(message.id);
-    if (pendingReceipt) sessionMessageStorage.forgetPendingReceipt(message.id);
+    turnResults.discardUnpersisted(message.id);
+    if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
 }
 
-bool ConversationStorage::authorizeTurn(const Message& message) {
+bool ConversationTurns::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id) || botLifecycle.botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (gitStorage.canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
@@ -919,7 +925,7 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
-        if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot)) return true;
+        if (!message.channelScope.empty() && channelConnectors.messageAuthorized(message.id, message.bot)) return true;
     } else if (permissions.allows(conversationMessages.actor(message), Action::bot_talk, message.bot))
         return true;
     if (const auto attempt = modelCalls.takeReservedConversationCall(message.id)) modelCalls.releaseModelCall(attempt);
@@ -930,15 +936,15 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
     return false;
 }
 
-void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, const std::function<Seconds()>& clock,
-                                  const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
-                                  const ReconcileBotCreation& reconcileBotCreation, const IntakeResolver& intake, const PeerResolver& peers,
-                                  std::stop_token shutdown) {
+void TurnRunner::runTurn(Id id, Model& model, T3& t3, const SoulLoader& soul, const std::function<Seconds()>& clock,
+                         const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
+                         const ReconcileBotCreation& reconcileBotCreation, const IntakeResolver& intake, const PeerResolver& peers,
+                         std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        if (shutdown.stop_requested() || !isNextTurn(id) ||
+        if (shutdown.stop_requested() || !conversationTurns.isNextTurn(id) ||
             database.query("SELECT 1 FROM conversation_retries WHERE message_id=? AND retry_at>?", {id, clock()}).next())
             return;
         message = conversationMessages.load(id);
@@ -1003,7 +1009,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 }
             }
         } else {
-            if (wokenTask(message)) {
+            if (conversationTurns.wokenTask(message)) {
                 offered.push_back("complete");
                 offered.push_back("wait_for_event");
             }
@@ -1016,7 +1022,8 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
     const auto finishError = [&](std::string text) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        if (authorizeTurn(message)) finishTurn(message, std::move(text), nullptr, ConversationReplyRoute::error);
+        if (conversationTurns.authorizeTurn(message))
+            conversationTurns.finishTurn(message, std::move(text), nullptr, ConversationReplyRoute::error);
         transaction.commit();
     };
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
@@ -1048,12 +1055,12 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         const auto& checkpoint = entry->second;
         Transaction transaction(database.db);
         const auto* completedCalls = std::get_if<std::vector<ModelCall>>(&checkpoint.outcome);
-        const bool ownsTurnQueue = isNextTurn(id);
+        const bool ownsTurnQueue = conversationTurns.isNextTurn(id);
         if (!ownsTurnQueue && !completedCalls) return false;
         if (!checkpoint.usage.empty())
             database.exec("UPDATE model_attempts SET usage=? WHERE id=?", {checkpoint.usage, checkpoint.attempt});
         bool hasDecision = false;
-        if (!ownsTurnQueue || authorizeTurn(message)) {
+        if (!ownsTurnQueue || conversationTurns.authorizeTurn(message)) {
             if (completedCalls) {
                 const auto steps = splitCalls(*completedCalls);
                 database.exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
@@ -1082,9 +1089,9 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                         {checkpoint.attempt, id, checkpoint.step, modelFailureReason(error.code), repair ? Json(repair) : Json(nullptr)});
                 if (!repair) {
                     if (error.retryFrom)
-                        deferConversation(id, *error.retryFrom);
+                        conversationTurns.deferConversation(id, *error.retryFrom);
                     else
-                        finishTurn(message, modelFailureReply(error.code, ja), nullptr, ConversationReplyRoute::error);
+                        conversationTurns.finishTurn(message, modelFailureReply(error.code, ja), nullptr, ConversationReplyRoute::error);
                 }
             }
         }
@@ -1101,7 +1108,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         {
             std::lock_guard lock(database.mutex);
             Transaction transaction(database.db);
-            if (!authorizeTurn(message)) {
+            if (!conversationTurns.authorizeTurn(message)) {
                 transaction.commit();
                 return;
             }
@@ -1150,7 +1157,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
                 std::lock_guard lock(database.mutex);
                 Transaction transaction(database.db);
                 if (shutdown.stop_requested()) return;
-                if (!authorizeTurn(message)) {
+                if (!conversationTurns.authorizeTurn(message)) {
                     transaction.commit();
                     return;
                 }
@@ -1167,8 +1174,8 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                         // A previous worker claimed the repair, but no result survived.
                         database.exec("INSERT INTO conversation_model_failures(attempt_id,message_id,step,reason) VALUES(?,?,?,?)",
                                       {repair.number(0), id, step, "repair_interrupted"});
-                        finishTurn(message, modelFailureReply(ModelErrorCode::inference_failed, ja), nullptr,
-                                   ConversationReplyRoute::error);
+                        conversationTurns.finishTurn(message, modelFailureReply(ModelErrorCode::inference_failed, ja), nullptr,
+                                                     ConversationReplyRoute::error);
                         transaction.commit();
                         return;
                     }
@@ -1180,7 +1187,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 }
                 auto [offered, machines, followupStatus] = available();
                 std::string learningRunId;
-                if (const auto woken = wokenTask(message))
+                if (const auto woken = conversationTurns.wokenTask(message))
                     if (const auto source = wokenLearningSource(*woken)) learningRunId = source->runId;
                 std::vector<ModelImage> images;
                 auto context = turnInput(message, step, now, std::move(machines), images, linkedDestinations);
@@ -1217,7 +1224,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                     std::lock_guard lock(database.mutex);
                     Transaction transaction(database.db);
                     if (shutdown.stop_requested()) return;
-                    if (!authorizeTurn(message)) {
+                    if (!conversationTurns.authorizeTurn(message)) {
                         transaction.commit();
                         return;
                     }

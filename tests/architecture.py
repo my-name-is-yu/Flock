@@ -74,30 +74,21 @@ class ArchitectureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("web/assets/app.js: import page scripts by relative path", result.stderr)
 
-    def test_storage_components_cycle_only_in_recorded_groups(self):
-        def wiring(extra=""):
+    def test_storage_components_do_not_refer_to_each_other_in_a_cycle(self):
+        def wiring(journal):
             return {
                 "src/storage.hpp": "struct Store::Impl {\n"
-                "    ConversationStorage conversationTurns{database, conversationTools, sessionMessageStorage};\n"
+                "    TurnRunner turnRunner{database, conversationTurns, conversationTools};\n"
                 "    ConversationTools conversationTools{database, conversationTurns};\n"
-                "    SessionMessageStorage sessionMessageStorage{database, sessionParticipationStorage};\n"
-                "    SessionParticipationStorage sessionParticipationStorage{database, conversationTurns};\n"
-                "    ChannelStorage channelStorage{database, policyApprovals};\n"
-                "    PolicyApprovals policyApprovals{database, channelStorage" + extra + "};\n"
-                "    JournalStorage journalStorage{database};\n"
-                "    WaitStorage waitStorage{database, journalStorage" + (", policyApprovals" if extra else "") + "};\n"
+                "    ConversationTurns conversationTurns{database, journalStorage};\n"
+                "    JournalStorage journalStorage" + journal + ";\n"
                 "};\n"
             }
 
-        self.assertEqual(self.check(wiring()).returncode, 0)
-        result = self.check(wiring(", waitStorage"))
+        self.assertEqual(self.check(wiring("{database}")).returncode, 0)
+        result = self.check(wiring("{database, conversationTools}"))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("channelStorage, policyApprovals, waitStorage refer to each other in a cycle", result.stderr)
-        smaller = wiring()
-        smaller["src/storage.hpp"] = smaller["src/storage.hpp"].replace("{database, channelStorage}", "{database}")
-        result = self.check(smaller)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("the recorded cycle channelStorage, policyApprovals is smaller now", result.stderr)
+        self.assertIn("conversationTools, conversationTurns, journalStorage refer to each other in a cycle", result.stderr)
 
     def test_tests_share_one_check_function(self):
         define = "void check(bool condition, std::string_view message) {}\n"

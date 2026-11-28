@@ -7,6 +7,7 @@
 #include "flock/policy.hpp"
 #include "flock/channels.hpp"
 #include "database.hpp"
+#include "channel_connectors.hpp"
 #include "channel_delivery_queue.hpp"
 #include "channel_storage.hpp"
 #include "conversation_storage.hpp"
@@ -160,7 +161,16 @@ void ChannelStorage::connectChannel(ChannelConnector connector) {
     if (!connector.authenticates || !connector.resolveSender || !connector.transport)
         throw Conflict("A channel needs authentication, an identity directory, and transport");
     std::lock_guard lock(database.mutex);
+    connectors.connect(std::move(connector));
+}
+
+void ChannelConnectors::connect(ChannelConnector connector) {
     connectors.insert_or_assign(connector.kind, std::move(connector));
+}
+
+const ChannelConnector* ChannelConnectors::find(ChannelKind kind) const {
+    const auto found = connectors.find(kind);
+    return found == connectors.end() ? nullptr : &found->second;
 }
 
 std::string normalizeArtifactBaseUrl(std::string url) {
@@ -190,8 +200,8 @@ void ChannelStorage::artifactBaseUrl(std::string url) {
     artifactOrigin = std::move(origin);
 }
 
-bool ChannelStorage::permitsChannel(std::string_view bot, const ChannelOrigin& origin, std::string_view sender, std::string_view person,
-                                    std::string_view operation) const {
+bool ChannelConnectors::permits(std::string_view bot, const ChannelOrigin& origin, std::string_view sender, std::string_view person,
+                                std::string_view operation) const {
     const auto connector = connectors.find(origin.kind);
     if (connector == connectors.end()) return false;
     const auto linked = connector->second.resolveSender(origin.workspaceId, sender);
@@ -205,15 +215,15 @@ bool ChannelStorage::permitsChannel(std::string_view bot, const ChannelOrigin& o
 
 AdmittedChannelMessage ChannelStorage::admitChannelMessage(ChannelKind kind, std::string_view credential, const Json& event) {
     std::lock_guard lock(database.mutex);
-    const auto found = connectors.find(kind);
-    if (found == connectors.end()) throw ChannelAccessDenied("Channel is not connected");
-    const auto& connector = found->second;
+    const auto* found = connectors.find(kind);
+    if (!found) throw ChannelAccessDenied("Channel is not connected");
+    const auto& connector = *found;
     ChannelOrigin origin{kind, required(event, "workspaceId", 128), required(event, "threadRef", 200),
                          required(event, "externalMessageId", 128)};
     const auto senderId = required(event, "senderId", 200);
     if (!connector.authenticates(credential, origin.workspaceId)) throw ChannelAccessDenied("Channel bridge is not authorized");
     const auto sender = connector.resolveSender(origin.workspaceId, senderId);
-    if (!sender || !permitsChannel(sender->botId, origin, senderId, sender->personId, "use"))
+    if (!sender || !connectors.permits(sender->botId, origin, senderId, sender->personId, "use"))
         throw ChannelAccessDenied("Channel sender is not authorized");
     VerifiedChannelMessage message{origin, senderId, sender->personId, {}};
     Id replyTo = 0;
@@ -230,7 +240,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     const auto files = event.value("attachments", Json::array());
     if (!files.is_array() || files.size() > attachmentCount) throw Conflict("Too many attachments");
     const auto& caps = connector.capabilities;
-    if (!files.empty() && !permitsChannel(sender->botId, origin, senderId, sender->personId, "read"))
+    if (!files.empty() && !connectors.permits(sender->botId, origin, senderId, sender->personId, "read"))
         throw ChannelAccessDenied("Channel attachment read denied");
     std::size_t total = 0;
     for (const auto& file : files) {
@@ -252,7 +262,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
 }
 
 void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
-    if (!permitsChannel(bot, message.origin, message.senderId, message.personId, message.attachments.empty() ? "use" : "read"))
+    if (!connectors.permits(bot, message.origin, message.senderId, message.personId, message.attachments.empty() ? "use" : "read"))
         throw ChannelAccessDenied("Channel access is no longer authorized");
     const auto scrub = permissions.secretRedactor(bot);
     scrub.requirePublic({message.origin.json(), message.senderId, message.personId});
@@ -280,9 +290,9 @@ void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const Verif
     }
 }
 
-bool ChannelStorage::channelMessageAuthorized(Id id, std::string_view bot) const {
+bool ChannelConnectors::messageAuthorized(Id id, std::string_view bot) const {
     auto row = database.query("SELECT origin,sender_id,person_id FROM channel_messages WHERE message_id=?", {id});
-    return !row.next() || permitsChannel(bot, originFrom(row.json(0)), row.string(1), row.string(2), "use");
+    return !row.next() || permits(bot, originFrom(row.json(0)), row.string(1), row.string(2), "use");
 }
 
 Json ChannelStorage::channelContext(Id id, std::string_view bot, std::vector<ModelImage>* images, std::string_view viewer) const {
@@ -295,9 +305,9 @@ Json ChannelStorage::channelContext(Id id, std::string_view bot, std::vector<Mod
     const auto sender = row.string(1), person = row.string(2);
     Json context{{"channel", origin.json()}};
     if (!viewer.empty()) context["channel"]["fromViewer"] = viewer == person;
-    if (!permitsChannel(bot, origin, sender, person, "use")) return context;
+    if (!connectors.permits(bot, origin, sender, person, "use")) return context;
     const auto& caps = connectors.at(origin.kind).capabilities;
-    if (permitsChannel(bot, origin, sender, person, "read")) {
+    if (connectors.permits(bot, origin, sender, person, "read")) {
         const bool includeImages = images && permissions.allows(bot, Action::channel_read, channelPolicyTarget(origin));
         const int modelContext = images ? 1 : 0;
         auto files = database.query(R"SQL(
@@ -366,7 +376,7 @@ WHERE a.id=? AND m.bot_id=? AND original.scope_key=current.scope_key AND origina
                               {source, attachment, bot});
     if (!row.next()) return std::nullopt;
     const auto origin = originFrom(row.json(3));
-    if (!permitsChannel(bot, origin, row.string(4), row.string(5), "read")) return std::nullopt;
+    if (!connectors.permits(bot, origin, row.string(4), row.string(5), "read")) return std::nullopt;
     return ChannelResource{row.string(0), row.string(1), row.string(2)};
 }
 
@@ -380,7 +390,7 @@ WHERE a.id=?)SQL",
     if (!row.next()) return std::nullopt;
     const auto bot = row.string(3);
     const auto origin = originFrom(row.json(4));
-    if (!permissions.allows(person, Action::bot_view, bot) || !permitsChannel(bot, origin, row.string(5), row.string(6), "read"))
+    if (!permissions.allows(person, Action::bot_view, bot) || !connectors.permits(bot, origin, row.string(5), row.string(6), "read"))
         return std::nullopt;
     ChannelResource file{row.string(0), row.string(1), row.string(2)};
     if (!canReadAttachment(connectors.at(origin.kind).capabilities, file.mimeType, file.bytes)) return std::nullopt;
@@ -398,7 +408,7 @@ WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','acce
                               {id, artifactLimit});
     if (!row.next()) return std::nullopt;
     const auto origin = originFrom(row.json(2));
-    if (!permitsChannel(row.string(5), origin, row.string(3), row.string(4), "use") ||
+    if (!connectors.permits(row.string(5), origin, row.string(3), row.string(4), "use") ||
         !connectors.at(origin.kind).capabilities.supportsHtmlArtifacts)
         return std::nullopt;
     return ChannelResource{row.string(0), "text/html; charset=utf-8", row.string(1)};
@@ -421,26 +431,25 @@ void ChannelDeliveryQueue::taskUpdate(Id task, Id entry, std::string_view text, 
     reply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
-void ChannelStorage::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
-    channelNotice(source, bot, reason, supportsReplies, " I can post a normal follow-up in this conversation if you'd like.");
+void ChannelNotices::limitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
+    post(source, bot, reason, supportsReplies, " I can post a normal follow-up in this conversation if you'd like.");
 }
 
-void ChannelStorage::channelApprovalNotice(Id source) {
+void ChannelNotices::approvalWaiting(Id source) {
     auto row = database.query("SELECT m.bot_id,c.origin FROM channel_messages c JOIN messages m ON m.id=c.message_id"
                               " WHERE c.message_id=?",
                               {source});
     if (!row.next()) return;
     const auto origin = originFrom(row.json(1));
-    const auto connector = connectors.find(origin.kind);
+    const auto* connector = connectors.find(origin.kind);
     const auto bot = row.string(0);
-    if (connector == connectors.end() || !connector->second.capabilities.supportsReplies ||
+    if (!connector || !connector->capabilities.supportsReplies ||
         permissions.check(bot, Resource{Action::channel_post, channelPolicyTarget(origin), true}) != PolicyResult::allow)
         return;
-    channelNotice(source, bot, approvalError(ApprovalGate::waiting), true);
+    post(source, bot, approvalError(ApprovalGate::waiting), true);
 }
 
-void ChannelStorage::channelNotice(Id source, std::string_view bot, std::string_view reason, bool supportsReplies,
-                                   std::string_view followUp) {
+void ChannelNotices::post(Id source, std::string_view bot, std::string_view reason, bool supportsReplies, std::string_view followUp) {
     database.exec("INSERT OR IGNORE INTO channel_notices VALUES(?,?)", {source, reason});
     if (!sqlite3_changes(database.db)) return;
     std::string notice(reason);
@@ -470,7 +479,7 @@ Json ChannelStorage::channelTool(Id message, std::string_view bot, const Decisio
     if (!source.next()) throw Conflict("This tool requires a channel conversation");
     const auto origin = originFrom(source.json(0));
     const auto sender = source.string(1), person = source.string(2);
-    if (!permitsChannel(bot, origin, sender, person, tool == "read_channel_attachment" ? "read" : "use"))
+    if (!connectors.permits(bot, origin, sender, person, tool == "read_channel_attachment" ? "read" : "use"))
         throw ChannelAccessDenied("Channel access is no longer authorized");
     const auto& caps = connectors.at(origin.kind).capabilities;
 
@@ -504,7 +513,7 @@ Json ChannelStorage::channelTool(Id message, std::string_view bot, const Decisio
         reason = attachmentLimitation(caps, field(payload, "mimeType"), payload.at("size"));
     }
     if (!reason.empty()) {
-        channelLimitation(message, bot, reason, caps.supportsReplies);
+        notices.limitation(message, bot, reason, caps.supportsReplies);
         return {{"ok", false}, {"unsupported", true}, {"reason", reason}, {"noticeQueued", caps.supportsReplies}};
     }
 
@@ -638,18 +647,18 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
             state = row.string(3);
             origin = originFrom(row.json(4));
             bot = row.string(7);
-            const auto found = connectors.find(origin.kind);
+            const auto* found = connectors.find(origin.kind);
             const auto sender = row.string(5), person = row.string(6);
-            if (found == connectors.end() || (state == "unknown" && !permitsChannel(bot, origin, sender, person, "post"))) {
+            if (!found || (state == "unknown" && !connectors.permits(bot, origin, sender, person, "post"))) {
                 database.exec("UPDATE channel_deliveries SET next_attempt=? WHERE id=?", {unixTime() + 5, key});
                 tx.commit();
                 continue;
             }
-            transport = found->second.transport;
-            const auto& caps = found->second.capabilities;
+            transport = found->transport;
+            const auto& caps = found->capabilities;
             std::string blocked, reason;
             if (state == "pending") {
-                if (!permitsChannel(bot, origin, sender, person, "post"))
+                if (!connectors.permits(bot, origin, sender, person, "post"))
                     blocked = "rejected";
                 else if (operation == "channel_send_attachment") {
                     reason = attachmentLimitation(caps, field(payload, "mimeType"), payload.at("size"));
@@ -664,7 +673,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                     reason = limitation(caps, operation, !artifactOrigin.empty());
                 if (!reason.empty()) {
                     blocked = "unsupported";
-                    if (operation != "reply") channelLimitation(row.number(8), bot, reason, caps.supportsReplies);
+                    if (operation != "reply") notices.limitation(row.number(8), bot, reason, caps.supportsReplies);
                 }
             }
             if (blocked.empty() && state == "pending" && row.number(9)) {

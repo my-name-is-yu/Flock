@@ -117,10 +117,7 @@ RunRef runRef(const Json& data) {
 }
 
 Store::Impl::Impl(Store& store, std::filesystem::path file, StoreOptions options)
-    : path(std::move(file)), permissions(store), botAccess(store), secretRequests(store),
-      memoryStorage(database, secretStorage, permissions, conversationMessages, std::move(options.memorySeed)),
-      automationStorage(database, secretStorage, botLifecycle, permissions, taskOperations),
-      botSetup(store, database, secretStorage, std::move(options.saveBotSetup), std::move(options.botSetupCatalog)) {
+    : store(store), options(std::move(options)), path(std::move(file)) {
     database.open(path);
 }
 

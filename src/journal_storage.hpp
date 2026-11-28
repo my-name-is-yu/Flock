@@ -9,7 +9,6 @@ namespace flockv0 {
 
 class ChannelDeliveryQueue;
 class Database;
-struct AssignedRun;
 struct CompletionEntry;
 struct ConversationInterruptEntry;
 struct ConversationMessageEntry;

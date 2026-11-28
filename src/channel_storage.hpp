@@ -18,15 +18,14 @@
 namespace flockv0 {
 class ConversationMessages;
 
-class ChannelDeliveryQueue;
+class ChannelConnectors;
+class ChannelNotices;
 class Database;
-class JournalStorage;
 class Policy;
 struct Decision;
 struct ModelImage;
 struct Person;
 struct Resource;
-struct WebIdentityState;
 
 struct AdmittedChannelMessage {
     std::string botId;
@@ -38,11 +37,11 @@ struct AdmittedChannelMessage {
 class PolicyApprovals;
 class ChannelStorage {
 public:
-    ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const WebIdentityState& webIdentity,
-                   JournalStorage& journalStorage, ChannelDeliveryQueue& channelDeliveries, ConversationMessages& conversationMessages,
-                   PolicyApprovals& policyApprovals)
-        : database(database), path(path), permissions(permissions), webIdentity(webIdentity), journalStorage(journalStorage),
-          channelDeliveries(channelDeliveries), conversationMessages(conversationMessages), policyApprovals(policyApprovals) {}
+    ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions,
+                   ConversationMessages& conversationMessages, PolicyApprovals& policyApprovals, ChannelConnectors& connectors,
+                   ChannelNotices& notices)
+        : database(database), path(path), permissions(permissions), conversationMessages(conversationMessages),
+          policyApprovals(policyApprovals), connectors(connectors), notices(notices) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
@@ -52,10 +51,8 @@ public:
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     bool hasConnectors() const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
-    bool channelMessageAuthorized(Id, std::string_view bot) const;
     Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr, std::string_view viewer = {}) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
-    void channelApprovalNotice(Id source);
     std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
     bool channelDeliveryDue() const;
     void deliverChannels(std::stop_token = {});
@@ -63,20 +60,14 @@ public:
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
 private:
     std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
-    void channelNotice(Id source, std::string_view bot, std::string_view reason, bool supportsReplies, std::string_view followUp = {});
-    void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
-    bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
-                        std::string_view operation) const;
 
     Database& database;
     const std::filesystem::path& path;
     const Policy& permissions;
-    const WebIdentityState& webIdentity;
-    JournalStorage& journalStorage;
-    ChannelDeliveryQueue& channelDeliveries;
     ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;
-    std::map<ChannelKind, ChannelConnector> connectors;
+    ChannelConnectors& connectors;
+    ChannelNotices& notices;
     std::string artifactOrigin;
     std::mutex deliveryMutex;
 };

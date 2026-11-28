@@ -30,11 +30,6 @@ SCRIPT_OWNERS = (
     (re.compile(r"""^import [^;]*'/""", re.MULTILINE), None, "import page scripts by relative path, as in './dom.js'"),
 )
 
-# Components wired in Store::Impl may refer to each other in a cycle only inside these groups.
-STORAGE_CYCLES = (
-    {"conversationTools", "conversationTurns", "sessionMessageStorage", "sessionParticipationStorage"},
-    {"channelStorage", "policyApprovals"},
-)
 STORAGE_MEMBER = re.compile(r"^\s+\w+\s+(\w+)\{([^;]*)\};", re.MULTILINE)
 
 
@@ -64,20 +59,11 @@ def storage_violations(root):
     storage = root / "src" / "storage.hpp"
     if not storage.is_file():
         return []
-    found = storage_cycles(storage.read_text(errors="surrogateescape"))
-    problems = [
+    return [
         f"src/storage.hpp: {', '.join(sorted(group))} refer to each other in a cycle; "
-        "depend on a component that only reads records instead"
-        for group in found
-        if not any(group <= allowed for allowed in STORAGE_CYCLES)
+        "depend on a component that only reads or writes records instead"
+        for group in storage_cycles(storage.read_text(errors="surrogateescape"))
     ]
-    problems += [
-        f"src/storage.hpp: the recorded cycle {', '.join(sorted(allowed))} is smaller now; update STORAGE_CYCLES"
-        for allowed in STORAGE_CYCLES
-        if allowed not in found
-    ]
-    return problems
-
 
 
 def is_test(path):

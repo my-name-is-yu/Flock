@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -19,9 +20,10 @@ class SessionReadStorage;
 
 class Database;
 class AttachmentStorage;
-class ConversationStorage;
+class ConversationTurns;
 class ConversationMessages;
 class SecretStorage;
+class TurnResults;
 struct ConversationCallContext;
 struct Decision;
 struct ModelCall;
@@ -34,29 +36,29 @@ struct Message;
 
 class ConversationTools {
 public:
-    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationStorage& conversationTurns,
+    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationTurns& conversationTurns,
                       ConversationMessages& conversationMessages, Policy& permissions, const std::filesystem::path& path,
                       BotSettingsStorage& botSettingsStorage, ModelCalls& modelCalls, PolicyApprovals& policyApprovals,
-                      SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage)
+                      SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage, TurnResults& turnResults)
         : database(database), attachments(attachments), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           permissions(permissions), path(path), botSettingsStorage(botSettingsStorage), modelCalls(modelCalls),
-          policyApprovals(policyApprovals), sessionReadStorage(sessionReadStorage), secretStorage(secretStorage) {}
+          policyApprovals(policyApprovals), sessionReadStorage(sessionReadStorage), secretStorage(secretStorage), turnResults(turnResults) {
+    }
 
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
-    void saveTurnResults(Id, int step, const Json& results);
+    // Runs one of the batch's calls that reads the conversation's own records.
+    using StoreRead = std::function<std::optional<Json>(const Decision&, std::string_view key)>;
     bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
-                      const ConversationCallContext&);
-    void discardPendingResults(Id message);
+                      const ConversationCallContext&, const StoreRead&);
 private:
     class ToolBatch;
     Json workspaceTool(const ToolContext&, const Decision&);
     std::optional<Resource> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
-    std::map<std::pair<Id, int>, std::map<std::size_t, ToolCallResult>> unpersistedToolResults;
     Database& database;
     AttachmentStorage& attachments;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     ConversationMessages& conversationMessages;
     Policy& permissions;
     const std::filesystem::path& path;
@@ -65,5 +67,6 @@ private:
     PolicyApprovals& policyApprovals;
     SessionReadStorage& sessionReadStorage;
     SecretStorage& secretStorage;
+    TurnResults& turnResults;
 };
 }
