@@ -114,13 +114,6 @@ Decision complete() {
 Decision ask() {
     return {"ask_user", {{"question", "Which branch?"}}, "The branch needs user confirmation"};
 }
-Decision reply() {
-    Json answers = {{"branch", "main"}};
-    return {"answer_session_question", {{"requestId", "branch-question"}, {"answers", answers}}, "Use the branch specified by the user"};
-}
-bool hasTool(const ModelInput& input, std::string_view tool) {
-    return std::find(input.tools.begin(), input.tools.end(), tool) != input.tools.end();
-}
 
 struct Script : Model {
     std::function<Decision(const ModelInput&)> script;
@@ -279,8 +272,6 @@ struct Fixture {
         if (!path) throw std::runtime_error("Cannot create test directory");
         directory = path;
         restart();
-        for (auto bot : {"alpha", "beta"}) {
-        }
     }
     ~Fixture() {
         runtime.reset();

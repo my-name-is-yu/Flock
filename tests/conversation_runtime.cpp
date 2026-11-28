@@ -3459,7 +3459,7 @@ void queuedDestinationStopsReleaseSlots() {
               ("the linked destination did not remain queued behind the project slot: sent=" + std::to_string(f.t3.sent.size()) +
                " task=" + queuedTask.dump())
                   .c_str());
-        const auto follower = oneLinkedDestinationTask(f, "after-queued", "Run after the queued cancellation");
+        oneLinkedDestinationTask(f, "after-queued", "Run after the queued cancellation");
         const auto sentBeforeStop = f.t3.sent.size();
         stopDestinationByName(f, destination, "stop-behind-slot", "Stop the queued cloud destination");
         const auto cursor = Notifications(*f.store).notificationEventsSince(localOwner, {"alpha"}, std::nullopt, {});
@@ -3486,7 +3486,7 @@ void queuedDestinationStopsReleaseSlots() {
         const auto cards = Inbox(*f.store).inbox(localOwner);
         check(cards.size() == 1 && cards.front().at("itemKind") == "policy_approval" && f.t3.sent.empty(),
               "the destination launch did not hold its slot for approval");
-        const auto follower = oneLinkedDestinationTask(f, "after-approval-stop", "Run after approval cancellation");
+        oneLinkedDestinationTask(f, "after-approval-stop", "Run after approval cancellation");
         stopDestinationByName(f, destination, "cancel-pending-launch", "Cancel the pending linked launch");
         f.tick();
         f.tick();

@@ -13,7 +13,6 @@
 #include "flock/wait.hpp"
 #include "conversation_turns.hpp"
 #include "journal_conversation.hpp"
-#include "database.hpp"
 #include "task_events.hpp"
 #include "task_records.hpp"
 #include "wait_storage.hpp"
@@ -26,10 +25,10 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-runtime::TaskDecisions::TaskDecisions(Database& database, ConversationStorage& conversationTurns, TaskEvents& taskEvents,
-                                      TaskRecords& taskRecords, WaitStorage& waitStorage, TaskUpdates& updates, OutboxDispatch& dispatch)
-    : database(database), conversationTurns(conversationTurns), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage),
-      updates(updates), dispatch(dispatch) {}
+runtime::TaskDecisions::TaskDecisions(ConversationStorage& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords,
+                                      WaitStorage& waitStorage, TaskUpdates& updates, OutboxDispatch& dispatch)
+    : conversationTurns(conversationTurns), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage), updates(updates),
+      dispatch(dispatch) {}
 
 void runtime::TaskDecisions::applyLaunchDefaults(TaskData& task, const Json& defaults) {
     auto session = task.config.value("session", Json::object());

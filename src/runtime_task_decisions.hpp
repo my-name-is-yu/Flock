@@ -9,7 +9,6 @@
 
 namespace flockv0 {
 class ConversationStorage;
-class Database;
 class TaskEvents;
 class TaskRecords;
 class WaitStorage;
@@ -18,8 +17,8 @@ class WaitStorage;
 // started it decides what follows. Without a conversation the same closure rule applies at once.
 class runtime::TaskDecisions {
 public:
-    TaskDecisions(Database& database, ConversationStorage& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords,
-                  WaitStorage& waitStorage, TaskUpdates& updates, OutboxDispatch& dispatch);
+    TaskDecisions(ConversationStorage& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,
+                  TaskUpdates& updates, OutboxDispatch& dispatch);
 
     void launch(const TaskData& task, const Json& event, const Json* launchDefaults);
     void handle(const TaskData& task, const Json& event, const Json* launchDefaults);
@@ -28,7 +27,6 @@ public:
 private:
     static void applyLaunchDefaults(TaskData& task, const Json& defaults);
 
-    Database& database;
     ConversationStorage& conversationTurns;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;

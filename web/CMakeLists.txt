@@ -18,18 +18,29 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web STATIC server.cpp http.cpp settings_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
-                      channel_routes.cpp channel_bridge.cpp mcp_routes.cpp "${flock_web_asset_header}")
+add_library(flock_web STATIC
+  board_inbox_routes.cpp
+  change_feed.cpp
+  channel_bridge.cpp
+  channel_routes.cpp
+  git_routes.cpp
+  http.cpp
+  identity.cpp
+  mcp_routes.cpp
+  memory_automation_routes.cpp
+  server.cpp
+  settings_routes.cpp
+  views.cpp
+  "${flock_web_asset_header}"
+)
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
 target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads OpenSSL::Crypto)
-target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(flock_web PRIVATE ${flock_warnings})
 
 if(BUILD_TESTING)
-  add_executable(flock_web_git_webhooks tests/git_webhooks.cpp)
+  flock_test_executable(flock_web_git_webhooks SOURCES tests/git_webhooks.cpp LIBRARIES flock_web flock_git_test_sessions Threads::Threads OpenSSL::Crypto)
   target_include_directories(flock_web_git_webhooks SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
-  target_link_libraries(flock_web_git_webhooks PRIVATE flock_web flock_git_test_sessions Threads::Threads OpenSSL::Crypto)
-  target_compile_options(flock_web_git_webhooks PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_web_git_webhooks COMMAND flock_web_git_webhooks)
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
     add_test(NAME flock_web_browser_notification_navigation COMMAND "${FLOCK_NODE_EXECUTABLE}"
@@ -86,27 +97,21 @@ if(BUILD_TESTING)
       flock_web_recurring_requests_dom flock_web_bot_workspace_dom flock_web_tooltip_dom flock_web_reply_quote_dom
       flock_web_bot_role_dom flock_web_memory_history_dom flock_web_backdrop_dismiss_dom flock_web_sidebar_header_ux_dom flock_web_stop_requests_dom PROPERTIES TIMEOUT 30)
   endif()
-  add_executable(flock_web_tests tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp)
+  flock_test_executable(flock_web_tests SOURCES tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp LIBRARIES flock_web Threads::Threads)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
-  target_link_libraries(flock_web_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web COMMAND flock_web_tests)
-  add_executable(flock_web_conversation_tests tests/conversation.cpp)
+  flock_test_executable(flock_web_conversation_tests SOURCES tests/conversation.cpp LIBRARIES flock_web flock_app_support Threads::Threads)
   target_include_directories(flock_web_conversation_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
-  target_link_libraries(flock_web_conversation_tests PRIVATE flock_web flock_app_support Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
   add_test(NAME flock_web_chatgpt_conversation COMMAND flock_web_conversation_tests --chatgpt)
   set_tests_properties(flock_web_chatgpt_conversation PROPERTIES TIMEOUT 30)
-  add_executable(flock_web_session_mcp_tests tests/session_mcp.cpp)
+  flock_test_executable(flock_web_session_mcp_tests SOURCES tests/session_mcp.cpp LIBRARIES flock_web flock_t3 Threads::Threads)
   target_include_directories(flock_web_session_mcp_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
-  target_link_libraries(flock_web_session_mcp_tests PRIVATE flock_web flock_t3 Threads::Threads)
-  target_compile_options(flock_web_session_mcp_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_web_session_mcp COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock_web_session_mcp_tests>)
-  add_executable(flock_web_external_mcp_tests tests/external_mcp.cpp)
+  flock_test_executable(flock_web_external_mcp_tests SOURCES tests/external_mcp.cpp LIBRARIES flock_web Threads::Threads)
   target_include_directories(flock_web_external_mcp_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
-  target_link_libraries(flock_web_external_mcp_tests PRIVATE flock_web Threads::Threads)
-  target_compile_options(flock_web_external_mcp_tests PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_web_external_mcp COMMAND flock_web_external_mcp_tests)
   set_tests_properties(flock_web_external_mcp PROPERTIES TIMEOUT 30)
   if(FLOCK_NODE_EXECUTABLE)

@@ -546,8 +546,6 @@ void scheduledPullRequestCheck(bool connected, bool webhookFirst, bool waitForCI
 
 void multipleWatchedPullRequests() {
     constexpr auto relatedRepo = "org/related";
-    constexpr auto mainUrl = "https://github.com/org/flock/pull/1";
-    constexpr auto relatedUrl = "https://github.com/org/related/pull/1";
     const auto watch = [](const Json& event, std::string_view repo) {
         const auto& watches = event.at("watchedPullRequests");
         const auto matched = std::ranges::find_if(watches, [&](const Json& candidate) {
