@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "conversation_messages.hpp"
 #include "session_read_storage.hpp"
 #include "session_participation_storage.hpp"
 #include "conversation_storage.hpp"
@@ -306,7 +307,7 @@ public:
         const auto& target = session->target;
         {
             std::lock_guard lock(store_.database.mutex);
-            if (!permitted(*session) || !policy_.allows(store_.conversationTurns.turnActor(message_), Action::bot_decide, bot_) ||
+            if (!permitted(*session) || !policy_.allows(store_.conversationMessages.actor(message_), Action::bot_decide, bot_) ||
                 !policy_.allows(bot_, Action::environment_inspect, target.environmentId) ||
                 !store_.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {target.environmentId}).next())
                 return {};
@@ -689,7 +690,7 @@ std::set<std::string> SessionReadStorage::connectedSessionEnvironments(const con
         (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
          !channelStorage.channelMessageAuthorized(message.id, message.bot)))
         return {};
-    const auto actor = conversationTurns.turnActor(message);
+    const auto actor = conversationMessages.actor(message);
     if (!permissions.allows(actor, Action::bot_settings, message.bot)) return {};
     auto rows = database.query(R"SQL(
 SELECT environment_id FROM t3_connector CROSS JOIN t3_connected_environments
@@ -708,7 +709,7 @@ bool SessionReadStorage::connectedSessionAccess(const conversation::Message& mes
     if (const auto origin = message.routing.find("sessionOrigin"); origin != message.routing.end()) {
         const SessionTarget parent{origin->at("environmentId"), origin->at("threadId")};
         const auto authorized = [&] {
-            const auto actor = conversationTurns.turnActor(message);
+            const auto actor = conversationMessages.actor(message);
             return sessionParticipationStorage.activeSessionOrigin(message.bot, actor.id, parent, target.environmentId, message.id) &&
                    policy.allows(actor, Action::bot_decide, message.bot);
         };
@@ -739,7 +740,7 @@ bool SessionReadStorage::permitsWorkSession(const conversation::Message& message
     if (!humanSessionRequest(message) || session.projectId.empty() || thread.empty()) return false;
     std::lock_guard lock(database.mutex);
     Policy policy = permissions;
-    if (!policy.allows(conversationTurns.turnActor(message), Action::bot_decide, message.bot) ||
+    if (!policy.allows(conversationMessages.actor(message), Action::bot_decide, message.bot) ||
         !policy.allows(message.bot, Action::environment_inspect, environment) ||
         !policy.allows(message.bot, Resource::sessionRead(environment, thread)) ||
         !database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next())
@@ -751,7 +752,7 @@ bool SessionReadStorage::permitsWorkSession(const conversation::Message& message
 bool SessionReadStorage::permitsWorkSession(Id sourceMessageId, const WorkSession& session) {
     std::lock_guard lock(database.mutex);
     try {
-        return permitsWorkSession(conversationTurns.loadTurnMessage(sourceMessageId), session);
+        return permitsWorkSession(conversationMessages.load(sourceMessageId), session);
     } catch (const Conflict&) {
         return false;
     }

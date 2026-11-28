@@ -1,4 +1,5 @@
 #include "policy_internal.hpp"
+#include "conversation_messages.hpp"
 #include "flock/digest.hpp"
 #include "conversation_turns.hpp"
 #include "flock/decision_errors.hpp"
@@ -62,7 +63,7 @@ PolicyOrigin PolicyApprovals::policyOrigin(const conversation::Message& message)
     PolicyOrigin origin{message.bot, message.channelScope, {}, message.id, message.id, 0, 0, 0, background};
     if (background) return origin;
     if (message.principalSource != conversation::PrincipalSource::channel) {
-        origin.requester = conversationTurns.turnActor(message).id;
+        origin.requester = conversationMessages.actor(message).id;
     } else if (channelStorage.channelMessageAuthorized(message.id, message.bot)) {
         const auto& id = message.admittedActor.id;
         const bool canSignIn =
@@ -80,7 +81,7 @@ PolicyOrigin PolicyApprovals::taskPolicyOrigin(const TaskData& task) {
     PolicyOrigin origin{task.botId, {}, {}, source, 0, id, task.currentRevision.value_or(0), task.generation, !source};
     if (!source) origin.scope = "task/" + std::to_string(id);
     if (source) {
-        const auto message = conversationTurns.loadTurnMessage(source);
+        const auto message = conversationMessages.load(source);
         const auto fromMessage = policyOrigin(message);
         origin.scope = fromMessage.scope;
         origin.requester = fromMessage.requester;

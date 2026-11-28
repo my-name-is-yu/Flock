@@ -20,6 +20,7 @@ class SessionReadStorage;
 class Database;
 class AttachmentStorage;
 class ConversationStorage;
+class ConversationMessages;
 class SecretStorage;
 struct ConversationCallContext;
 struct Decision;
@@ -33,12 +34,13 @@ struct Message;
 
 class ConversationTools {
 public:
-    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationStorage& conversationTurns, Policy& permissions,
-                      const std::filesystem::path& path, BotSettingsStorage& botSettingsStorage, ModelCalls& modelCalls,
-                      PolicyApprovals& policyApprovals, SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage)
-        : database(database), attachments(attachments), conversationTurns(conversationTurns), permissions(permissions), path(path),
-          botSettingsStorage(botSettingsStorage), modelCalls(modelCalls), policyApprovals(policyApprovals),
-          sessionReadStorage(sessionReadStorage), secretStorage(secretStorage) {}
+    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationStorage& conversationTurns,
+                      ConversationMessages& conversationMessages, Policy& permissions, const std::filesystem::path& path,
+                      BotSettingsStorage& botSettingsStorage, ModelCalls& modelCalls, PolicyApprovals& policyApprovals,
+                      SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage)
+        : database(database), attachments(attachments), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
+          permissions(permissions), path(path), botSettingsStorage(botSettingsStorage), modelCalls(modelCalls),
+          policyApprovals(policyApprovals), sessionReadStorage(sessionReadStorage), secretStorage(secretStorage) {}
 
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     void saveTurnResults(Id, int step, const Json& results);
@@ -55,6 +57,7 @@ private:
     Database& database;
     AttachmentStorage& attachments;
     ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     Policy& permissions;
     const std::filesystem::path& path;
     BotSettingsStorage& botSettingsStorage;

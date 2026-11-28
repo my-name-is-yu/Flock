@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "conversation_messages.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
@@ -246,7 +247,7 @@ Json GitStorage::gitTool(GitHost& host, std::string_view bot, std::string_view e
     if (!selectingPr) {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        auto origin = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(turn));
+        auto origin = policyApprovals.policyOrigin(conversationMessages.load(turn));
         if (taskId) {
             const auto task = taskRecords.load(taskId);
             origin.task = taskId;

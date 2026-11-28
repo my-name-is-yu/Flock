@@ -11,7 +11,7 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationMessages;
 
 class Database;
 class SecretStorage;
@@ -33,10 +33,10 @@ class InboxStorage;
 class PolicyApprovals {
 public:
     PolicyApprovals(Database& database, const SecretStorage& secretStorage, const WebIdentityState& webIdentity, TaskRecords& taskRecords,
-                    WaitStorage& waitStorage, Policy& permissions, ConversationStorage& conversationTurns,
+                    WaitStorage& waitStorage, Policy& permissions, ConversationMessages& conversationMessages,
                     BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage, InboxStorage& inboxStorage)
         : database(database), secretStorage(secretStorage), webIdentity(webIdentity), taskRecords(taskRecords), waitStorage(waitStorage),
-          permissions(permissions), conversationTurns(conversationTurns), botLifecycle(botLifecycle), channelStorage(channelStorage),
+          permissions(permissions), conversationMessages(conversationMessages), botLifecycle(botLifecycle), channelStorage(channelStorage),
           inboxStorage(inboxStorage) {}
 
     Seconds now() const { return clock(); }
@@ -60,7 +60,7 @@ private:
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     BotLifecycleStorage& botLifecycle;
     ChannelStorage& channelStorage;
     InboxStorage& inboxStorage;

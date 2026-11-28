@@ -93,6 +93,7 @@ add_library(flock_core STATIC
   src/conversation_actions.cpp
   src/conversation_agent.cpp
   src/conversation_dispatch.cpp
+  src/conversation_messages.cpp
   src/conversation_projection.cpp
   src/cron.cpp
   src/database.cpp

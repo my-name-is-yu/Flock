@@ -17,6 +17,7 @@
 
 namespace flockv0 {
 class ConversationStorage;
+class ConversationMessages;
 
 class Database;
 class JournalStorage;
@@ -31,9 +32,10 @@ class PolicyApprovals;
 class ChannelStorage {
 public:
     ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const WebIdentityState& webIdentity,
-                   JournalStorage& journalStorage, ConversationStorage& conversationTurns, PolicyApprovals& policyApprovals)
+                   JournalStorage& journalStorage, ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
+                   PolicyApprovals& policyApprovals)
         : database(database), path(path), permissions(permissions), webIdentity(webIdentity), journalStorage(journalStorage),
-          conversationTurns(conversationTurns), policyApprovals(policyApprovals) {}
+          conversationTurns(conversationTurns), conversationMessages(conversationMessages), policyApprovals(policyApprovals) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
@@ -66,6 +68,7 @@ private:
     const WebIdentityState& webIdentity;
     JournalStorage& journalStorage;
     ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;
     std::map<ChannelKind, ChannelConnector> connectors;
     std::string artifactOrigin;

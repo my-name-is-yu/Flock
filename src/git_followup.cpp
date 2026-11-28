@@ -1,4 +1,5 @@
 #include "journal_git.hpp"
+#include "conversation_messages.hpp"
 #include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
@@ -77,10 +78,10 @@ LIMIT 2
     std::string requester;
     std::string requesterBot = message.bot;
     if (task.sourceMessageId) {
-        const auto source = conversationTurns.loadTurnMessage(*task.sourceMessageId);
+        const auto source = conversationMessages.load(*task.sourceMessageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
-            const auto actor = conversationTurns.turnActor(source);
+            const auto actor = conversationMessages.actor(source);
             if (permissions.allows(actor, Action::bot_talk, source.bot) &&
                 (source.principalSource != session || sessionParticipationStorage.activeSessionOrigin(source)))
                 requester = policyApprovals.policyOrigin(source).requester;

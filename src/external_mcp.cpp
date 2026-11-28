@@ -60,7 +60,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
-    const auto actor = storage.sessionParticipationStorage.sessionActor(person);
+    const auto actor = storage.conversationMessages.sessionActor(person);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
     storage.secretStorage.sharedRedactor().requirePublic({person, bots});
     ExternalMcpCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
@@ -86,7 +86,7 @@ std::optional<ExternalMcpConnection> ExternalMcp::authenticate(std::string_view 
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
     auto row = storage.database.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?", {sha256Hex(token)});
-    if (!row.next() || storage.sessionParticipationStorage.sessionActor(row.string(1)).id.empty()) return std::nullopt;
+    if (!row.next() || storage.conversationMessages.sessionActor(row.string(1)).id.empty()) return std::nullopt;
     return ExternalMcpConnection{row.string(0)};
 }
 
@@ -107,7 +107,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
 )SQL",
                                         {connection.id, bot});
     if (!grant.next()) throw Conflict(std::string(botUnavailable));
-    const auto actor = storage.sessionParticipationStorage.sessionActor(grant.string(0));
+    const auto actor = storage.conversationMessages.sessionActor(grant.string(0));
     if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
 
     const auto fingerprint = sha256Hex(Json::array({bot, text}).dump());
@@ -149,7 +149,7 @@ WHERE r.connection_id=? AND r.task_id=? AND c.token_digest IS NOT NULL
 )SQL",
                                       {connection.id, taskId});
     if (!row.next()) throw Conflict(std::string(taskUnavailable));
-    auto actor = storage.sessionParticipationStorage.sessionActor(row.string(0));
+    auto actor = storage.conversationMessages.sessionActor(row.string(0));
     auto bot = row.string(1);
     if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(taskUnavailable));
     return {std::move(actor), std::move(bot)};

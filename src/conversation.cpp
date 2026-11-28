@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "conversation_messages.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "local_machine_storage.hpp"
 #include "web_identity_state.hpp"
@@ -196,7 +197,7 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
 }
 
 Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
-    const auto source = loadTurnMessage(sourceMessage);
+    const auto source = conversationMessages.load(sourceMessage);
     auto routing = source.routing;
     routing.erase("sessionInvitation");
     wake.sourceMessageId = source.id;

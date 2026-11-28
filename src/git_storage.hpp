@@ -15,7 +15,7 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationMessages;
 
 class BotLifecycleStorage;
 class Database;
@@ -40,11 +40,11 @@ class SessionParticipationStorage;
 class GitStorage {
 public:
     GitStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, JournalStorage& journalStorage,
-               const WebIdentityState& webIdentity, Policy& permissions, ConversationStorage& conversationTurns,
+               const WebIdentityState& webIdentity, Policy& permissions, ConversationMessages& conversationMessages,
                const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
                SessionParticipationStorage& sessionParticipationStorage)
         : database(database), secretStorage(secretStorage), taskRecords(taskRecords), journalStorage(journalStorage),
-          webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns), policyApprovals(policyApprovals),
+          webIdentity(webIdentity), permissions(permissions), conversationMessages(conversationMessages), policyApprovals(policyApprovals),
           sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
 
     Json gitTool(GitHost&, std::string_view bot, std::string_view environment, std::string_view project, const Decision&,
@@ -93,7 +93,7 @@ private:
     JournalStorage& journalStorage;
     const WebIdentityState& webIdentity;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;
     SessionParticipationStorage& sessionParticipationStorage;
     const BotLifecycleStorage& botLifecycle;

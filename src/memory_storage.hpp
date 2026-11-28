@@ -10,7 +10,7 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationMessages;
 
 class Database;
 class SecretRedactor;
@@ -29,7 +29,7 @@ struct SessionContextTarget {
 
 class MemoryStorage {
 public:
-    MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationStorage&, MemorySeed);
+    MemoryStorage(Database&, const SecretStorage&, Policy&, ConversationMessages&, MemorySeed);
 
     BotNotes loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now);
     SessionContext sessionContext(const SessionContextTarget&, const SoulLoader&, const SecretRedactor&, std::size_t bytes, Seconds now);
@@ -47,7 +47,7 @@ private:
     Database& database_;
     const SecretStorage& secretStorage_;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     const MemorySeed seed_;
 };
 }

@@ -162,8 +162,8 @@ SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE
     std::vector<Id> wakes;
     while (rows.next()) wakes.push_back(rows.number(0));
     for (const auto wake : wakes)
-        storage.conversationTurns.finishTurn(storage.conversationTurns.loadTurnMessage(wake), "The T3 connection was disconnected.",
-                                             nullptr, ConversationReplyRoute::session_access);
+        storage.conversationTurns.finishTurn(storage.conversationMessages.load(wake), "The T3 connection was disconnected.", nullptr,
+                                             ConversationReplyRoute::session_access);
     storage.database.exec(R"SQL(
 UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
  SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
@@ -268,14 +268,6 @@ bool SessionParticipationStorage::t3EnvironmentConnected(std::string_view enviro
     return database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next();
 }
 
-Person SessionParticipationStorage::sessionActor(std::string_view person) {
-    if (webIdentity.resolve) {
-        if (const auto root = webIdentity.resolve(person)) return {std::string(person), *root};
-    } else if (person == localOwner.id && !permissions.requiresIdentity())
-        return localOwner;
-    return {};
-}
-
 Person SessionParticipation::person(const T3Connection& connection) const {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
@@ -289,7 +281,7 @@ AND (?3 IS NULL OR EXISTS(SELECT 1 FROM t3_remote_machines WHERE id=?3 AND perso
                     {connection.id, connection.personId, machine})
              .next())
         throw Conflict("The T3 connection is unavailable");
-    const auto actor = storage.sessionParticipationStorage.sessionActor(connection.personId);
+    const auto actor = storage.conversationMessages.sessionActor(connection.personId);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
     return actor;
 }
@@ -438,7 +430,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 {id, target.environmentId, target.threadId});
         };
         const auto authorize = [&]() -> Sender {
-            const auto actor = conversationTurns.turnActor(message);
+            const auto actor = conversationMessages.actor(message);
             Policy policy = permissions;
             if (!policy.allows(actor, Action::bot_decide, message.bot) || !policy.allows(actor, Action::bot_decide, bot))
                 throw Conflict("Bot access is required");
@@ -600,7 +592,7 @@ SessionStop SessionParticipationStorage::stopSessionParticipation(SessionReadSto
     Policy policy = permissions;
     if (!policy.allows(actor, Action::bot_decide, bot)) throw Conflict("Bot access is required");
     const bool throughConnector = exit == SessionExit::left && actor.adminRoot && message &&
-                                  sessionReadStorage.connectedSessionAccess(conversationTurns.loadTurnMessage(message), target);
+                                  sessionReadStorage.connectedSessionAccess(conversationMessages.load(message), target);
     auto row = database.query(R"SQL(
 SELECT p.id,p.environment_id,p.state,p.stopped_through FROM session_participations p
 JOIN t3_connector c ON c.person_id=p.person_id
@@ -673,7 +665,7 @@ WHERE t.status IN ('paused','policy_waiting') AND (
     std::vector<Id> closedTurns;
     while (turns.next()) closedTurns.push_back(turns.number(0));
     for (const auto turn : closedTurns)
-        conversationTurns.finishTurn(conversationTurns.loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr,
+        conversationTurns.finishTurn(conversationMessages.load(turn), "The T3 Session participation has ended.", nullptr,
                                      ConversationReplyRoute::session_access);
     // Persist each cancellation intent with the stop. Runtime recovers in-flight launches and
     // interrupts their own assigned Runs through the ordinary task cancellation path.
@@ -709,7 +701,7 @@ WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thre
                                    {id, cutoff});
     std::vector<Id> unassigned;
     while (selected.next()) {
-        const auto source = conversationTurns.loadTurnMessage(selected.number(1));
+        const auto source = conversationMessages.load(selected.number(1));
         if (source.admittedActor.id == selected.string(2) ||
             sessionReadStorage.connectedSessionAccess(source, {selected.string(3), selected.string(4)}))
             unassigned.push_back(selected.number(0));
@@ -863,8 +855,8 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
             if (!args.is_object() || args.size() != 2) throw Conflict("Invalid leave_session arguments");
             const SessionTarget target{text(args, "environmentId", 256, true), text(args, "threadId", 256, true)};
             if (!validId(target.environmentId, 256) || !validId(target.threadId, 256)) throw Conflict("Invalid leave_session arguments");
-            stop = stopSessionParticipation(sessionReadStorage, conversationTurns.turnActor(message), message.bot, target,
-                                            SessionExit::left, message.id);
+            stop = stopSessionParticipation(sessionReadStorage, conversationMessages.actor(message), message.bot, target, SessionExit::left,
+                                            message.id);
         } catch (const Conflict& error) {
             conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
         } catch (const conversation_storage::ToolError& error) {

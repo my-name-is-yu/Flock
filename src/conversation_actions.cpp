@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "conversation_messages.hpp"
 #include "flock/t3_session.hpp"
 #include "flock/decision_errors.hpp"
 #include "task_run_reports.hpp"
@@ -960,7 +961,7 @@ void SessionMessageStorage::wakeSessionMessages(T3& t3, std::stop_token shutdown
             if (botLifecycle.botPaused(wait.bot) ||
                 !database.query("SELECT 1 FROM session_message_waits WHERE rowid=? AND notified=0", {wait.key}).next())
                 return false;
-            const auto message = conversationTurns.loadTurnMessage(wait.message);
+            const auto message = conversationMessages.load(wait.message);
             return !sessionParticipationStorage.sessionParticipationStopped(wait.bot, wait.target, wait.message) &&
                    (message.principalSource != conversation::PrincipalSource::session ||
                     sessionParticipationStorage.activeSessionOrigin(message)) &&
@@ -989,7 +990,7 @@ void SessionMessageStorage::wakeSessionMessages(T3& t3, std::stop_token shutdown
         }
         settle(reason == "finished" || reason == "failed");
         if (!sqlite3_changes(database.db)) continue;
-        const auto source = conversationTurns.loadTurnMessage(wait.message);
+        const auto source = conversationMessages.load(wait.message);
         auto routing = source.routing;
         routing.erase("sessionInvitation");
         Policy policy = permissions;

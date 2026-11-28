@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "conversation_messages.hpp"
 #include "session_dispatch_lock.hpp"
 #include "web_identity_state.hpp"
 #include "journal_storage.hpp"
@@ -674,7 +675,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                 const auto target = channelPolicyTarget(origin);
                 const auto used = database.query("SELECT 1 FROM policy_approvals WHERE operation=? AND status='used'", {approval}).next();
                 if (!used) {
-                    const auto requester = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(source));
+                    const auto requester = policyApprovals.policyOrigin(conversationMessages.load(source));
                     const auto gate =
                         policyApprovals.approveAction({bot, requester.scope, requester.requester, requester.anchor, 0, 0, 0, 0, true},
                                                       {Action::channel_post, target, true}, approval, payload, policyApprovals.now());

@@ -1,4 +1,5 @@
 #include "session_dispatch_lock.hpp"
+#include "conversation_messages.hpp"
 #include "runtime_outbox_dispatch.hpp"
 
 #include "flock/commit_check.hpp"
@@ -451,8 +452,8 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
         if (!cmd.sessionOrigin && !sendsToSession) return true;
         std::lock_guard lock(database.mutex);
         if (const auto& origin = current.sessionOrigin) {
-            const auto source = conversationTurns.loadTurnMessage(current.sourceMessageId.value());
-            const auto actor = conversationTurns.turnActor(source);
+            const auto source = conversationMessages.load(current.sourceMessageId.value());
+            const auto actor = conversationMessages.actor(source);
             const auto& parent = origin->target;
             if (!sessionParticipationStorage.activeSessionOrigin(cmd.ownerBotId, actor.id, parent, cmd.environmentId, source.id) ||
                 !policy.allows(actor, Action::bot_decide, cmd.ownerBotId) ||
@@ -602,14 +603,14 @@ void runtime::OutboxDispatch::deliver(const TaskData& task, Outbox action) {
             if (policyGate != ApprovalGate::allow) return false;
         }
         if (usesExistingSession && current.sourceMessageId) {
-            const auto source = conversationTurns.loadTurnMessage(*current.sourceMessageId);
+            const auto source = conversationMessages.load(*current.sourceMessageId);
             const SessionTarget target{cmd.environmentId, cmd.target.threadId,
                                        cmd.gatewayEnvironmentId == cmd.environmentId ? std::string{} : cmd.gatewayEnvironmentId};
             auto participant = database.query(R"SQL(
 SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
 )SQL",
                                               {cmd.ownerBotId, target.environmentId, target.threadId});
-            if (participant.next() && (participant.string(1) == conversationTurns.turnActor(source).id ||
+            if (participant.next() && (participant.string(1) == conversationMessages.actor(source).id ||
                                        sessionReadStorage.connectedSessionAccess(source, target)))
                 action.sessionParticipationId = participant.number(0);
         }

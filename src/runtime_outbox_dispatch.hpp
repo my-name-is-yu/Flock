@@ -22,7 +22,7 @@ struct Observation;
 struct Wait;
 
 class BotLifecycleStorage;
-class ConversationStorage;
+class ConversationMessages;
 class Database;
 class JournalStorage;
 class Policy;
@@ -40,15 +40,15 @@ class OutboxStorage;
 
 class runtime::OutboxDispatch {
 public:
-    OutboxDispatch(Database& database, BotLifecycleStorage& botLifecycle, ConversationStorage& conversationTurns,
+    OutboxDispatch(Database& database, BotLifecycleStorage& botLifecycle, ConversationMessages& conversationMessages,
                    JournalStorage& journalStorage, const std::filesystem::path& path, PolicyApprovals& policyApprovals,
                    SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage, TaskEvents& taskEvents,
                    TaskRecords& taskRecords, TaskRouting& taskRouting, TaskRunReports& taskRunReports, WaitStorage& waitStorage,
                    OutboxStorage& outboxStorage, T3& t3, const Policy& policy, TaskUpdates& updates, TaskQuestions& questions,
                    RunReports& reports, RunObserver& runs, SessionPrompts& prompts, const std::function<Seconds()>& clock,
                    bool requireT3Connection, const IntakeResolver& intake, std::stop_token shutdown)
-        : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), journalStorage(journalStorage), path(path),
-          policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage),
+        : database(database), botLifecycle(botLifecycle), conversationMessages(conversationMessages), journalStorage(journalStorage),
+          path(path), policyApprovals(policyApprovals), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskEvents(taskEvents), taskRecords(taskRecords), taskRouting(taskRouting),
           taskRunReports(taskRunReports), waitStorage(waitStorage), outboxStorage(outboxStorage), t3(t3), policy(policy), updates(updates),
           questions(questions), reports(reports), runs(runs), prompts(prompts), clock(clock), requireT3Connection(requireT3Connection),
@@ -81,7 +81,7 @@ private:
 
     Database& database;
     BotLifecycleStorage& botLifecycle;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     JournalStorage& journalStorage;
     const std::filesystem::path& path;
     PolicyApprovals& policyApprovals;
