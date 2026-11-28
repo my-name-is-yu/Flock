@@ -529,6 +529,12 @@ int main(int argc, char** argv) {
         const auto followUps = effects("t3_thread_send");
         check(followUps.size() == 1, "follow-up reconciliation does not send another queued message");
         check(followUps.at(0).at("message") == follow.instruction, "T3 receives all of the follow-up instruction");
+        Command afterParticipant = follow;
+        afterParticipant.actionId = "flock-action-56789";
+        fixture({{"scenario", "participant-later"}});
+        delivery = adapter->send(afterParticipant);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "follow" && effects("t3_thread_send").size() == 2,
+              "a newer settled Run in an idle Session blocked the follow-up");
 
         Command selected = launch;
         selected.tool = CommandTool::start_in_session;

@@ -888,9 +888,10 @@ bool followUpReady(Client& client, const Command& command) {
         return false;
     const auto response = threadHead(client, command.target.threadId);
     const auto& info = response.at("thread");
+    // Newer settled Runs, such as replies from Bots invited into the Session, do not block a follow-up.
+    // The Session agent sees them, and Flock attributes the follow-up by the Run that the send returns.
     if (str(info, "projectId") != command.projectId || !member(info, "activeRunId").is_null() || boolean(info, "archived") ||
-        position(member(info, "pendingRequestCount")) != 0 ||
-        (str(info, "latestRunId") != effective && str(info, "latestRunId") != resultRun))
+        position(member(info, "pendingRequestCount")) != 0)
         return false;
     // A held queue can exist even without an active Run.
     const auto queue = client.call("t3_queue", {{"action", "list"}, {"threadId", command.target.threadId}, {"limit", 1}});
@@ -1080,8 +1081,7 @@ public:
                     if (str(previous, "projectId") != command.projectId || boolean(previous, "archived"))
                         return {Outcome::Settings, {}, "The selected T3 Session moved projects or was archived", true};
                 } else if (!followUpReady(client, command)) {
-                    return result(Outcome::NotAccepted,
-                                  "T3 has other work or the assigned Run could not be confirmed as the latest settled Run");
+                    return result(Outcome::NotAccepted, "T3 has other work or the assigned Run has not settled");
                 }
                 invoked = true;
                 reply = client.call("t3_thread_send", {{"threadId", command.target.threadId},
