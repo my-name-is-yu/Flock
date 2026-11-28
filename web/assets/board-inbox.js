@@ -1,19 +1,10 @@
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
 import { actionLabel, approvalSummary } from './action-labels.mjs';
+import { decisionLabels, pendingKindLabels, responseErrors } from './conversation-copy.mjs';
 import { node } from './dom.js';
 
 // One name per pending item, said as what the person needs to do; the sidebar and this panel share it.
-export const pendingKindLabels = {
-  user_question: 'Question for you',
-  protected_input: 'Secret needed',
-  policy_approval: 'Approval needed',
-};
-const labels = {
-  ...pendingKindLabels,
-  answer: 'Answered', cancel: 'Stop requested', deny: 'Denied', supply: 'Secret saved',
-  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
-  allow_next_time: 'Allow rule saved for this Flock',
-};
+const labels = { ...pendingKindLabels, ...decisionLabels };
 const historyKinds = { user_question: 'Question', protected_input: 'Secret request', policy_approval: 'Approval' };
 const actions = {
   protected_input: [['supply', 'Save secret']],
@@ -608,14 +599,6 @@ export function mountBoardInbox({
     syncTrigger();
   }
 
-  const errors = {
-    request_changed: 'The request changed. Review the current request before responding again.',
-    already_closed: 'This request was already answered or closed.',
-    access_denied: 'You don’t have permission to respond to this request.',
-    decision_conflict: 'Flock could not apply your response. Check it and try again.',
-    invalid_input: 'Check your response and try again.',
-  };
-
   async function submit(item, decision, data = {}, { inline = false, choiceAnswer = false, conversation } = {}) {
     const active = conversation ? conversation.active
       : inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
@@ -662,7 +645,7 @@ export function mountBoardInbox({
       }
       if (owner !== viewer) return;
       if (isCurrent()) message.textContent = failure
-        ? errors[failure.message] ?? 'Couldn’t confirm your response. Check the request before trying again.' : '';
+        ? responseErrors[failure.message] ?? 'Couldn’t confirm your response. Check the request before trying again.' : '';
       if (!failure) {
         epoch++;
         const remaining = items.filter((entry) => conversation
@@ -674,7 +657,7 @@ export function mountBoardInbox({
         await conversation.finish(failure, refresh);
       } else {
         if (!failure) onAccepted(item, { decision });
-        else if (inline) onAccepted(item, { error: errors[failure.message] ?? 'Couldn’t confirm your response.' });
+        else if (inline) onAccepted(item, { error: responseErrors[failure.message] ?? 'Couldn’t confirm your response.' });
         await Promise.all([refresh(), refreshConversation(item)]);
       }
     } finally {

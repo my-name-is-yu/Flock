@@ -12,7 +12,10 @@ import { mountBotDeletion } from './bot-deletion.js';
 import { mountBotPause } from './bot-pause.js';
 import { setupNotice, createSetupSettings, orderSetupNotices } from './bot-setup.js';
 import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide } from './chat-grouping.mjs';
-import { mountBoardInbox, pendingKindLabels, taskWaitDecision } from './board-inbox.js';
+import { mountBoardInbox, taskWaitDecision } from './board-inbox.js';
+import {
+  closedLabels, decisionConfirmations, pendingActionLabels, pendingKindLabels, responseErrors, sessionEndLabels, stateLabels, waitLabels,
+} from './conversation-copy.mjs';
 import { screenshotMessage, stageScreenshots } from './composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from './timeline-rows.js';
 import { replyArrivalId } from './reply-arrival.mjs';
@@ -82,60 +85,6 @@ const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long'
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
-const sessionEndLabels = {
-  completed: 'Done', cancelled: 'Cancelled', failed: 'Failed',
-  interrupted: 'Interrupted', rolled_back: 'Rolled back', ended: 'Ended',
-};
-const stateLabels = {
-  ...sessionEndLabels,
-  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for you',
-  confirmation_pending: 'Confirmation pending', external_waiting: 'Waiting',
-  cancelling: 'Cancelling', stopping: 'Confirming stop',
-  idle: 'Idle', thinking: 'Thinking', working: 'Working', paused: 'Paused',
-};
-// Wait copy names the open Bot (`$BOT`) rather than a generic "the Bot". An optional third entry is the
-// Bot's own first-person wording for its conversation bubble.
-const waitLabels = {
-  user_question: ['Question from $BOT', '$BOT is waiting for your answer.', 'I’m waiting for your answer.'],
-  policy_approval: ['Approval needed', '$BOT is waiting for your approval before it continues.', 'I need your approval before I continue.'],
-  bot_notes_unavailable: ['$BOT’s notes are unavailable', 'Restore access to the Bot’s Role and memory.'],
-  t3_input: ['Action in T3', 'Open the thread in T3 to approve or answer.'],
-  auth: ['T3 sign-in needed', 'Sign in again in T3 Code or reconnect this environment in Flock settings.'],
-  settings: ['T3 settings need attention', 'Check this T3 environment under Connections in Flock settings.'],
-};
-// Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
-const pendingActionLabels = {
-  t3_input: 'Open in T3…',
-};
-const closedLabels = {
-  answer: 'Answered', run_finished: 'Work ended', cancel: 'Stop requested',
-  session_question: 'The question changed in T3', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
-  supply: 'Secret saved',
-  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
-  stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
-  bot_setup_restored: 'Resumed', action_closed: 'Action closed',
-  superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
-};
-// Confirms what the response will do, so the person isn't left with a bare "Done".
-const decisionConfirmations = {
-  answer: (name) => `Answer recorded for ${name}.`,
-  allow_once: () => 'Allowed once.',
-  always_allow: () => 'Allowed and saved as a rule for this Flock.',
-  allow_next_time: () => 'Allow rule saved for this Flock.',
-  deny: () => 'Denied.',
-  supply: () => 'Secret saved.',
-};
-const errors = {
-  invalid_text: 'Check the message and its length.',
-  message_conflict: 'A message was already recorded for this submission. Check the conversation.',
-  operation_conflict: 'Flock already processed this action or the pending request changed.',
-  request_changed: 'The request changed. Review its current details before acting again.',
-  already_closed: 'This request was already answered or closed.',
-  access_denied: 'You don’t have permission to respond to this request.',
-  bot_not_found: 'Bot not found.',
-  bot_paused: 'This Bot is paused.',
-};
-
 function saved(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
   catch { return fallback; }
@@ -2828,7 +2777,7 @@ async function cancelActiveTask(context, task) {
   } catch (error) {
     if (view === context && detail?.kind === 'stop-task' && detail.taskId === task.id) {
       for (const control of controls) control.disabled = false;
-      showDetailError(errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.');
+      showDetailError(responseErrors[error.message] ?? 'Flock could not confirm the action. Check the conversation.');
     }
   }
 }
@@ -3092,7 +3041,7 @@ function submitConversationDecision(context, item, active, operation, data) {
     start: () => setNotice(context, 'Submitting action…'),
     finish(error, refreshInbox) {
       if (error) {
-        const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
+        const message = responseErrors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
         setNotice(context, message, true);
         if (isOpen()) showDetailError(message);
       } else {
@@ -3145,7 +3094,7 @@ async function submit(event) {
       else composer.settleSend(payload, false);
     }
     if (error.message === 'bot_paused') void Promise.all([refreshBots(), context.refresh()]);
-    const notice = error.message === 'removed_bot_setting' ? error.data.message : errors[error.message];
+    const notice = error.message === 'removed_bot_setting' ? error.data.message : responseErrors[error.message];
     setNotice(context, notice ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
