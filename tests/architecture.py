@@ -80,7 +80,7 @@ class ArchitectureTest(unittest.TestCase):
                 "src/storage.hpp": "struct Store::Impl {\n"
                 "    TurnRunner turnRunner{database, conversationTurns, conversationTools};\n"
                 "    ConversationTools conversationTools{database, conversationTurns};\n"
-                "    ConversationStorage conversationTurns{database, journalStorage};\n"
+                "    ConversationTurns conversationTurns{database, journalStorage};\n"
                 "    JournalStorage journalStorage" + journal + ";\n"
                 "};\n"
             }

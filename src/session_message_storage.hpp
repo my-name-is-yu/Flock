@@ -14,7 +14,7 @@ class Policy;
 
 class Database;
 class BotLifecycleStorage;
-class ConversationStorage;
+class ConversationTurns;
 class SessionSendReceipts;
 class ConversationMessages;
 class TurnResults;
@@ -35,7 +35,7 @@ struct Message;
 
 class SessionMessageStorage {
 public:
-    SessionMessageStorage(Database& database, BotLifecycleStorage& botLifecycle, ConversationStorage& conversationTurns,
+    SessionMessageStorage(Database& database, BotLifecycleStorage& botLifecycle, ConversationTurns& conversationTurns,
                           ConversationMessages& conversationMessages, TurnResults& turnResults, GitStorage& gitStorage,
                           const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
                           OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
@@ -65,7 +65,7 @@ private:
     void deliverSessionSend(SessionSend&);
     Database& database;
     BotLifecycleStorage& botLifecycle;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     ConversationMessages& conversationMessages;
     TurnResults& turnResults;
     GitStorage& gitStorage;

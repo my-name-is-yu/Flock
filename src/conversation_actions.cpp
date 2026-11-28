@@ -510,7 +510,7 @@ constexpr auto sessionUnavailable = "This Session is unavailable through your T3
 constexpr auto followupUnavailable = "Automatic follow-up is unavailable for this pull request";
 constexpr auto destinationUnavailable = "The destination Session is unavailable";
 
-void requireSendable(const ConversationStorage& turns, const TaskData& task, Id generation, const conversation::Message& message) {
+void requireSendable(const ConversationTurns& turns, const TaskData& task, Id generation, const conversation::Message& message) {
     if (generation != task.generation) throw ToolError("stale", {{"taskId", task.id}, {"current", turns.taskState(task, message)}});
     if (terminal(task) || task.state == TaskState::cancelling)
         throw ToolError("The task is " + std::string(taskStateName(task.state)), {{"taskId", task.id}});

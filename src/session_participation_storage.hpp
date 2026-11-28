@@ -11,7 +11,7 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationTurns;
 class SessionParticipationRecords;
 class SessionSendReceipts;
 class ConversationMessages;
@@ -40,8 +40,8 @@ class SessionParticipationStorage {
 public:
     SessionParticipationStorage(Database& database, const std::filesystem::path& path, SecretStorage& secretStorage,
                                 TaskRecords& taskRecords, const WebIdentityState& webIdentity, Policy& permissions,
-                                ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
-                                TurnResults& turnResults, SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
+                                ConversationTurns& conversationTurns, ConversationMessages& conversationMessages, TurnResults& turnResults,
+                                SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
                                 TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
                                 SessionParticipationRecords& sessionParticipations, SessionSendReceipts& sessionSendReceipts)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
@@ -66,7 +66,7 @@ private:
     TaskRecords& taskRecords;
     const WebIdentityState& webIdentity;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     ConversationMessages& conversationMessages;
     TurnResults& turnResults;
     SessionMessageStorage& sessionMessageStorage;

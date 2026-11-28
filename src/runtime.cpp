@@ -41,7 +41,7 @@ struct Runtime::Impl {
     Database& database;
     WaitStorage& waitStorage;
     ChannelStorage& channelStorage;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     TurnRunner& turnRunner;
     GitStorage& gitStorage;
     TaskEvents& taskEvents;

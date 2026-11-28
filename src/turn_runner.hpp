@@ -61,7 +61,7 @@ namespace conversation {
 struct Message;
 }
 
-class ConversationStorage;
+class ConversationTurns;
 
 // Runs conversation turns: asks the model, carries out its tool calls, and continues until the turn ends.
 class TurnRunner {
@@ -73,7 +73,7 @@ public:
                PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionMessageStorage& sessionMessageStorage,
                SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
                TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-               ConversationMessages& conversationMessages, TurnResults& turnResults, ConversationStorage& conversationTurns)
+               ConversationMessages& conversationMessages, TurnResults& turnResults, ConversationTurns& conversationTurns)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
@@ -141,6 +141,6 @@ private:
     WaitStorage& waitStorage;
     ConversationMessages& conversationMessages;
     TurnResults& turnResults;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
 };
 }

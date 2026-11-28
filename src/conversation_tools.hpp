@@ -20,7 +20,7 @@ class SessionReadStorage;
 
 class Database;
 class AttachmentStorage;
-class ConversationStorage;
+class ConversationTurns;
 class ConversationMessages;
 class SecretStorage;
 class TurnResults;
@@ -36,7 +36,7 @@ struct Message;
 
 class ConversationTools {
 public:
-    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationStorage& conversationTurns,
+    ConversationTools(Database& database, AttachmentStorage& attachments, ConversationTurns& conversationTurns,
                       ConversationMessages& conversationMessages, Policy& permissions, const std::filesystem::path& path,
                       BotSettingsStorage& botSettingsStorage, ModelCalls& modelCalls, PolicyApprovals& policyApprovals,
                       SessionReadStorage& sessionReadStorage, SecretStorage& secretStorage, TurnResults& turnResults)
@@ -58,7 +58,7 @@ private:
     Json executeBotTool(const ToolContext&, const Decision&);
     Database& database;
     AttachmentStorage& attachments;
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     ConversationMessages& conversationMessages;
     Policy& permissions;
     const std::filesystem::path& path;

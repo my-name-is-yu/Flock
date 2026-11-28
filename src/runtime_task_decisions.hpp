@@ -8,7 +8,7 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-class ConversationStorage;
+class ConversationTurns;
 class TaskEvents;
 class TaskRecords;
 class WaitStorage;
@@ -17,7 +17,7 @@ class WaitStorage;
 // started it decides what follows. Without a conversation the same closure rule applies at once.
 class runtime::TaskDecisions {
 public:
-    TaskDecisions(ConversationStorage& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,
+    TaskDecisions(ConversationTurns& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords, WaitStorage& waitStorage,
                   TaskUpdates& updates, OutboxDispatch& dispatch);
 
     void launch(const TaskData& task, const Json& event, const Json* launchDefaults);
@@ -27,7 +27,7 @@ public:
 private:
     static void applyLaunchDefaults(TaskData& task, const Json& defaults);
 
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     TaskEvents& taskEvents;
     TaskRecords& taskRecords;
     WaitStorage& waitStorage;

@@ -84,7 +84,7 @@ std::string decodeAttachment(std::string_view, std::size_t maxBytes);
 
 class Store;
 class ChannelStorage;
-class ConversationStorage;
+class ConversationTurns;
 class Database;
 struct Person;
 
@@ -100,7 +100,7 @@ public:
 private:
     Database& database_;
     ChannelStorage& channels_;
-    ConversationStorage& turns_;
+    ConversationTurns& turns_;
 };
 
 }

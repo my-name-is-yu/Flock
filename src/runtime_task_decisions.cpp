@@ -25,7 +25,7 @@
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
-runtime::TaskDecisions::TaskDecisions(ConversationStorage& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords,
+runtime::TaskDecisions::TaskDecisions(ConversationTurns& conversationTurns, TaskEvents& taskEvents, TaskRecords& taskRecords,
                                       WaitStorage& waitStorage, TaskUpdates& updates, OutboxDispatch& dispatch)
     : conversationTurns(conversationTurns), taskEvents(taskEvents), taskRecords(taskRecords), waitStorage(waitStorage), updates(updates),
       dispatch(dispatch) {}

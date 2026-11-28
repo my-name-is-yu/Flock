@@ -49,7 +49,7 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-bool ConversationStorage::conversationPending(std::string_view bot) const {
+bool ConversationTurns::conversationPending(std::string_view bot) const {
     // Start with the running-turn index so long Bot histories do not add work.
     return database
         .query(R"SQL(
@@ -60,8 +60,8 @@ WHERE t.status='running' AND m.bot_id=? AND j.kind='conversation_message' LIMIT 
         .next();
 }
 
-std::optional<Json> ConversationStorage::messageReceipt(const Person& actor, std::string_view bot, std::string_view clientId,
-                                                        std::string_view text, Id replyTo, const Json& attachments) const {
+std::optional<Json> ConversationTurns::messageReceipt(const Person& actor, std::string_view bot, std::string_view clientId,
+                                                      std::string_view text, Id replyTo, const Json& attachments) const {
     auto row = database.query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?",
                               {bot, actor.id, clientId});
     if (!row.next()) return std::nullopt;
@@ -86,9 +86,9 @@ Json WebConversationIntake::receiveWeb(const Person& actor, const Intake& routin
         actor, routing.botId, clientId, text, replyTo, conversation::PrincipalSource::web, nullptr, [&] { return routing; }, attachments);
 }
 
-Json ConversationStorage::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                                  conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
-                                  const std::function<Intake()>& route, const Json& attachments) {
+Json ConversationTurns::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
+                                conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
+                                const std::function<Intake()>& route, const Json& attachments) {
     if (!channel && reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) || !hasText(text) || text.size() > maxBodyBytes ||
         replyTo < 0)
@@ -115,9 +115,9 @@ Json ConversationStorage::receive(const Person& actor, std::string_view bot, std
     return receipt;
 }
 
-Id ConversationStorage::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
-                                            std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
-                                            const ConversationInvitationEntry* invitation, const ConversationBotMessageEntry* botMessage) {
+Id ConversationTurns::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
+                                          std::string_view clientId, std::string_view text, Id replyTo, const SessionOrigin* origin,
+                                          const ConversationInvitationEntry* invitation, const ConversationBotMessageEntry* botMessage) {
     if (botLifecycle.botPaused(routing.botId)) throw BotPaused{};
     if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
     Json saved{{"environmentId", routing.environmentId}, {"projectId", routing.projectId}, {"config", routing.config}};
@@ -177,8 +177,8 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=
     return id;
 }
 
-Id ConversationStorage::enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry& wake,
-                                    std::string_view clientId) {
+Id ConversationTurns::enqueueWake(const conversation::Message& source, Json routing, const ConversationWakeEntry& wake,
+                                  std::string_view clientId) {
     routing["sessionWake"] = encodeConversationWake(wake);
     const auto id = journalStorage.journalConversationMessage(source.bot, {wake});
     database.exec(R"SQL(
@@ -196,7 +196,7 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
     return id;
 }
 
-Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
+Id ConversationTurns::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry wake, std::string_view clientId) {
     const auto source = conversationMessages.load(sourceMessage);
     auto routing = source.routing;
     routing.erase("sessionInvitation");
@@ -204,7 +204,7 @@ Id ConversationStorage::enqueueTaskWake(Id sourceMessage, ConversationWakeEntry 
     return enqueueWake(source, std::move(routing), wake, clientId);
 }
 
-std::vector<std::pair<std::string, Id>> ConversationStorage::pendingConversations(unsigned limit, Seconds now) const {
+std::vector<std::pair<std::string, Id>> ConversationTurns::pendingConversations(unsigned limit, Seconds now) const {
     std::lock_guard lock(database.mutex);
     auto next = database.query(R"SQL(
 WITH heads AS (
@@ -221,7 +221,7 @@ WHERE r.retry_at IS NULL OR r.retry_at<=? ORDER BY h.id LIMIT ?
     return result;
 }
 
-bool ConversationStorage::isNextTurn(Id id) const {
+bool ConversationTurns::isNextTurn(Id id) const {
     return database
         .query(R"SQL(
 SELECT 1 WHERE ?1=(
@@ -233,7 +233,7 @@ SELECT 1 WHERE ?1=(
         .next();
 }
 
-void ConversationStorage::deferConversation(Id id, Seconds now) {
+void ConversationTurns::deferConversation(Id id, Seconds now) {
     // Consecutive failures back off by 1, 2, 4, 8, 16, 32, then at most 60 seconds.
     database.exec(R"SQL(
 INSERT INTO conversation_retries(message_id,failures,retry_at) VALUES(?,1,?+1)

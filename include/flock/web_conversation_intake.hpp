@@ -8,7 +8,7 @@
 
 namespace flockv0 {
 class Store;
-class ConversationStorage;
+class ConversationTurns;
 class Database;
 class Policy;
 struct Intake;
@@ -25,7 +25,7 @@ public:
                                 Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
 private:
     Database& database_;
-    ConversationStorage& turns_;
+    ConversationTurns& turns_;
     const Policy& permissions_;
 };
 }

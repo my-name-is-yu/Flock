@@ -61,10 +61,10 @@ struct Store::Impl {
     ChannelConnectors channelConnectors{database, permissions, webIdentity};
     ChannelNotices channelNotices{database, channelConnectors, permissions, journalStorage, channelDeliveries};
     BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
-    ConversationStorage conversationTurns{database,    attachments,          botLifecycle,      channelStorage,        gitStorage,
-                                          permissions, journalStorage,       modelCalls,        secretStorage,         taskRecords,
-                                          waitStorage, conversationMessages, channelDeliveries, sessionParticipations, channelConnectors,
-                                          turnResults, sessionSendReceipts};
+    ConversationTurns conversationTurns{database,    attachments,          botLifecycle,      channelStorage,        gitStorage,
+                                        permissions, journalStorage,       modelCalls,        secretStorage,         taskRecords,
+                                        waitStorage, conversationMessages, channelDeliveries, sessionParticipations, channelConnectors,
+                                        turnResults, sessionSendReceipts};
     TurnRunner turnRunner{database,
                           attachments,
                           automationStorage,

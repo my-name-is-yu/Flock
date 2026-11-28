@@ -13,7 +13,7 @@
 #include <string_view>
 
 namespace flockv0 {
-class ConversationStorage;
+class ConversationTurns;
 class SessionMessageStorage;
 class SessionParticipationStorage;
 
@@ -38,7 +38,7 @@ class runtime::Workers {
 public:
     static constexpr unsigned batchLimit = 4;
 
-    Workers(ConversationStorage& conversationTurns, SessionMessageStorage& sessionMessageStorage,
+    Workers(ConversationTurns& conversationTurns, SessionMessageStorage& sessionMessageStorage,
             SessionParticipationStorage& sessionParticipationStorage, ChannelStorage& channelStorage, T3& t3, Maintenance& maintenance)
         : conversationTurns(conversationTurns), sessionMessageStorage(sessionMessageStorage),
           sessionParticipationStorage(sessionParticipationStorage), channelStorage(channelStorage), t3(t3), maintenance(maintenance) {}
@@ -60,7 +60,7 @@ private:
     template <class Key> void collect(std::map<Key, std::future<void>>& workers, std::string_view operation);
     void collect(std::future<void>& worker, std::string_view operation);
 
-    ConversationStorage& conversationTurns;
+    ConversationTurns& conversationTurns;
     SessionMessageStorage& sessionMessageStorage;
     SessionParticipationStorage& sessionParticipationStorage;
     ChannelStorage& channelStorage;

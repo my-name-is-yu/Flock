@@ -49,14 +49,14 @@ struct QuestionAnchor;
 enum class PrincipalSource;
 }
 
-class ConversationStorage {
+class ConversationTurns {
 public:
-    ConversationStorage(Database& database, AttachmentStorage& attachments, BotLifecycleStorage& botLifecycle,
-                        ChannelStorage& channelStorage, GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage,
-                        ModelCalls& modelCalls, SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
-                        ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
-                        SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults,
-                        SessionSendReceipts& sessionSendReceipts)
+    ConversationTurns(Database& database, AttachmentStorage& attachments, BotLifecycleStorage& botLifecycle, ChannelStorage& channelStorage,
+                      GitStorage& gitStorage, Policy& permissions, JournalStorage& journalStorage, ModelCalls& modelCalls,
+                      SecretStorage& secretStorage, TaskRecords& taskRecords, WaitStorage& waitStorage,
+                      ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
+                      SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults,
+                      SessionSendReceipts& sessionSendReceipts)
         : database(database), attachments(attachments), botLifecycle(botLifecycle), channelStorage(channelStorage), gitStorage(gitStorage),
           permissions(permissions), journalStorage(journalStorage), modelCalls(modelCalls), secretStorage(secretStorage),
           taskRecords(taskRecords), waitStorage(waitStorage), conversationMessages(conversationMessages),

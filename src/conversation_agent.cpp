@@ -208,7 +208,7 @@ ConversationReplyStatus effectStatus(const Json& actions) {
 }
 }
 
-const char* ConversationStorage::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
+const char* ConversationTurns::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
     if (message.routing.contains("botMessage")) return "Another Bot's message cannot answer a question for the person";
@@ -221,7 +221,7 @@ const char* ConversationStorage::questionAnswerError(const TaskData& task, const
     return nullptr;
 }
 
-std::optional<TaskData> ConversationStorage::wokenTask(const Message& message) const {
+std::optional<TaskData> ConversationTurns::wokenTask(const Message& message) const {
     const auto wake = message.routing.find("sessionWake");
     if (wake == message.routing.end() || !wake->contains("taskId")) return std::nullopt;
     auto task = taskRecords.load(wake->at("taskId").get<Id>());
@@ -266,7 +266,7 @@ Json TurnRunner::applyWokenTaskDecision(const Message& message, const Decision& 
     return {{"ok", true}, {"taskId", task->id}, {"effect", taskStateName(task->state)}};
 }
 
-Json ConversationStorage::taskState(const TaskData& task, const Message& message, bool fullContract) const {
+Json ConversationTurns::taskState(const TaskData& task, const Message& message, bool fullContract) const {
     const auto waiting = waitStorage.currentWait(task.id);
     auto wait = waiting ? waitView(*waiting) : Json(nullptr);
     if (waiting) wait["answerable"] = !questionAnswerError(task, message, waiting);
@@ -317,7 +317,7 @@ Json ConversationStorage::taskState(const TaskData& task, const Message& message
     return view;
 }
 
-TaskData ConversationStorage::ownTask(Id taskId, const Message& message) const {
+TaskData ConversationTurns::ownTask(Id taskId, const Message& message) const {
     auto row = database.query(R"SQL(
 SELECT t.id FROM tasks t LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
@@ -327,7 +327,7 @@ WHERE t.id=? AND t.bot_id=? AND (?='' OR c.scope_key=?)
     throw ToolError("No task with taskId " + std::to_string(taskId));
 }
 
-Json ConversationStorage::resultReference(Id messageId, const Message& message) const {
+Json ConversationTurns::resultReference(Id messageId, const Message& message) const {
     auto row = database.query(R"SQL(
 SELECT t.id,t.state,j.kind,j.data,t.request,coalesce(t.current_revision,0)
 FROM journal j JOIN tasks t ON t.id=j.task_id
@@ -818,8 +818,8 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-void ConversationStorage::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
-                                     const conversation::QuestionAnchor* question) {
+void ConversationTurns::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
+                                   const conversation::QuestionAnchor* question) {
     using enum ConversationReplyRoute;
     const bool pendingReceipt = sessionSendReceipts.persistPending(message.id);
     if (route == session_access || route == access || route == channel_access || route == bot_paused) {
@@ -904,7 +904,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
 }
 
-bool ConversationStorage::authorizeTurn(const Message& message) {
+bool ConversationTurns::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id) || botLifecycle.botPaused(message.bot)) return false;
     if (message.principalSource == PrincipalSource::gitWebhook) {
         if (gitStorage.canReceiveGitWebhook(message.bot, message.routing.at("gitEvent"))) return true;
