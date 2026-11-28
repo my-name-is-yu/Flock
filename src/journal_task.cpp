@@ -1,6 +1,6 @@
 #include "session_stop.hpp"
 #include "journal_storage.hpp"
-#include "channel_storage.hpp"
+#include "channel_delivery_queue.hpp"
 #include "journal_task.hpp"
 #include "journal.hpp"
 #include "outbox_storage.hpp"
@@ -116,7 +116,7 @@ Json encodeJournalDecision(const DecisionEntry& entry) {
 
 Id JournalStorage::journal(Id task, const CompletionEntry& entry) {
     const auto id = database.writeJournal(task, JournalKind::completed, encodeCompletion(entry), {.revisionId = entry.revisionId});
-    channelStorage.queueChannelTaskUpdate(task, id, entry.text);
+    channelDeliveries.taskUpdate(task, id, entry.text);
     return id;
 }
 
@@ -137,7 +137,7 @@ Id JournalStorage::journalCancelRequested(Id task, SessionStop stop) {
 
 Id JournalStorage::journalCancelled(Id task) {
     const auto id = database.writeJournal(task, JournalKind::cancelled, Json::object(), {});
-    channelStorage.queueChannelTaskUpdate(task, id, "The task was cancelled.");
+    channelDeliveries.taskUpdate(task, id, "The task was cancelled.");
     return id;
 }
 }

@@ -194,7 +194,7 @@ ORDER BY p.id DESC
     return result;
 }
 
-void InboxStorage::recordInboxDecision(const Person& actor, const InboxTarget& target, std::string_view decision) {
+void InboxDecisions::record(const Person& actor, const InboxTarget& target, std::string_view decision) {
     secretStorage.redactor(target.botId).requirePublic(actor.id);
     const auto now = unixTime();
     database.exec(R"SQL(
@@ -276,7 +276,7 @@ void InboxStorage::decideInbox(const Person& actor, const InboxTarget& item, std
         policyApprovals.decidePolicyApproval(actor, item, decision);
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
-        policy_storage::fulfillSecret(database, policy, secretStorage, *this, actor, item.botId, item.itemId, textInput("value"));
+        policy_storage::fulfillSecret(database, policy, secretStorage, inboxDecisions, actor, item.botId, item.itemId, textInput("value"));
     } else {
         if (item.itemId != item.waitId) throw RequestChanged{};
         taskOperations.operate(actor, {item.botId, item.taskId, item.waitId, item.targetRevision, item.targetGeneration}, decision,

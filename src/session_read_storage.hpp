@@ -11,11 +11,11 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationMessages;
 
 class Database;
 class SecretStorage;
-class SessionParticipationStorage;
+class SessionParticipationRecords;
 class T3;
 struct Decision;
 struct SessionTarget;
@@ -29,12 +29,11 @@ class ChannelStorage;
 class PolicyApprovals;
 class SessionReadStorage {
 public:
-    SessionReadStorage(Database& database, SecretStorage& secretStorage, const SessionParticipationStorage& sessionParticipationStorage,
-                       Policy& permissions, ConversationStorage& conversationTurns, ChannelStorage& channelStorage,
+    SessionReadStorage(Database& database, SecretStorage& secretStorage, const SessionParticipationRecords& sessionParticipations,
+                       Policy& permissions, ConversationMessages& conversationMessages, ChannelStorage& channelStorage,
                        PolicyApprovals& policyApprovals)
-        : database(database), secretStorage(secretStorage), sessionParticipationStorage(sessionParticipationStorage),
-          permissions(permissions), conversationTurns(conversationTurns), channelStorage(channelStorage), policyApprovals(policyApprovals) {
-    }
+        : database(database), secretStorage(secretStorage), sessionParticipations(sessionParticipations), permissions(permissions),
+          conversationMessages(conversationMessages), channelStorage(channelStorage), policyApprovals(policyApprovals) {}
 
     ToolCallResult sessionReadTool(const conversation::Message&, const Decision&, T3&, std::string_view key);
     void authorizeSessionHistory(const conversation::Message&, Json& steps, T3&);
@@ -48,9 +47,9 @@ private:
 
     Database& database;
     SecretStorage& secretStorage;
-    const SessionParticipationStorage& sessionParticipationStorage;
+    const SessionParticipationRecords& sessionParticipations;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     ChannelStorage& channelStorage;
     PolicyApprovals& policyApprovals;
 };

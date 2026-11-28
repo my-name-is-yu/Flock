@@ -1,4 +1,7 @@
 #include "journal_git.hpp"
+#include "session_participation_records.hpp"
+#include "t3_connected_environments.hpp"
+#include "conversation_messages.hpp"
 #include "conversation_turns.hpp"
 #include "git_storage.hpp"
 #include "conversation_storage.hpp"
@@ -70,19 +73,19 @@ LIMIT 2
     }
     const auto& connectionEnvironment =
         destination.gatewayEnvironmentId.empty() ? destination.environmentId : destination.gatewayEnvironmentId;
-    if (pr.next() || !sessionParticipationStorage.t3EnvironmentConnected(connectionEnvironment) ||
-        sessionParticipationStorage.sessionParticipationStopped(message.bot, destination, message.id))
+    if (pr.next() || !t3EnvironmentConnected(database, connectionEnvironment) ||
+        sessionParticipations.stopped(message.bot, destination, message.id))
         return std::nullopt;
 
     std::string requester;
     std::string requesterBot = message.bot;
     if (task.sourceMessageId) {
-        const auto source = conversationTurns.loadTurnMessage(*task.sourceMessageId);
+        const auto source = conversationMessages.load(*task.sourceMessageId);
         requesterBot = source.bot;
         if (!source.routing.contains("sessionWake") && !source.routing.contains("sessionInvitation")) {
-            const auto actor = conversationTurns.turnActor(source);
+            const auto actor = conversationMessages.actor(source);
             if (permissions.allows(actor, Action::bot_talk, source.bot) &&
-                (source.principalSource != session || sessionParticipationStorage.activeSessionOrigin(source)))
+                (source.principalSource != session || sessionParticipations.activeOrigin(source)))
                 requester = policyApprovals.policyOrigin(source).requester;
         }
     } else if (const auto& requesterId = task.requester) {

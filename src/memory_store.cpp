@@ -1,4 +1,5 @@
 #include "flock/bot_memory.hpp"
+#include "conversation_messages.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_id.hpp"
 #include "conversation_turns.hpp"
@@ -173,8 +174,8 @@ std::optional<SessionContextSection<Version>> sessionExcerpt(Version version, st
 }
 
 MemoryStorage::MemoryStorage(Database& database, const SecretStorage& secretStorage, Policy& permissions,
-                             ConversationStorage& conversationTurns, MemorySeed seed)
-    : database_(database), secretStorage_(secretStorage), permissions(permissions), conversationTurns(conversationTurns),
+                             ConversationMessages& conversationMessages, MemorySeed seed)
+    : database_(database), secretStorage_(secretStorage), permissions(permissions), conversationMessages(conversationMessages),
       seed_(std::move(seed)) {}
 
 BotNotes MemoryStorage::loadNotes(std::string_view bot, const SoulLoader& soul, Seconds now) {
@@ -248,7 +249,7 @@ Json MemoryStorage::memory(std::string_view bot, const Person& actor, std::strin
 Json MemoryStorage::conversationMemory(const conversation::Message& message, std::string_view operation, const Json& args, Seconds now) {
     if ((operation == "write_memory" || operation == "revert_memory_edit") && !canEditFrom(message))
         throw AccessDenied("Memory access denied");
-    const auto actor = conversationTurns.turnActor(message);
+    const auto actor = conversationMessages.actor(message);
     return accessMemory(message.bot, actor, operation, args, now, message.id);
 }
 
@@ -350,20 +351,20 @@ ORDER BY r.id DESC LIMIT 21
                     {"version", result.at("version")},
                     {"replyToMessageId", sourceMessage}};
         if (shared) notice["docId"] = id;
-        database_.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'memory_remembered',?,?)", {now, notice, bot});
+        database_.writeJournal({.bot = bot, .kind = "memory_remembered", .time = now}, notice);
     }
     return result;
 }
 
 bool MemoryStorage::canEditFrom(const conversation::Message& message) {
     if (message.routing.contains("botMessage")) return false;
-    return permissions.allows(conversationTurns.turnActor(message), Action::bot_settings, message.bot);
+    return permissions.allows(conversationMessages.actor(message), Action::bot_settings, message.bot);
 }
 
 bool MemoryStorage::canLearnFrom(const TaskData& task) {
     if (!permissions.allows(task.botId, Action::private_memory_write, task.botId)) return false;
     if (!task.sourceMessageId) return false;
-    const auto message = conversationTurns.loadTurnMessage(*task.sourceMessageId);
+    const auto message = conversationMessages.load(*task.sourceMessageId);
     return message.bot == task.botId && canEditFrom(message);
 }
 

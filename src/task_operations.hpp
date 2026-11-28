@@ -13,7 +13,7 @@ namespace flockv0 {
 class Database;
 class Policy;
 class BotLifecycleStorage;
-class InboxStorage;
+class InboxDecisions;
 class JournalStorage;
 class OutboxStorage;
 class SecretStorage;
@@ -34,10 +34,10 @@ class TaskOperations {
 public:
     TaskOperations(Database& database, BotLifecycleStorage& botLifecycle, const Policy& permissions, JournalStorage& journalStorage,
                    OutboxStorage& outboxStorage, SecretStorage& secretStorage, TaskEvents& taskEvents, TaskRecords& taskRecords,
-                   TaskRouting& taskRouting, WaitStorage& waitStorage, InboxStorage& inboxStorage)
+                   TaskRouting& taskRouting, WaitStorage& waitStorage, InboxDecisions& inboxDecisions)
         : database(database), botLifecycle(botLifecycle), permissions(permissions), journalStorage(journalStorage),
           outboxStorage(outboxStorage), secretStorage(secretStorage), taskEvents(taskEvents), taskRecords(taskRecords),
-          taskRouting(taskRouting), waitStorage(waitStorage), inboxStorage(inboxStorage) {}
+          taskRouting(taskRouting), waitStorage(waitStorage), inboxDecisions(inboxDecisions) {}
 
     void recordTaskBlocker(TaskData&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(TaskData&, Id waitId);
@@ -61,6 +61,6 @@ private:
     TaskRecords& taskRecords;
     TaskRouting& taskRouting;
     WaitStorage& waitStorage;
-    InboxStorage& inboxStorage;
+    InboxDecisions& inboxDecisions;
 };
 }

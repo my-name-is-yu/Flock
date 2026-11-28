@@ -15,13 +15,14 @@ class Policy;
 class Database;
 class BotLifecycleStorage;
 class ConversationStorage;
+class ConversationMessages;
 class ConversationTools;
 class GitStorage;
 class JournalStorage;
 class OutboxStorage;
 class PolicyApprovals;
 class SecretStorage;
-class SessionParticipationStorage;
+class SessionParticipationRecords;
 class SessionReadStorage;
 class TaskRecords;
 class TaskRunReports;
@@ -36,15 +37,16 @@ struct Message;
 class SessionMessageStorage {
 public:
     SessionMessageStorage(Database& database, BotLifecycleStorage& botLifecycle, ConversationStorage& conversationTurns,
-                          ConversationTools& conversationTools, GitStorage& gitStorage, const Policy& permissions,
-                          const std::filesystem::path& path, JournalStorage& journalStorage, OutboxStorage& outboxStorage,
-                          PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
-                          SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
+                          ConversationMessages& conversationMessages, ConversationTools& conversationTools, GitStorage& gitStorage,
+                          const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
+                          OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
+                          SessionParticipationRecords& sessionParticipations, SessionReadStorage& sessionReadStorage,
                           TaskRecords& taskRecords, TaskRunReports& taskRunReports)
-        : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationTools(conversationTools),
-          gitStorage(gitStorage), permissions(permissions), path(path), journalStorage(journalStorage), outboxStorage(outboxStorage),
-          policyApprovals(policyApprovals), secretStorage(secretStorage), sessionParticipationStorage(sessionParticipationStorage),
-          sessionReadStorage(sessionReadStorage), taskRecords(taskRecords), taskRunReports(taskRunReports) {}
+        : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
+          conversationTools(conversationTools), gitStorage(gitStorage), permissions(permissions), path(path),
+          journalStorage(journalStorage), outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
+          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), taskRecords(taskRecords),
+          taskRunReports(taskRunReports) {}
 
     bool persistPendingReceipt(Id message);
     void forgetPendingReceipt(Id message);
@@ -73,6 +75,7 @@ private:
     Database& database;
     BotLifecycleStorage& botLifecycle;
     ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     ConversationTools& conversationTools;
     GitStorage& gitStorage;
     const Policy& permissions;
@@ -81,7 +84,7 @@ private:
     OutboxStorage& outboxStorage;
     PolicyApprovals& policyApprovals;
     SecretStorage& secretStorage;
-    SessionParticipationStorage& sessionParticipationStorage;
+    SessionParticipationRecords& sessionParticipations;
     SessionReadStorage& sessionReadStorage;
     TaskRecords& taskRecords;
     TaskRunReports& taskRunReports;

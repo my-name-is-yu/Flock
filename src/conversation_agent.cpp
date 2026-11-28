@@ -1,4 +1,7 @@
 #include "conversation_call.hpp"
+#include "session_participation_records.hpp"
+#include "channel_delivery_queue.hpp"
+#include "conversation_messages.hpp"
 #include "flock/board_inbox.hpp"
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
@@ -201,44 +204,6 @@ ConversationReplyStatus effectStatus(const Json& actions) {
 }
 }
 
-Message ConversationStorage::loadTurnMessage(Id id) const {
-    auto row = database.query(R"SQL(
-SELECT m.reply_to,m.bot_id,m.text,c.scope_key,m.routing,m.person_id,m.person_root,m.principal_source FROM messages m
-LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
-)SQL",
-                              {id});
-    if (!row.next()) throw Conflict("Conversation message is missing");
-    Message message{id,
-                    row.number(0),
-                    row.string(1),
-                    row.string(2),
-                    row.string(3),
-                    row.json(4),
-                    {row.string(5), row.number(6) != 0},
-                    static_cast<PrincipalSource>(row.number(7)),
-                    std::nullopt};
-    if (!message.replyTo || message.replyTo >= id) return message;
-    auto anchor = database.query(R"SQL(
-SELECT q.id,q.task_id FROM journal target
-LEFT JOIN conversation_turns turn ON turn.reply_id=target.id
-LEFT JOIN messages original ON original.id=turn.message_id
-LEFT JOIN channel_messages source ON source.message_id=original.id
-JOIN journal q ON q.id=CASE
-  WHEN target.kind='waiting' THEN target.id
-  WHEN target.kind='conversation_reply' AND original.bot_id=? AND (?='' OR source.scope_key=?)
-    THEN target.task_question_message_id
-END
-JOIN tasks t ON t.id=q.task_id
-LEFT JOIN channel_tasks c ON c.task_id=t.id
-WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND q.wait_reason='user_question'
-  AND t.bot_id=? AND (?='' OR c.scope_key=?)
-)SQL",
-                                 {message.bot, message.channelScope, message.channelScope, message.replyTo, message.bot,
-                                  message.channelScope, message.channelScope});
-    if (anchor.next()) message.question = conversation::QuestionAnchor{anchor.number(0), anchor.number(1)};
-    return message;
-}
-
 const char* ConversationStorage::questionAnswerError(const TaskData& task, const Message& message, const std::optional<Wait>& wait) const {
     if (task.state != TaskState::waiting || !wait) return "That question is no longer open";
     if (wait->reason() != WaitReason::user_question) return "Only user_question waits can be answered; approvals use their own controls";
@@ -416,7 +381,8 @@ Json ConversationStorage::conversationSteps(const Message& message, int step, st
                 const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
                 const auto document = field(args, "docId");
                 const auto policy = permissions;
-                if (!policy.allows(turnActor(message), action, document) || policy.forbidden(message.bot, action, document)) {
+                if (!policy.allows(conversationMessages.actor(message), action, document) ||
+                    policy.forbidden(message.bot, action, document)) {
                     args = Json::object();
                     result = {{"ok", false}, {"error", "Memory access denied"}};
                 } else {
@@ -661,7 +627,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         }
         if (tool == "compact_conversation" || tool == "expand_context")
             return conversationContextStorage.contextTool(tool, args, message, step);
-        const auto actor = turnActor(message);
+        const auto actor = conversationMessages.actor(message);
         auto result = botSettingsStorage.botSettingsTool(bot, message.id, settings, decision);
         if (result.is_null()) result = automationStorage.automationTool(bot, actor, routing, decision, now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
@@ -752,11 +718,12 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         if (const auto error = questionAnswerError(task, message, wait))
             throw ToolError(error, {{"taskId", task.id}, {"current", taskState(task, message)}});
         const TaskTarget target{bot, task.id, waitId, identifier(args, "revisionId", true, 0), identifier(args, "generation", true, 0)};
-        taskOperations.operate(turnActor(message), target, "answer", {{"text", answer}}, message.id, InboxKind::user_question);
+        taskOperations.operate(conversationMessages.actor(message), target, "answer", {{"text", answer}}, message.id,
+                               InboxKind::user_question);
         return {{"ok", true}, {"effect", "answered"}, {"taskId", task.id}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!permissions.allows(turnActor(message), Action::bot_decide, bot)) throw AccessDenied{};
+        if (!permissions.allows(conversationMessages.actor(message), Action::bot_decide, bot)) throw AccessDenied{};
         auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
@@ -774,7 +741,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         const auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);
-        taskOperations.operate(turnActor(message), TaskTarget::from(task, 0), "cancel", Json::object());
+        taskOperations.operate(conversationMessages.actor(message), TaskTarget::from(task, 0), "cancel", Json::object());
         const auto state = taskRecords.load(task.id).state;
         return {{"ok", true}, {"effect", state == TaskState::cancelled ? "cancelled" : "cancelling"}, {"taskId", task.id}};
     }
@@ -922,39 +889,13 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
                                        .artifacts = artifacts.empty() ? Json() : std::move(artifacts)};
     const auto replyId = journalStorage.journalConversationReply(linked, message.bot, entry);
     if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot))
-        channelStorage.queueChannelReply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
+        channelDeliveries.reply(message.id, replyId, entry.text, entry.suggestions.is_null() ? Json::array() : entry.suggestions);
     database.exec("UPDATE journal SET task_id=? WHERE id=?", {linked ? Json(*linked) : Json(nullptr), message.id});
     modelCalls.releaseModelCall(modelCalls.takeReservedConversationCall(message.id));
     database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
     conversationTools.discardPendingResults(message.id);
     if (pendingReceipt) sessionMessageStorage.forgetPendingReceipt(message.id);
-}
-
-Person ConversationStorage::turnActor(const Message& message) {
-    const auto& admitted = message.admittedActor;
-    switch (message.principalSource) {
-    case PrincipalSource::trusted: return admitted;
-    case PrincipalSource::channel: return {admitted.id, false};
-    case PrincipalSource::gitWebhook: return {};
-    case PrincipalSource::session: {
-        try {
-            return sessionParticipationStorage.sessionActor(admitted.id);
-        } catch (const std::exception&) {
-            return {};
-        }
-    }
-    case PrincipalSource::web: {
-        if (!webIdentity.resolve) return {};
-        try {
-            if (const auto root = webIdentity.resolve(admitted.id)) return {admitted.id, *root};
-        } catch (const std::exception&) {
-            return {};
-        }
-        return {};
-    }
-    }
-    return {};
 }
 
 bool ConversationStorage::authorizeTurn(const Message& message) {
@@ -968,18 +909,18 @@ bool ConversationStorage::authorizeTurn(const Message& message) {
     }
     const auto wake = message.routing.find("sessionWake");
     const bool isWake = wake != message.routing.end();
-    const bool stoppedWake = isWake && sessionParticipationStorage.sessionParticipationStopped(
-                                           message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
+    const bool stoppedWake =
+        isWake && sessionParticipations.stopped(message.bot, {field(*wake, "environmentId"), field(*wake, "threadId")}, message.id);
     const bool usesSessionOrigin =
         message.principalSource == PrincipalSource::session || (isWake && message.routing.contains("sessionOrigin"));
     // A wake can be queued before a stop commits and reach this turn after it commits.
-    if (stoppedWake || (usesSessionOrigin && !sessionParticipationStorage.activeSessionOrigin(message))) {
+    if (stoppedWake || (usesSessionOrigin && !sessionParticipations.activeOrigin(message))) {
         finishTurn(message, "The T3 Session participation has ended.", nullptr, ConversationReplyRoute::session_access);
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelStorage.channelMessageAuthorized(message.id, message.bot)) return true;
-    } else if (permissions.allows(turnActor(message), Action::bot_talk, message.bot))
+    } else if (permissions.allows(conversationMessages.actor(message), Action::bot_talk, message.bot))
         return true;
     if (const auto attempt = modelCalls.takeReservedConversationCall(message.id)) modelCalls.releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
@@ -1000,7 +941,7 @@ void ConversationStorage::runTurn(Id id, Model& model, T3& t3, const SoulLoader&
         if (shutdown.stop_requested() || !isNextTurn(id) ||
             database.query("SELECT 1 FROM conversation_retries WHERE message_id=? AND retry_at>?", {id, clock()}).next())
             return;
-        message = loadTurnMessage(id);
+        message = conversationMessages.load(id);
         transaction.commit();
     }
     const auto refreshSetup = [&] {
@@ -1246,7 +1187,7 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                 if (!followupStatus.empty()) context["event"]["gitFollowupStatus"] = followupStatus;
                 if (peers) {
                     auto bots = Json::array();
-                    const auto actor = turnActor(message);
+                    const auto actor = conversationMessages.actor(message);
                     for (const auto& peer : peers(message.bot)) {
                         if (!permissions.allows(actor, Action::bot_decide, peer.intake.botId)) continue;
                         Json bot{{"botId", peer.intake.botId}, {"name", peer.name}};

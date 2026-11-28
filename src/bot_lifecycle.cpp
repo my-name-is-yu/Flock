@@ -63,7 +63,7 @@ SELECT id FROM messages WHERE bot_id=? AND id IN (
         std::vector<Id> openTurns;
         while (turns.next()) openTurns.push_back(turns.number(0));
         for (const auto id : openTurns)
-            storage.conversationTurns.finishTurn(storage.conversationTurns.loadTurnMessage(id), botPausedMessage, nullptr,
+            storage.conversationTurns.finishTurn(storage.conversationMessages.load(id), botPausedMessage, nullptr,
                                                  ConversationReplyRoute::bot_paused);
         auto tasks = storage.database.query(R"SQL(
 SELECT id FROM tasks WHERE bot_id=? AND state NOT IN ('completed','cancelled','cancelling') ORDER BY id

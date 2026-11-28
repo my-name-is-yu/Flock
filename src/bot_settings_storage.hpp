@@ -9,7 +9,6 @@ class Policy;
 class SecretRequests;
 
 class Database;
-class SessionParticipationStorage;
 class TaskRouting;
 class T3;
 struct Decision;
@@ -20,10 +19,8 @@ struct Message;
 
 class BotSettingsStorage {
 public:
-    BotSettingsStorage(Database& database, Policy& permissions, SecretRequests& secretRequests,
-                       SessionParticipationStorage& sessionParticipationStorage, TaskRouting& taskRouting)
-        : database(database), permissions(permissions), secretRequests(secretRequests),
-          sessionParticipationStorage(sessionParticipationStorage), taskRouting(taskRouting) {}
+    BotSettingsStorage(Database& database, Policy& permissions, SecretRequests& secretRequests, TaskRouting& taskRouting)
+        : database(database), permissions(permissions), secretRequests(secretRequests), taskRouting(taskRouting) {}
 
     Json botSettingsTool(std::string_view bot, Id sourceMessage, const BotTools&, const Decision&);
     // The message is only handed on to discover linked destinations; its Bot and routing are passed beside it so this
@@ -33,7 +30,6 @@ private:
     Database& database;
     Policy& permissions;
     SecretRequests& secretRequests;
-    SessionParticipationStorage& sessionParticipationStorage;
     TaskRouting& taskRouting;
 };
 }

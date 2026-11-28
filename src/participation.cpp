@@ -1,4 +1,5 @@
 #include "store_access.hpp"
+#include "t3_connected_environments.hpp"
 #include "flock/digest.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
@@ -162,8 +163,8 @@ SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE
     std::vector<Id> wakes;
     while (rows.next()) wakes.push_back(rows.number(0));
     for (const auto wake : wakes)
-        storage.conversationTurns.finishTurn(storage.conversationTurns.loadTurnMessage(wake), "The T3 connection was disconnected.",
-                                             nullptr, ConversationReplyRoute::session_access);
+        storage.conversationTurns.finishTurn(storage.conversationMessages.load(wake), "The T3 connection was disconnected.", nullptr,
+                                             ConversationReplyRoute::session_access);
     storage.database.exec(R"SQL(
 UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
  SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
@@ -263,17 +264,9 @@ bool T3Connections::configured() const {
     return port() != 0;
 }
 
-bool SessionParticipationStorage::t3EnvironmentConnected(std::string_view environment) {
+bool t3EnvironmentConnected(const Database& database, std::string_view environment) {
     std::lock_guard lock(database.mutex);
     return database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next();
-}
-
-Person SessionParticipationStorage::sessionActor(std::string_view person) {
-    if (webIdentity.resolve) {
-        if (const auto root = webIdentity.resolve(person)) return {std::string(person), *root};
-    } else if (person == localOwner.id && !permissions.requiresIdentity())
-        return localOwner;
-    return {};
 }
 
 Person SessionParticipation::person(const T3Connection& connection) const {
@@ -289,7 +282,7 @@ AND (?3 IS NULL OR EXISTS(SELECT 1 FROM t3_remote_machines WHERE id=?3 AND perso
                     {connection.id, connection.personId, machine})
              .next())
         throw Conflict("The T3 connection is unavailable");
-    const auto actor = storage.sessionParticipationStorage.sessionActor(connection.personId);
+    const auto actor = storage.conversationMessages.sessionActor(connection.personId);
     if (actor.id.empty()) throw Conflict("The connected person is unavailable");
     return actor;
 }
@@ -310,8 +303,7 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
     };
     const auto fingerprint = sha256Hex(Json::array({bot, text, thread}).dump());
     const auto connected = [&](std::string_view environment) {
-        return storage.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next() &&
-               policy.allows(bot, Action::environment_inspect, environment);
+        return t3EnvironmentConnected(storage.database, environment) && policy.allows(bot, Action::environment_inspect, environment);
     };
     const auto replay = [&]() -> Id {
         auto row = storage.database.query(R"SQL(
@@ -438,7 +430,7 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                 {id, target.environmentId, target.threadId});
         };
         const auto authorize = [&]() -> Sender {
-            const auto actor = conversationTurns.turnActor(message);
+            const auto actor = conversationMessages.actor(message);
             Policy policy = permissions;
             if (!policy.allows(actor, Action::bot_decide, message.bot) || !policy.allows(actor, Action::bot_decide, bot))
                 throw Conflict("Bot access is required");
@@ -455,13 +447,13 @@ bool SessionParticipationStorage::inviteSessionBot(const conversation::Message& 
                             {actor.id, target.environmentId})
                      .next())
                 throw Conflict(unavailable);
-            if (message.routing.contains("sessionOrigin") && !activeSessionOrigin(message)) throw Conflict(stopped);
+            if (message.routing.contains("sessionOrigin") && !sessionParticipations.activeOrigin(message)) throw Conflict(stopped);
 
             auto inviter = participation(message.bot);
             auto depth = message.routing.value("sessionInvitationDepth", Id{0});
             Id inviterId = 0;
             if (inviter.next()) {
-                if (sessionParticipationStopped(message.bot, target, message.id)) throw Conflict(stopped);
+                if (sessionParticipations.stopped(message.bot, target, message.id)) throw Conflict(stopped);
                 if (inviter.string(1) != actor.id) throw Conflict(unavailable);
                 inviterId = inviter.number(0);
             } else {
@@ -475,7 +467,7 @@ WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND o.tool='delegat
                 if (!launch.next()) throw Conflict("Invite a Bot into a Session you participate in or launched");
                 const SessionTarget origin{launch.string(3), launch.string(4)};
                 if (!origin.environmentId.empty() &&
-                    !activeSessionOrigin(launch.string(1), actor.id, origin, target.environmentId, launch.number(0)))
+                    !sessionParticipations.activeOrigin(launch.string(1), actor.id, origin, target.environmentId, launch.number(0)))
                     throw Conflict(unavailable);
                 depth = std::max(depth, launch.number(2));
             }
@@ -600,7 +592,7 @@ SessionStop SessionParticipationStorage::stopSessionParticipation(SessionReadSto
     Policy policy = permissions;
     if (!policy.allows(actor, Action::bot_decide, bot)) throw Conflict("Bot access is required");
     const bool throughConnector = exit == SessionExit::left && actor.adminRoot && message &&
-                                  sessionReadStorage.connectedSessionAccess(conversationTurns.loadTurnMessage(message), target);
+                                  sessionReadStorage.connectedSessionAccess(conversationMessages.load(message), target);
     auto row = database.query(R"SQL(
 SELECT p.id,p.environment_id,p.state,p.stopped_through FROM session_participations p
 JOIN t3_connector c ON c.person_id=p.person_id
@@ -627,9 +619,8 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
 
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";
-    database.exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'session_participation_stop',?,?)",
-                  {policyApprovals.now(), Json{{"participationId", id}, {"state", state}}, bot});
-    const auto cutoff = database.last();
+    const auto cutoff = database.writeJournal({.bot = bot, .kind = "session_participation_stop", .time = policyApprovals.now()},
+                                              {{"participationId", id}, {"state", state}});
     database.exec((stopCascade + R"SQL(
 UPDATE session_participations SET state=?3, stopped_through=?2
 WHERE id IN stopping AND state<>'removed'
@@ -673,7 +664,7 @@ WHERE t.status IN ('paused','policy_waiting') AND (
     std::vector<Id> closedTurns;
     while (turns.next()) closedTurns.push_back(turns.number(0));
     for (const auto turn : closedTurns)
-        conversationTurns.finishTurn(conversationTurns.loadTurnMessage(turn), "The T3 Session participation has ended.", nullptr,
+        conversationTurns.finishTurn(conversationMessages.load(turn), "The T3 Session participation has ended.", nullptr,
                                      ConversationReplyRoute::session_access);
     // Persist each cancellation intent with the stop. Runtime recovers in-flight launches and
     // interrupts their own assigned Runs through the ordinary task cancellation path.
@@ -709,7 +700,7 @@ WHERE t.selected_environment_id=p.environment_id AND t.selected_thread_id=p.thre
                                    {id, cutoff});
     std::vector<Id> unassigned;
     while (selected.next()) {
-        const auto source = conversationTurns.loadTurnMessage(selected.number(1));
+        const auto source = conversationMessages.load(selected.number(1));
         if (source.admittedActor.id == selected.string(2) ||
             sessionReadStorage.connectedSessionAccess(source, {selected.string(3), selected.string(4)}))
             unassigned.push_back(selected.number(0));
@@ -863,8 +854,8 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
             if (!args.is_object() || args.size() != 2) throw Conflict("Invalid leave_session arguments");
             const SessionTarget target{text(args, "environmentId", 256, true), text(args, "threadId", 256, true)};
             if (!validId(target.environmentId, 256) || !validId(target.threadId, 256)) throw Conflict("Invalid leave_session arguments");
-            stop = stopSessionParticipation(sessionReadStorage, conversationTurns.turnActor(message), message.bot, target,
-                                            SessionExit::left, message.id);
+            stop = stopSessionParticipation(sessionReadStorage, conversationMessages.actor(message), message.bot, target, SessionExit::left,
+                                            message.id);
         } catch (const Conflict& error) {
             conversationTools.saveTurnResults(message.id, step, Json::array({toolFailure(error.what())}));
         } catch (const conversation_storage::ToolError& error) {
@@ -880,7 +871,7 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     result["ok"] = true;
     conversationTools.saveTurnResults(message.id, step, Json::array({result}));
     // A Session-origin turn cannot take another model step once its own origin stops.
-    if (message.principalSource == conversation::PrincipalSource::session && !activeSessionOrigin(message) &&
+    if (message.principalSource == conversation::PrincipalSource::session && !sessionParticipations.activeOrigin(message) &&
         conversationTurns.isNextTurn(message.id)) {
         conversationTurns.finishTurn(message, stopped.summary(), nullptr, ConversationReplyRoute::session_left);
         transaction.commit();
@@ -890,14 +881,14 @@ bool SessionParticipationStorage::leaveSession(SessionReadStorage& sessionReadSt
     return true;
 }
 
-bool SessionParticipationStorage::activeSessionOrigin(const conversation::Message& message) const {
+bool SessionParticipationRecords::activeOrigin(const conversation::Message& message) const {
     const auto& origin = message.routing.at("sessionOrigin");
     const SessionTarget target{origin.at("environmentId"), origin.at("threadId")};
-    return activeSessionOrigin(message.bot, message.admittedActor.id, target, target.environmentId, message.id);
+    return activeOrigin(message.bot, message.admittedActor.id, target, target.environmentId, message.id);
 }
 
-bool SessionParticipationStorage::activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                                                      std::string_view destinationEnvironment, Id message) const {
+bool SessionParticipationRecords::activeOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
+                                               std::string_view destinationEnvironment, Id message) const {
     return database
         .query(R"SQL(
 SELECT 1 FROM session_participations p
@@ -911,7 +902,7 @@ WHERE p.bot_id=? AND p.environment_id=? AND p.thread_id=? AND p.person_id=? AND 
         .next();
 }
 
-bool SessionParticipationStorage::sessionParticipationStopped(std::string_view bot, const SessionTarget& target, Id message) const {
+bool SessionParticipationRecords::stopped(std::string_view bot, const SessionTarget& target, Id message) const {
     return database
         .query(R"SQL(
 SELECT 1 FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?

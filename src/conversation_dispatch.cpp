@@ -1,4 +1,5 @@
 #include "flock/bot_access.hpp"
+#include "conversation_messages.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/avatar_style.hpp"
 #include "flock/intake.hpp"
@@ -192,7 +193,7 @@ CallOutcome ConversationStorage::executeMessageBot(const Message& message, int s
             message.principalSource != conversation::PrincipalSource::trusted)
             throw Conflict("Message other Bots from a Flock Web conversation");
         if (bot == message.bot) throw Conflict("A Bot cannot message itself");
-        const auto actor = turnActor(message);
+        const auto actor = conversationMessages.actor(message);
         if (!permissions.allows(actor, Action::bot_decide, message.bot) || !permissions.allows(actor, Action::bot_decide, bot))
             throw Conflict("Bot access is required");
         if (!ctx.peers || std::ranges::none_of(ctx.peers(message.bot), [&](const PeerBot& peer) { return peer.intake.botId == bot; }))
@@ -242,7 +243,7 @@ CallOutcome ConversationStorage::executeBotSetup(const Message& message, int ste
             result = std::move(*applied);
         } else {
             botSetup.validate(message.bot, decision.args);
-            if (!permissions.allows(turnActor(message), Action::bot_settings, message.bot))
+            if (!permissions.allows(conversationMessages.actor(message), Action::bot_settings, message.bot))
                 throw Conflict("You cannot change this Bot’s settings");
             const auto gate = policyApprovals.approveAction(policyApprovals.policyOrigin(message), {Action::bot_settings, message.bot}, key,
                                                             decision.args, ctx.clock(), false);
@@ -279,7 +280,7 @@ CallOutcome ConversationStorage::executeConversationBotChange(const Message& mes
             const auto operation = toolText(args, "operation", 32);
             const auto target = toolText(args, "targetBotId", 128);
             const auto name = toolText(args, "name", 128);
-            const auto actor = turnActor(message);
+            const auto actor = conversationMessages.actor(message);
             if (operation != "create_bot" || !validBotId(target) || !permissions.allows(actor, Action::bot_create, target))
                 throw ToolError("Bot change denied by policy");
             auto avatar = requestedAvatar(args);

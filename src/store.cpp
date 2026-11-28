@@ -118,7 +118,7 @@ RunRef runRef(const Json& data) {
 
 Store::Impl::Impl(Store& store, std::filesystem::path file, StoreOptions options)
     : path(std::move(file)), permissions(store), botAccess(store), secretRequests(store),
-      memoryStorage(database, secretStorage, permissions, conversationTurns, std::move(options.memorySeed)),
+      memoryStorage(database, secretStorage, permissions, conversationMessages, std::move(options.memorySeed)),
       automationStorage(database, secretStorage, botLifecycle, permissions, taskOperations),
       botSetup(store, database, secretStorage, std::move(options.saveBotSetup), std::move(options.botSetupCatalog)) {
     database.open(path);
@@ -201,7 +201,9 @@ TaskControl::TaskControl(Store& store) : database_(Database::of(store)), operati
 
 TaskHistory::TaskHistory(Store& store) : database_(Database::of(store)), records_(StoreAccess::get(store).taskRecords) {}
 
-Channels::Channels(Store& store) : channels_(StoreAccess::get(store).channelStorage) {}
+Channels::Channels(Store& store)
+    : database_(Database::of(store)), channels_(StoreAccess::get(store).channelStorage), turns_(StoreAccess::get(store).conversationTurns) {
+}
 
 LocalMachines::LocalMachines(Store& store) : machines_(StoreAccess::get(store).localMachineStorage) {}
 
@@ -429,7 +431,7 @@ void TaskOperations::operate(const Person& actor, const TaskTarget& target, std:
     if (operation == "answer" && task.question) task.question->target = questionTarget(task);
     task.state = TaskState::deciding;
     taskRecords.save(task);
-    if (kind) inboxStorage.recordInboxDecision(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
+    if (kind) inboxDecisions.record(actor, {bot, *kind, waitId, waitId, id, revision, generation}, operation);
 }
 
 namespace {

@@ -1,4 +1,5 @@
 #include "conversation_turns.hpp"
+#include "conversation_messages.hpp"
 #include "session_dispatch_lock.hpp"
 #include "web_identity_state.hpp"
 #include "journal_storage.hpp"
@@ -6,6 +7,7 @@
 #include "flock/policy.hpp"
 #include "flock/channels.hpp"
 #include "database.hpp"
+#include "channel_delivery_queue.hpp"
 #include "channel_storage.hpp"
 #include "conversation_storage.hpp"
 #include "journal_conversation.hpp"
@@ -201,8 +203,7 @@ bool ChannelStorage::permitsChannel(std::string_view bot, const ChannelOrigin& o
             !permissions.forbidden(bot, operation == "read" ? Action::channel_read : Action::channel_post, channelPolicyTarget(origin)));
 }
 
-Json ChannelStorage::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event,
-                                    const std::function<Intake(std::string_view, std::string_view)>& routing) {
+AdmittedChannelMessage ChannelStorage::admitChannelMessage(ChannelKind kind, std::string_view credential, const Json& event) {
     std::lock_guard lock(database.mutex);
     const auto found = connectors.find(kind);
     if (found == connectors.end()) throw ChannelAccessDenied("Channel is not connected");
@@ -247,9 +248,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     }
     auto text = field(event, "text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return conversationTurns.receive(
-        {sender->personId, false}, sender->botId, origin.key(), text, replyTo, conversation::PrincipalSource::channel, &message,
-        [&] { return routing(sender->botId, text); }, Json::array());
+    return {sender->botId, replyTo, std::move(text), std::move(message)};
 }
 
 void ChannelStorage::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
@@ -405,7 +404,7 @@ WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','acce
     return ChannelResource{row.string(0), "text/html; charset=utf-8", row.string(1)};
 }
 
-void ChannelStorage::queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions) {
+void ChannelDeliveryQueue::reply(Id source, Id reply, std::string_view text, const Json& suggestions) {
     database.exec(R"SQL(
 INSERT INTO channel_deliveries(id,source_id,reply_id,operation,payload)
 SELECT ?,c.message_id,?,'reply',? FROM channel_messages c JOIN messages m ON m.id=c.message_id
@@ -414,12 +413,12 @@ ON CONFLICT(reply_id) DO NOTHING)SQL",
                   {"reply-" + std::to_string(reply) + "-" + actionId(), reply, Json{{"text", text}, {"suggestions", suggestions}}, source});
 }
 
-void ChannelStorage::queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
+void ChannelDeliveryQueue::taskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions) {
     if (text.empty()) return;
     auto source = database.query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?", {task});
     if (!source.next()) return;
     const auto scrub = permissions.secretRedactor(source.string(1));
-    queueChannelReply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
+    reply(source.number(0), entry, scrub.text(bounded(text, 8000)), scrub.payload(Json(suggestions)));
 }
 
 void ChannelStorage::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
@@ -447,7 +446,7 @@ void ChannelStorage::channelNotice(Id source, std::string_view bot, std::string_
     std::string notice(reason);
     if (supportsReplies) notice += followUp;
     const auto reply = journalStorage.journalConversationReply(std::nullopt, bot, {.replyToMessageId = source, .text = notice});
-    if (supportsReplies) queueChannelReply(source, reply, notice, Json::array());
+    if (supportsReplies) channelDeliveries.reply(source, reply, notice, Json::array());
 }
 
 std::optional<Resource> ChannelStorage::channelToolPolicy(Id message, std::string_view tool) {
@@ -674,7 +673,7 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                 const auto target = channelPolicyTarget(origin);
                 const auto used = database.query("SELECT 1 FROM policy_approvals WHERE operation=? AND status='used'", {approval}).next();
                 if (!used) {
-                    const auto requester = policyApprovals.policyOrigin(conversationTurns.loadTurnMessage(source));
+                    const auto requester = policyApprovals.policyOrigin(conversationMessages.load(source));
                     const auto gate =
                         policyApprovals.approveAction({bot, requester.scope, requester.requester, requester.anchor, 0, 0, 0, 0, true},
                                                       {Action::channel_post, target, true}, approval, payload, policyApprovals.now());
@@ -738,7 +737,12 @@ void Channels::artifactBaseUrl(std::string url) {
 }
 
 Json Channels::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event, const IntakeResolver& routing) {
-    return channels_.receiveChannel(kind, credential, event, routing);
+    std::lock_guard lock(database_.mutex);
+    const auto admitted = channels_.admitChannelMessage(kind, credential, event);
+    const auto& message = admitted.message;
+    return turns_.receive(
+        {message.personId, false}, admitted.botId, message.origin.key(), admitted.text, admitted.replyTo,
+        conversation::PrincipalSource::channel, &message, [&] { return routing(admitted.botId, admitted.text); }, Json::array());
 }
 
 std::optional<ChannelResource> Channels::attachment(const Person& person, Id id) const {

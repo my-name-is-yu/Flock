@@ -8,7 +8,7 @@
 
 namespace flockv0 {
 class Database;
-class InboxStorage;
+class InboxDecisions;
 class Policy;
 class SecretStorage;
 struct Person;
@@ -16,7 +16,7 @@ struct Person;
 namespace policy_storage {
 void audit(Database&, const Person&, std::string_view bot, std::string_view action, const Json& details);
 void writeRule(Database&, const SecretStorage&, const Person&, RuleKind, Action, std::string_view target, bool add, bool exact);
-void fulfillSecret(Database&, const Policy&, SecretStorage&, InboxStorage&, const Person&, std::string_view bot, Id request,
+void fulfillSecret(Database&, const Policy&, SecretStorage&, InboxDecisions&, const Person&, std::string_view bot, Id request,
                    std::string_view value);
 }
 }

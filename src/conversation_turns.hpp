@@ -27,6 +27,8 @@ class BotSettingsStorage;
 class BotSetupStorage;
 class ChannelStorage;
 class ConversationContextStorage;
+class ChannelDeliveryQueue;
+class ConversationMessages;
 class ConversationTools;
 class GitStorage;
 class JournalStorage;
@@ -36,6 +38,7 @@ class ModelCalls;
 class PolicyApprovals;
 class SecretStorage;
 class SessionMessageStorage;
+class SessionParticipationRecords;
 class SessionParticipationStorage;
 class SessionReadStorage;
 class TaskOperations;
@@ -82,7 +85,8 @@ public:
                         PolicyApprovals& policyApprovals, SecretStorage& secretStorage, SessionMessageStorage& sessionMessageStorage,
                         SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
                         TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
-                        WebIdentityState& webIdentity)
+                        WebIdentityState& webIdentity, ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
+                        SessionParticipationRecords& sessionParticipations)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
@@ -90,7 +94,8 @@ public:
           modelCalls(modelCalls), policyApprovals(policyApprovals), secretStorage(secretStorage),
           sessionMessageStorage(sessionMessageStorage), sessionParticipationStorage(sessionParticipationStorage),
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
-          waitStorage(waitStorage), webIdentity(webIdentity) {}
+          waitStorage(waitStorage), webIdentity(webIdentity), conversationMessages(conversationMessages),
+          channelDeliveries(channelDeliveries), sessionParticipations(sessionParticipations) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -111,8 +116,6 @@ public:
                                                    const TaskDestinations& linked, const BotTools&);
     bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
-    Person turnActor(const conversation::Message&);
-    conversation::Message loadTurnMessage(Id messageId) const;
     Json taskState(const TaskData& task, const conversation::Message&, bool fullContract = false) const;
     // The task this wake reports on, while it waits for the conversation to decide what happens next.
     std::optional<TaskData> wokenTask(const conversation::Message&) const;
@@ -176,5 +179,8 @@ private:
     TaskRouting& taskRouting;
     WaitStorage& waitStorage;
     WebIdentityState& webIdentity;
+    ConversationMessages& conversationMessages;
+    ChannelDeliveryQueue& channelDeliveries;
+    SessionParticipationRecords& sessionParticipations;
 };
 }

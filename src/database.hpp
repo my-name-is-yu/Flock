@@ -106,6 +106,14 @@ public:
     std::pair<Id, Id> changeStamp() const;
     Id last() const;
     Id writeJournal(Id task, std::string_view kind, const Json&);
+    struct BotJournalEntry {
+        std::string_view bot, kind;
+        Seconds time;
+        std::optional<Id> task = {};
+        std::optional<std::string_view> operationId = {};
+    };
+    // An entry in a Bot's conversation that does not need a task.
+    Id writeJournal(const BotJournalEntry&, const Json&);
     Id writeJournal(std::optional<Id>, JournalKind, const Json&, const JournalKeys&, std::optional<std::string_view> conversationBot = {});
 
     sqlite3* db = nullptr;

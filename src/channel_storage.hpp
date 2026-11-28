@@ -16,8 +16,9 @@
 #include <vector>
 
 namespace flockv0 {
-class ConversationStorage;
+class ConversationMessages;
 
+class ChannelDeliveryQueue;
 class Database;
 class JournalStorage;
 class Policy;
@@ -27,17 +28,26 @@ struct Person;
 struct Resource;
 struct WebIdentityState;
 
+struct AdmittedChannelMessage {
+    std::string botId;
+    Id replyTo = 0;
+    std::string text;
+    VerifiedChannelMessage message;
+};
+
 class PolicyApprovals;
 class ChannelStorage {
 public:
     ChannelStorage(Database& database, const std::filesystem::path& path, const Policy& permissions, const WebIdentityState& webIdentity,
-                   JournalStorage& journalStorage, ConversationStorage& conversationTurns, PolicyApprovals& policyApprovals)
+                   JournalStorage& journalStorage, ChannelDeliveryQueue& channelDeliveries, ConversationMessages& conversationMessages,
+                   PolicyApprovals& policyApprovals)
         : database(database), path(path), permissions(permissions), webIdentity(webIdentity), journalStorage(journalStorage),
-          conversationTurns(conversationTurns), policyApprovals(policyApprovals) {}
+          channelDeliveries(channelDeliveries), conversationMessages(conversationMessages), policyApprovals(policyApprovals) {}
 
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
-    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
+    // Checks that the bridge and the sender may reach the Bot, and decodes what they sent.
+    AdmittedChannelMessage admitChannelMessage(ChannelKind, std::string_view credential, const Json& event);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     bool hasConnectors() const;
@@ -47,8 +57,6 @@ public:
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelApprovalNotice(Id source);
     std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
-    void queueChannelReply(Id source, Id reply, std::string_view text, const Json& suggestions);
-    void queueChannelTaskUpdate(Id task, Id entry, std::string_view text, std::span<const std::string> suggestions = {});
     bool channelDeliveryDue() const;
     void deliverChannels(std::stop_token = {});
     void dropPausedBotDeliveries(std::string_view bot);
@@ -65,7 +73,8 @@ private:
     const Policy& permissions;
     const WebIdentityState& webIdentity;
     JournalStorage& journalStorage;
-    ConversationStorage& conversationTurns;
+    ChannelDeliveryQueue& channelDeliveries;
+    ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;
     std::map<ChannelKind, ChannelConnector> connectors;
     std::string artifactOrigin;

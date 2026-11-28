@@ -22,11 +22,61 @@ SINGLE_OWNERS = (
         "include/flock/environment.hpp",
         "name environment variables in flock/environment.hpp",
     ),
+    (re.compile(r"\bINTO journal\b"), "src/database.cpp", "write journal entries with Database::writeJournal"),
     (re.compile(r"\bvoid check\(bool\b"), "tests/support.hpp", "use check from tests/support.hpp"),
 )
 SCRIPT_OWNERS = (
     (re.compile(r"\bfunction (node|element)\(tag\b"), "web/assets/dom.js", "create elements with node from dom.js"),
 )
+
+# Components wired in Store::Impl may refer to each other in a cycle only inside these groups.
+STORAGE_CYCLES = (
+    {"conversationTools", "conversationTurns", "sessionMessageStorage", "sessionParticipationStorage"},
+    {"channelStorage", "policyApprovals"},
+)
+STORAGE_MEMBER = re.compile(r"^\s+\w+\s+(\w+)\{([^;]*)\};", re.MULTILINE)
+
+
+def storage_cycles(text):
+    wiring = {name: re.findall(r"\w+", arguments) for name, arguments in STORAGE_MEMBER.findall(text)}
+    graph = {name: {argument for argument in arguments if argument in wiring} for name, arguments in wiring.items()}
+
+    def reaches(start):
+        seen, pending = set(), [start]
+        while pending:
+            for target in graph[pending.pop()]:
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
+        return seen
+
+    reach = {name: reaches(name) for name in graph}
+    groups = []
+    for name in graph:
+        group = {other for other in reach[name] if name in reach[other]}
+        if group and group not in groups:
+            groups.append(group)
+    return groups
+
+
+def storage_violations(root):
+    storage = root / "src" / "storage.hpp"
+    if not storage.is_file():
+        return []
+    found = storage_cycles(storage.read_text(errors="surrogateescape"))
+    problems = [
+        f"src/storage.hpp: {', '.join(sorted(group))} refer to each other in a cycle; "
+        "depend on a component that only reads records instead"
+        for group in found
+        if not any(group <= allowed for allowed in STORAGE_CYCLES)
+    ]
+    problems += [
+        f"src/storage.hpp: the recorded cycle {', '.join(sorted(allowed))} is smaller now; update STORAGE_CYCLES"
+        for allowed in STORAGE_CYCLES
+        if allowed not in found
+    ]
+    return problems
+
 
 
 def is_test(path):
@@ -47,7 +97,7 @@ def layer_of(root, name, includer):
 
 def violations(root):
     root = root.resolve()
-    found = []
+    found = storage_violations(root)
     for path in sorted((root / "web" / "assets").glob("*.*js")):
         relative = path.relative_to(root)
         text = path.read_text(errors="surrogateescape")

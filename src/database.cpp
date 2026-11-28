@@ -211,6 +211,12 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     return last();
 }
 
+Id Database::writeJournal(const BotJournalEntry& entry, const Json& data) {
+    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id,operation_id) VALUES(?,?,?,?,?,?)",
+         {sqlValue(entry.task), entry.time, entry.kind, data, entry.bot, sqlValue(entry.operationId)});
+    return last();
+}
+
 Id Database::writeJournal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
     return last();

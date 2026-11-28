@@ -1,4 +1,5 @@
 #include "flock/secrets.hpp"
+#include "conversation_messages.hpp"
 #include "flock/policy.hpp"
 #include "secret_storage.hpp"
 #include "conversation_tools.hpp"
@@ -266,8 +267,8 @@ Json ConversationTools::executeBotTool(const ToolContext& ctx, const Decision& c
     const auto& args = call.args;
     {
         std::lock_guard lock(database.mutex);
-        const auto message = conversationTurns.loadTurnMessage(ctx.messageId);
-        if (!message.channelScope.empty() || !permissions.allows(conversationTurns.turnActor(message), Action::bot_decide, ctx.bot))
+        const auto message = conversationMessages.load(ctx.messageId);
+        if (!message.channelScope.empty() || !permissions.allows(conversationMessages.actor(message), Action::bot_decide, ctx.bot))
             throw AccessDenied{};
     }
     const auto resource = authorizedBotToolScope(ctx.bot, call);

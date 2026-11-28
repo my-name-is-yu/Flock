@@ -1,5 +1,5 @@
 #include "database.hpp"
-#include "channel_storage.hpp"
+#include "channel_delivery_queue.hpp"
 #include "journal_storage.hpp"
 #include "journal.hpp"
 #include "outbox_storage.hpp"
@@ -154,7 +154,7 @@ Id JournalStorage::journal(Id task, const Wait& wait) {
     data["reason"] = waitReasonName(reason);
     data["id"] = wait.id;
     const auto id = database.writeJournal(task, JournalKind::waiting, data, {.waitId = wait.id, .waitReason = reason});
-    if (reason == WaitReason::user_question) channelStorage.queueChannelTaskUpdate(task, id, wait.text, wait.choices());
+    if (reason == WaitReason::user_question) channelDeliveries.taskUpdate(task, id, wait.text, wait.choices());
     return id;
 }
 

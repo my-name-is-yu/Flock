@@ -15,7 +15,7 @@
 
 namespace flockv0 {
 class Policy;
-class ConversationStorage;
+class ConversationMessages;
 
 class BotLifecycleStorage;
 class Database;
@@ -36,16 +36,16 @@ struct Message;
 }
 
 class PolicyApprovals;
-class SessionParticipationStorage;
+class SessionParticipationRecords;
 class GitStorage {
 public:
     GitStorage(Database& database, SecretStorage& secretStorage, TaskRecords& taskRecords, JournalStorage& journalStorage,
-               const WebIdentityState& webIdentity, Policy& permissions, ConversationStorage& conversationTurns,
+               const WebIdentityState& webIdentity, Policy& permissions, ConversationMessages& conversationMessages,
                const BotLifecycleStorage& botLifecycle, PolicyApprovals& policyApprovals,
-               SessionParticipationStorage& sessionParticipationStorage)
+               SessionParticipationRecords& sessionParticipations)
         : database(database), secretStorage(secretStorage), taskRecords(taskRecords), journalStorage(journalStorage),
-          webIdentity(webIdentity), permissions(permissions), conversationTurns(conversationTurns), policyApprovals(policyApprovals),
-          sessionParticipationStorage(sessionParticipationStorage), botLifecycle(botLifecycle) {}
+          webIdentity(webIdentity), permissions(permissions), conversationMessages(conversationMessages), policyApprovals(policyApprovals),
+          sessionParticipations(sessionParticipations), botLifecycle(botLifecycle) {}
 
     Json gitTool(GitHost&, std::string_view bot, std::string_view environment, std::string_view project, const Decision&,
                  std::string_view invocation, Id turn);
@@ -93,9 +93,9 @@ private:
     JournalStorage& journalStorage;
     const WebIdentityState& webIdentity;
     Policy& permissions;
-    ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     PolicyApprovals& policyApprovals;
-    SessionParticipationStorage& sessionParticipationStorage;
+    SessionParticipationRecords& sessionParticipations;
     const BotLifecycleStorage& botLifecycle;
     std::optional<Id> gitWebhooksDrainedAt;
     std::multiset<GitPrKey> gitPrMutationsInFlight, gitFeedbackMutationsInFlight;

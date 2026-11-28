@@ -1,4 +1,5 @@
 #include "flock/secret_requests.hpp"
+#include "t3_connected_environments.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/policy.hpp"
 #include "task_routing.hpp"
@@ -69,7 +70,7 @@ Json BotSettingsStorage::readiness(const conversation::Message& message, std::st
     command.instruction = "Check environment readiness";
     try {
         if (command.projectId.empty()) {
-            if (!policy.allows(bot, Action::environment_inspect, id) || !sessionParticipationStorage.t3EnvironmentConnected(id))
+            if (!policy.allows(bot, Action::environment_inspect, id) || !t3EnvironmentConnected(database, id))
                 return failure("Check the T3 connection and environment permissions");
             if (t3.projects(id).empty()) return failure("Add or unarchive a project in the T3 environment");
             return {{"ready", true}};

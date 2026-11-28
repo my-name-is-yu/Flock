@@ -12,6 +12,8 @@
 namespace flockv0 {
 class Policy;
 class ConversationStorage;
+class SessionParticipationRecords;
+class ConversationMessages;
 class ConversationTools;
 class SessionMessageStorage;
 
@@ -37,24 +39,19 @@ class SessionParticipationStorage {
 public:
     SessionParticipationStorage(Database& database, const std::filesystem::path& path, SecretStorage& secretStorage,
                                 TaskRecords& taskRecords, const WebIdentityState& webIdentity, Policy& permissions,
-                                ConversationStorage& conversationTurns, ConversationTools& conversationTools,
-                                SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
-                                TaskOperations& taskOperations, PolicyApprovals& policyApprovals)
+                                ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
+                                ConversationTools& conversationTools, SessionMessageStorage& sessionMessageStorage,
+                                BotLifecycleStorage& botLifecycle, TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
+                                SessionParticipationRecords& sessionParticipations)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
-          permissions(permissions), conversationTurns(conversationTurns), conversationTools(conversationTools),
-          sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle), taskOperations(taskOperations),
-          policyApprovals(policyApprovals) {}
+          permissions(permissions), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
+          conversationTools(conversationTools), sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle),
+          taskOperations(taskOperations), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations) {}
 
-    Person sessionActor(std::string_view person);
-    bool activeSessionOrigin(const conversation::Message&) const;
-    bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
-                             std::string_view destinationEnvironment, Id message) const;
-    bool sessionParticipationStopped(std::string_view bot, const SessionTarget&, Id message) const;
     SessionStop stopSessionParticipation(SessionReadStorage&, const Person&, std::string_view bot, const SessionTarget&, SessionExit,
                                          Id message = 0);
     void stopPausedBotParticipation(std::string_view bot);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
-    bool t3EnvironmentConnected(std::string_view environment);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, const PeerResolver&,
                           std::stop_token);
     bool leaveSession(SessionReadStorage&, const conversation::Message&, int, const Decision&, T3&, std::stop_token);
@@ -68,11 +65,13 @@ private:
     const WebIdentityState& webIdentity;
     Policy& permissions;
     ConversationStorage& conversationTurns;
+    ConversationMessages& conversationMessages;
     ConversationTools& conversationTools;
     SessionMessageStorage& sessionMessageStorage;
     BotLifecycleStorage& botLifecycle;
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;
+    SessionParticipationRecords& sessionParticipations;
     std::mutex sessionQueueCancellationMutex;
 };
 }
