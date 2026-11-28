@@ -84,6 +84,7 @@ async function exerciseComposerDrop() {
   }
   await waitFor(() => byId('composer') && !byId('composer-container').hidden, 'Composer did not appear');
   check(byId('screenshot-input').accept === '', 'File input should accept general files');
+  check(byId('screenshot-previews').getAttribute('aria-label') === 'Attached files', 'Attachment previews should be named for all files');
   const canvas = new OffscreenCanvas(8, 8);
   canvas.getContext('2d').fillRect(0, 0, 8, 8);
   const blob = await canvas.convertToBlob({ type: 'image/webp' });
