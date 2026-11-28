@@ -68,7 +68,6 @@ struct Url {
 Url checkedUrl(const std::string& value);
 HttpResponse http(const std::string& url, std::string_view method, const Headers& headers = {}, const std::string& body = {},
                   long timeoutMs = 6000);
-std::string encode(std::string_view value);
 std::string decode(std::string_view value);
 std::string trim(std::string_view value);
 std::string str(const Json& object, std::string_view name);

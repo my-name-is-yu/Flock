@@ -1,6 +1,5 @@
 #include "channel_routes.hpp"
-#include "http_payload.hpp"
-#include "settings_routes.hpp"
+#include "http.hpp"
 #include "flock/local_machines.hpp"
 #include "flock/channels.hpp"
 #include "flock/json.hpp"
@@ -17,11 +16,6 @@
 
 namespace flockv0::web {
 namespace {
-void reply(httplib::Response& res, int status, const Json& body) {
-    res.status = status;
-    res.set_content(body.dump(-1, ' ', false, Json::error_handler_t::replace), "application/json");
-}
-
 Id connectionId(const Json& body) {
     const auto& id = body.at("id");
     if (!id.is_number_integer() || id.get<Id>() <= 0) throw Conflict("Invalid connection ID");
@@ -41,24 +35,24 @@ bool artifactPreview(std::string_view path) {
 
 void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
     server.Post(R"(/api/channels/(slack|imessage)/events)", [&](const auto& req, auto& res) {
-        if (req.body.size() > maxUploadPayload) return reply(res, 413, {{"error", "payload_too_large"}});
+        if (req.body.size() > maxUploadPayload) return error(res, 413, "payload_too_large");
         const auto kind = req.matches[1].str() == "slack" ? ChannelKind::slack : ChannelKind::imessage;
-        if (req.get_header_value_count("Authorization") != 1) return reply(res, 401, {{"error", "channel_identity_required"}});
+        if (req.get_header_value_count("Authorization") != 1) return error(res, 401, "channel_identity_required");
         try {
             const auto event = Json::parse(req.body);
-            if (!event.is_object()) return reply(res, 400, {{"error", "invalid_event"}});
+            if (!event.is_object()) return error(res, 400, "invalid_event");
             reply(res, 201, Channels(store).receiveChannel(kind, req.get_header_value("Authorization"), event, callbacks.intake));
         } catch (const ChannelAccessDenied&) {
-            reply(res, 403, {{"error", "channel_access_denied"}});
+            error(res, 403, "channel_access_denied");
         } catch (const Json::exception&) {
-            reply(res, 400, {{"error", "invalid_event"}});
-        } catch (const Conflict& error) {
-            reply(res, 409, {{"error", error.what()}});
+            error(res, 400, "invalid_event");
+        } catch (const Conflict& failure) {
+            error(res, 409, failure.what());
         }
     });
     server.Get(R"(/api/artifacts/(flock-[0-9a-f]{32}))", [&](const auto& req, auto& res) {
         const auto artifact = Channels(store).artifact(req.matches[1].str());
-        if (!artifact) return reply(res, 404, {{"error", "artifact_not_found"}});
+        if (!artifact) return error(res, 404, "artifact_not_found");
         res.headers.erase("Content-Security-Policy");
         res.set_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
                                                   "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
@@ -70,7 +64,7 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         Id id = 0;
         const auto parsed = std::from_chars(value.data(), value.data() + value.size(), id);
         const auto attachment = parsed.ec == std::errc{} ? Channels(store).attachment(person(callbacks, req), id) : std::nullopt;
-        if (!attachment) return reply(res, 404, {{"error", "attachment_not_found"}});
+        if (!attachment) return error(res, 404, "attachment_not_found");
         if (attachment->mimeType == "text/plain") res.set_header("Content-Disposition", "attachment");
         res.set_content(attachment->bytes, attachment->mimeType);
     });
@@ -79,8 +73,8 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
     server.Post("/api/channels/local-operations", [&](const auto& req, auto& res) {
         if (!callbacks.authenticateSessionBridge || req.get_header_value_count("Authorization") != 1 ||
             !callbacks.authenticateSessionBridge(req.get_header_value("Authorization")))
-            return reply(res, 401, {{"error", "session_bridge_identity_required"}});
-        if (req.body.size() > 8192) return reply(res, 413, {{"error", "payload_too_large"}});
+            return error(res, 401, "session_bridge_identity_required");
+        if (req.body.size() > 8192) return error(res, 413, "payload_too_large");
         try {
             const auto body = Json::parse(req.body);
             const RunRef run{body.at("threadId"), body.at("runId"), {}, {}};
@@ -89,15 +83,15 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
                       body.at("environmentId").template get<std::string>(), run, body.at("machineId").template get<std::string>(),
                       body.at("operation").template get<std::string>(), body.at("path").template get<std::string>()));
         } catch (const ChannelAccessDenied&) {
-            reply(res, 403, {{"error", "session_access_denied"}});
+            error(res, 403, "session_access_denied");
         } catch (const Json::exception&) {
-            reply(res, 400, {{"error", "invalid_input"}});
+            error(res, 400, "invalid_input");
         } catch (const Conflict& e) {
-            reply(res, 409, {{"error", e.what()}});
+            error(res, 409, e.what());
         }
     });
     server.Post(R"(/api/channels/local-connections/(decide|disconnect))", [&](const auto& req, auto& res) {
-        if (req.body.size() > 1024) return reply(res, 413, {{"error", "payload_too_large"}});
+        if (req.body.size() > 1024) return error(res, 413, "payload_too_large");
         try {
             const auto body = Json::parse(req.body);
             const auto actor = person(callbacks, req);
@@ -107,11 +101,11 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
                 LocalMachines(store).disconnectLocalConnection(actor, connectionId(body));
             reply(res, 200, {{"ok", true}});
         } catch (const ChannelAccessDenied&) {
-            reply(res, 403, {{"error", "access_denied"}});
+            error(res, 403, "access_denied");
         } catch (const Json::exception&) {
-            reply(res, 400, {{"error", "invalid_input"}});
-        } catch (const Conflict& error) {
-            reply(res, 409, {{"error", error.what()}});
+            error(res, 400, "invalid_input");
+        } catch (const Conflict& failure) {
+            error(res, 409, failure.what());
         }
     });
 }

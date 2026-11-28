@@ -5,7 +5,6 @@
 #include "flock/task_list.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
-#include "flock/decision_errors.hpp"
 #include "flock/local_machines.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"

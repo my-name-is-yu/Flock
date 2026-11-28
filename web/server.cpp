@@ -16,7 +16,7 @@
 #include "flock/bot_setup.hpp"
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
-#include "http_payload.hpp"
+#include "http.hpp"
 #include "views.hpp"
 #include "settings_routes.hpp"
 #include "board_inbox_routes.hpp"
@@ -63,6 +63,8 @@
 namespace flockv0 {
 namespace {
 using web::ChangeFeed;
+using web::error;
+using web::reply;
 using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
@@ -75,15 +77,6 @@ std::size_t requestPayloadLimit(std::string_view path) {
     if (path == "/api/messages") return maxMessagePayloadBytes;
     if (path == "/api/bots" || path == "/api/bots/profile") return web::maxUploadPayload;
     return web::maxStandardPayload;
-}
-
-void json(Response& res, int status, const Json& body) {
-    res.status = status;
-    res.set_content(body.dump(-1, ' ', false, Json::error_handler_t::replace), "application/json; charset=utf-8");
-}
-
-void error(Response& res, int status, std::string_view code) {
-    json(res, status, {{"error", code}});
 }
 
 bool acceptsMissingPage(const Request& req) {
@@ -298,7 +291,7 @@ public:
         server_.Get("/api/bots", [this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_, req);
             setViewer(res, callbacks_, actor);
-            json(res, 200, botList(actor));
+            reply(res, 200, botList(actor));
         });
         server_.Get("/api/events", [this](const Request& req, Response& res) { changes(req, res); });
         server_.Post("/api/notifications", [this](const Request& req, Response& res) {
@@ -318,7 +311,7 @@ public:
                     }
                 }
                 setViewer(res, callbacks_, actor);
-                json(res, 200, notificationPage(actor, after, scope));
+                reply(res, 200, notificationPage(actor, after, scope));
             } catch (const InputError& e) {
                 error(res, 400, e.what());
             }
@@ -344,7 +337,7 @@ public:
                 try {
                     const auto before = queryId(req, "before", true);
                     if (req.path == "/api/compactions")
-                        return json(res, 200, Policy{store_}.redactSecrets(id, Conversations(store_).compactions(id, before)));
+                        return reply(res, 200, Policy{store_}.redactSecrets(id, Conversations(store_).compactions(id, before)));
                     if (req.path == "/api/view") {
                         const auto changesAfter =
                             req.has_param("changesAfter") ? std::optional{queryId(req, "changesAfter", true)} : std::nullopt;
@@ -364,11 +357,11 @@ public:
                             view["changedMessageIds"] = changed->second;
                         view["sessionCursor"] = sessionThrough;
                         setViewer(res, callbacks_, actor);
-                        json(res, 200, withConversationAccess(actor, id, std::move(view)));
+                        reply(res, 200, withConversationAccess(actor, id, std::move(view)));
                     } else if (req.path == "/api/conversation")
-                        json(res, 200, Policy{store_}.redactSecrets(id, web::conversation(store_, id, before, &actor)));
+                        reply(res, 200, Policy{store_}.redactSecrets(id, web::conversation(store_, id, before, &actor)));
                     else
-                        json(res, 200, Policy{store_}.redactSecrets(id, web::sessions(store_, id, before)));
+                        reply(res, 200, Policy{store_}.redactSecrets(id, web::sessions(store_, id, before)));
                 } catch (const InputError& e) {
                     error(res, 400, e.what());
                 } catch (const Conflict&) {
@@ -384,10 +377,10 @@ public:
                 if (!body.is_object()) return error(res, 400, "invalid_json");
                 undoBotSetup(store_, web::person(callbacks_, req), requiredText(body, "botId", 128), bodyId(body, "eventId"));
                 changes_.rescan();
-                json(res, 200, {{"ok", true}});
+                reply(res, 200, {{"ok", true}});
             } catch (const InputError& e) {
                 error(res, 400, e.what());
-            } catch (const DecisionDenied&) {
+            } catch (const AccessDenied&) {
                 error(res, 403, "access_denied");
             } catch (const BotProfileError& e) {
                 const bool stale = e.code == "setup_changed" || e.code == "role_changed";
@@ -560,7 +553,7 @@ private:
                     return error(res, 400, parsed.profile.contains("soul") ? "role_contains_secrets" : "invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(actor, botId, parsed.profile, parsed.image);
                 changes_.rescan();
-                return json(res, 200, redactBot(botId, web::botSettings(saved)));
+                return reply(res, 200, redactBot(botId, web::botSettings(saved)));
             }
             const auto creator = web::person(callbacks_, req);
             if (!Policy{store_}.allows(creator, Action::bot_create, "")) return error(res, 403, "access_denied");
@@ -578,12 +571,12 @@ private:
             }
             const auto created = callbacks_.createBot(creator, parsed.profile, parsed.image);
             changes_.rescan();
-            return json(res, 201, redactBot(web::field(created, "id"), web::botSettings(created)));
+            return reply(res, 201, redactBot(web::field(created, "id"), web::botSettings(created)));
         } catch (const InputError& e) {
             error(res, 400, e.what());
         } catch (const BotProfileError& e) {
             error(res, e.code == "role_changed" ? 409 : 400, e.code);
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict&) {
             error(res, 400, "invalid_bot_profile");
@@ -603,13 +596,13 @@ private:
         }
         try {
             BotLifecycle(store_).deleteBot(actor, bot);
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             return error(res, 403, "access_denied");
         } catch (const BotBusy&) {
             return error(res, 409, "bot_busy");
         }
         changes_.rescan();
-        json(res, 200, {{"ok", true}});
+        reply(res, 200, {{"ok", true}});
     }
 
     void setBotPaused(const Request& req, Response& res) {
@@ -625,11 +618,11 @@ private:
         if (findBot(bot).is_null()) return error(res, 404, "bot_not_found");
         try {
             BotLifecycle(store_).setBotPaused(actor, bot, paused->get<bool>());
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             return error(res, 403, "access_denied");
         }
         changes_.rescan();
-        json(res, 200, {{"paused", *paused}});
+        reply(res, 200, {{"paused", *paused}});
     }
 
     Json bots() const {
@@ -752,14 +745,14 @@ private:
                 const auto replyTo = body.contains("replyToMessageId") ? bodyId(body, "replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments", Json::array());
                 const auto previous = WebConversationIntake(store_).receipt(actor, bot, clientMessageId, request, replyTo, attachments);
-                if (previous) return json(res, 201, *previous);
+                if (previous) return reply(res, 201, *previous);
                 const bool identityRequired = web::hasWebIdentities(callbacks_);
                 if (identityRequired && !callbacks_.resolveIdentity) return error(res, 503, "message_identity_unavailable");
                 Intake intake;
                 try {
                     intake = callbacks_.intake(bot, request);
                 } catch (const BotProfileError& e) {
-                    if (e.code == "removed_bot_setting") return json(res, 400, {{"error", e.code}, {"message", e.what()}});
+                    if (e.code == "removed_bot_setting") return error(res, 400, e.code, e.what());
                 } catch (const std::exception&) {
                 }
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
@@ -769,7 +762,7 @@ private:
                     identityRequired
                         ? WebConversationIntake(store_).receiveWeb(actor, intake, clientMessageId, request, replyTo, attachments)
                         : ConversationIntake(store_).receive(actor, intake, clientMessageId, request, replyTo, attachments);
-                return json(res, 201, receipt);
+                return reply(res, 201, receipt);
             }
             const auto operation = requiredText(body, "operation", 32);
             const auto id = bodyId(body, "taskId");
@@ -779,13 +772,13 @@ private:
             if (task.task.botId != bot) return error(res, 404, "task_not_found");
             TaskControl(store_).operate(actor, {bot, id, wait, bodyId(body, "targetRevision", 0), bodyId(body, "targetGeneration", 0)},
                                         operation, data);
-            json(res, 200, {{"accepted", true}});
+            reply(res, 200, {{"accepted", true}});
         } catch (const InputError& e) {
             error(res, 400, e.what());
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const BotPaused& e) {
-            json(res, 409, {{"error", "bot_paused"}, {"message", e.what()}});
+            error(res, 409, "bot_paused", e.what());
         } catch (const RequestChanged&) {
             error(res, 409, "request_changed");
         } catch (const Conflict&) {

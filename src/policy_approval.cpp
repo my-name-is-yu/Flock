@@ -1,4 +1,5 @@
 #include "policy_internal.hpp"
+#include "flock/digest.hpp"
 #include "conversation_turns.hpp"
 #include "flock/decision_errors.hpp"
 #include "outbox_storage.hpp"
@@ -30,7 +31,6 @@
 #include <utility>
 #include <vector>
 
-#include <openssl/evp.h>
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
@@ -38,17 +38,7 @@ namespace {
 using conversation_storage::integer;
 
 std::string fingerprint(const Json& payload) {
-    const auto encoded = payload.dump();
-    unsigned char bytes[32];
-    unsigned count = 0;
-    if (EVP_Digest(encoded.data(), encoded.size(), bytes, &count, EVP_sha256(), nullptr) != 1 || count != sizeof(bytes))
-        throw Conflict("Cannot bind this action to an approval");
-    std::string hex;
-    for (const auto byte : bytes) {
-        hex += "0123456789abcdef"[byte >> 4];
-        hex += "0123456789abcdef"[byte & 15];
-    }
-    return hex;
+    return sha256Hex(payload.dump());
 }
 
 Person currentApprovalActor(const Policy& policy, const WebIdentityResolver& resolve, bool liveInteractiveRoles, const Person& actor) {
@@ -302,7 +292,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     const bool nextTime = choice == "allow_next_time";
     const bool saveRule = nextTime || choice == "always_allow";
-    if (!canSaveRule && (saveRule || currentActor.id.empty() || currentActor.id != row.string(0))) throw DecisionDenied{};
+    if (!canSaveRule && (saveRule || currentActor.id.empty() || currentActor.id != row.string(0))) throw AccessDenied{};
     const auto status = row.string(3);
     if (item.waitId != row.number(9) || item.taskId != row.number(5) || item.targetRevision != row.number(6) ||
         item.targetGeneration != row.number(10))

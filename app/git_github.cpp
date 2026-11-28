@@ -1,4 +1,5 @@
 #include "git_github.hpp"
+#include "flock/percent_encoding.hpp"
 #include "flock/decision.hpp"
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
@@ -41,22 +42,6 @@ std::string correlation(std::string_view body) {
     const auto id = tail.substr(0, tail.size() - markerSuffix.size());
     if (id.size() != 38 || !id.starts_with("flock-") || id.substr(6).find_first_not_of("0123456789abcdef") != id.npos) return {};
     return std::string(id);
-}
-
-std::string encode(std::string_view input) {
-    std::string result;
-    constexpr std::string_view unreserved = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
-    constexpr char hex[] = "0123456789ABCDEF";
-    for (const unsigned char c : input) {
-        if (unreserved.find(c) != unreserved.npos)
-            result += static_cast<char>(c);
-        else {
-            result += '%';
-            result += hex[c >> 4];
-            result += hex[c & 15];
-        }
-    }
-    return result;
 }
 
 struct Buffer {
@@ -213,8 +198,8 @@ public:
     std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget& target) override {
         const auto& [base, head, baseRef, headRef] = target;
         const auto owner = head.repo.substr(0, head.repo.find('/'));
-        const auto url =
-            path(base) + "/pulls?state=all&per_page=30&head=" + encode(owner + ":" + headRef) + "&base=" + encode(baseRef) + "&page=";
+        const auto url = path(base) + "/pulls?state=all&per_page=30&head=" + percentEncode(owner + ":" + headRef) +
+                         "&base=" + percentEncode(baseRef) + "&page=";
         std::vector<GitPullRequest> results;
         for (int page = 1; page <= 50; ++page) {
             const auto response = json("GET", url + std::to_string(page));
@@ -242,7 +227,7 @@ public:
         if (tool == "git_repo_info")
             return pick(json("GET", root), {"full_name", "html_url", "description", "default_branch", "private", "archived"});
         if (tool == "git_commit_status") {
-            const auto commit = root + "/commits/" + encode(args.at("sha").get<std::string>());
+            const auto commit = root + "/commits/" + percentEncode(args.at("sha").get<std::string>());
             const auto status = json("GET", commit + "/status?per_page=30");
             const auto checks = json("GET", commit + "/check-runs?per_page=30");
             Json result{{"state", status.at("state")},

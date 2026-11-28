@@ -14,6 +14,10 @@ ALLOWED = {
 SOURCE_SUFFIXES = (".cpp", ".hpp")
 INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.MULTILINE)
 TEST_FILE = re.compile(r"(^|_)tests\.cpp$")
+SINGLE_OWNERS = (
+    (re.compile(r"set_content\([^;]*application/json"), "web/http.cpp", "send JSON responses with web::reply or web::error"),
+    (re.compile(r'"0123456789abcdef"(\[|;)|\bEVP_Digest\(|\bSHA256\('), "src/digest.cpp", "encode hex with encodeHex and hash with sha256Hex"),
+)
 
 
 def is_test(path):
@@ -40,30 +44,34 @@ def violations(root):
             relative = path.relative_to(root)
             if path.suffix not in SOURCE_SUFFIXES or is_test(relative):
                 continue
-            for name in INCLUDE.findall(path.read_text(errors="surrogateescape")):
+            text = path.read_text(errors="surrogateescape")
+            for pattern, owner, advice in SINGLE_OWNERS:
+                if relative.as_posix() != owner and pattern.search(text):
+                    found.append(f"{relative}: {advice}; only {owner} does this directly")
+            for name in INCLUDE.findall(text):
                 target = layer_of(root, name, path)
                 if layer == "include" and not name.startswith("flock/") and target is not None:
                     found.append(f'{relative}: public headers include project headers as "flock/...", not "{name}"')
                 elif target is not None and target not in allowed:
-                    found.append(f'{relative}: {layer}/ may not include "{name}" from {target}/')
+                    found.append(
+                        f'{relative}: {layer}/ may not include "{name}" from {target}/; '
+                        "share it through include/flock or keep the code in the layer that owns it"
+                    )
     return found
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check that each layer includes only its own headers and the public headers in include/flock."
+        description="Check that each layer includes only its own headers and the public headers in include/flock, "
+        "and that each shared mechanism has one implementation."
     )
     parser.add_argument("source", type=Path)
     args = parser.parse_args()
     found = violations(args.source)
     if found:
-        print("Layering check failed", file=sys.stderr)
+        print("Architecture check failed", file=sys.stderr)
         for violation in found:
             print(f"  {violation}", file=sys.stderr)
-        print(
-            "  Move what both layers need into include/flock, or keep the code in the layer that owns it.",
-            file=sys.stderr,
-        )
         return 1
     return 0
 

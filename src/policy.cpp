@@ -249,7 +249,7 @@ Json PolicyRules::rules() const {
 void PolicyRules::setMode(const Person& actor, std::string_view value) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
-    if (!storage.permissions.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+    if (!storage.permissions.allows(actor, Action::rules_manage, "installation")) throw AccessDenied{};
     if (value != "full" && value != "supervised") throw Conflict("Unknown policy mode");
     std::lock_guard lock(database.mutex);
     Transaction tx(database.db);
@@ -266,7 +266,7 @@ void PolicyRules::changeRule(const Person& actor, RuleKind kind, Action action, 
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
     Transaction tx(database.db);
-    if (!storage.permissions.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+    if (!storage.permissions.allows(actor, Action::rules_manage, "installation")) throw AccessDenied{};
     policy_storage::writeRule(database, storage.secretStorage, actor, kind, action, target, add, false);
     tx.commit();
 }
@@ -300,7 +300,7 @@ Json BotAccess::createOwnedBot(const Person& creator, const std::function<Json(c
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
-    if (!storage.permissions.allows(creator, Action::bot_create, "")) throw DecisionDenied{};
+    if (!storage.permissions.allows(creator, Action::bot_create, "")) throw AccessDenied{};
     storage.secretStorage.sharedRedactor().requirePublic({creator.id});
     return create([&](std::string_view bot, const std::function<void()>& publish) {
         Transaction ownership(database.db);
@@ -336,7 +336,7 @@ void BotAccess::setOwner(const Person& creator, std::string_view bot) {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
-    if (!validBotId(bot) || !storage.permissions.allows(creator, Action::bot_create, bot)) throw DecisionDenied{};
+    if (!validBotId(bot) || !storage.permissions.allows(creator, Action::bot_create, bot)) throw AccessDenied{};
     if (storage.botLifecycle.botDeleted(bot)) throw Conflict("This Bot ID has already been used");
     storage.secretStorage.sharedRedactor().requirePublic({creator.id, bot});
     if (database.query("SELECT 1 FROM bot_creation_intents WHERE target=?", {bot}).next())
@@ -366,7 +366,7 @@ void BotAccess::setMember(const Person& actor, std::string_view bot, std::string
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
     Transaction tx(database.db);
-    if (!storage.permissions.allows(actor, Action::bot_settings, bot) || !validIdentifier(person)) throw DecisionDenied{};
+    if (!storage.permissions.allows(actor, Action::bot_settings, bot) || !validIdentifier(person)) throw AccessDenied{};
     storage.secretStorage.sharedRedactor().requirePublic({actor.id, bot, person});
     if (add)
         database.exec("INSERT OR IGNORE INTO bot_members VALUES(?,?)", {bot, person});
@@ -380,7 +380,7 @@ Json BotAccess::botSettings(const Person& actor, std::string_view bot) const {
     auto& storage = StoreAccess::get(store_);
     auto& database = storage.database;
     std::lock_guard lock(database.mutex);
-    if (!storage.permissions.allows(actor, Action::bot_view, bot)) throw DecisionDenied{};
+    if (!storage.permissions.allows(actor, Action::bot_view, bot)) throw AccessDenied{};
     const bool owner = storage.permissions.allows(actor, Action::bot_settings, bot);
     Json result{
         {"canManage", owner}, {"paused", storage.botLifecycle.botPaused(bot)}, {"members", Json::array()}, {"secretInputs", Json::array()}};
@@ -421,7 +421,7 @@ Id BotAccess::applyBotChange(std::string_view bot, const Person& creator, std::s
     if (owner.empty()) {
         if (!validBotId(target) || storage.permissions.forbidden(bot, Action::bot_create, target))
             throw Conflict("Bot creation denied by policy");
-        if (!validIdentifier(creator.id)) throw DecisionDenied{};
+        if (!validIdentifier(creator.id)) throw AccessDenied{};
         storage.secretStorage.redactor(bot).requirePublic({name, target});
         Transaction intent(database.db);
         storage.secretStorage.sharedRedactor().requirePublic({creator.id, target});
@@ -498,7 +498,7 @@ void SecretRequests::submitSecret(const Person& actor, std::string_view bot, Id 
 
 void policy_storage::fulfillSecret(Database& database, const Policy& permissions, SecretStorage& secretStorage, InboxStorage& inboxStorage,
                                    const Person& actor, std::string_view bot, Id request, std::string_view value) {
-    if (!permissions.allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_decide, bot)) throw AccessDenied{};
     auto row = database.query(R"SQL(
 SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending'
  AND NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=p.name AND status='fulfilled')

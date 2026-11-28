@@ -1,4 +1,5 @@
 #include "store_access.hpp"
+#include "flock/digest.hpp"
 #include "flock/bot_lifecycle.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/policy.hpp"
@@ -56,7 +57,6 @@ namespace {
 
 constexpr std::string_view tokenPrefix = "flock-t3-";
 constexpr std::size_t maxInvitationNoteBytes = 8'192;
-using connector_credentials::digest;
 
 // An invitation gives the inviter's stop authority over the invitee in this Session.
 // Follow outgoing edges only. UNION also makes repeated invitations and cycles harmless.
@@ -118,7 +118,7 @@ INSERT INTO t3_connector VALUES(1,?,?,?,?)
 ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
  token_digest=excluded.token_digest,port=excluded.port
 )SQL",
-                              {actionId(), person, digest(token), static_cast<Id>(port)});
+                              {actionId(), person, sha256Hex(token), static_cast<Id>(port)});
     }
     storage.database.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)", {environment});
     if (install) install(token);
@@ -136,7 +136,7 @@ void T3Connections::rebindPort(unsigned port, const std::function<void(std::stri
         const auto token = connector_credentials::bearer(tokenPrefix);
         // The provider can verify its existing registration against the old token until its update succeeds.
         install(token);
-        storage.database.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?", {actionId(), digest(token), static_cast<Id>(port)});
+        storage.database.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?", {actionId(), sha256Hex(token), static_cast<Id>(port)});
     }
     tx.commit();
 }
@@ -144,7 +144,7 @@ void T3Connections::rebindPort(unsigned port, const std::function<void(std::stri
 bool T3Connections::ownsBearer(std::string_view token) const {
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
-    return storage.database.query("SELECT 1 FROM t3_connector WHERE token_digest=?", {digest(token)}).next();
+    return storage.database.query("SELECT 1 FROM t3_connector WHERE token_digest=?", {sha256Hex(token)}).next();
 }
 
 bool T3Connections::disconnect(std::string_view environment) {
@@ -201,7 +201,7 @@ SELECT c.id,c.person_id,r.id FROM t3_connector c
 LEFT JOIN t3_remote_machines r ON r.token_digest=?1 AND r.person_id=c.person_id AND c.token_digest<>?1
 WHERE (c.token_digest=?1 OR r.id IS NOT NULL) AND EXISTS(SELECT 1 FROM t3_connected_environments)
 )SQL",
-                                      {digest(token)});
+                                      {sha256Hex(token)});
     if (!row.next()) return {};
     return T3Connection{row.string(0), row.string(1), row.null(2) ? std::nullopt : std::optional{row.string(2)}};
 }
@@ -217,7 +217,8 @@ T3RemoteCredential T3Connections::addRemoteMachine(std::string_view name) {
     auto count = storage.database.query("SELECT COUNT(*) FROM t3_remote_machines");
     if (count.next() && count.number(0) >= 64) throw Conflict("Flock supports up to 64 other machines");
     T3RemoteCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
-    storage.database.exec("INSERT INTO t3_remote_machines VALUES(?,?,?,?)", {credential.id, name, person, digest(credential.bearerToken)});
+    storage.database.exec("INSERT INTO t3_remote_machines VALUES(?,?,?,?)",
+                          {credential.id, name, person, sha256Hex(credential.bearerToken)});
     return credential;
 }
 
@@ -307,7 +308,7 @@ Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& r
         if (!policy.allows(actor, Action::bot_decide, bot)) throw Conflict("Bot access is required");
         return actor;
     };
-    const auto fingerprint = digest(Json::array({bot, text, thread}).dump());
+    const auto fingerprint = sha256Hex(Json::array({bot, text, thread}).dump());
     const auto connected = [&](std::string_view environment) {
         return storage.database.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?", {environment}).next() &&
                policy.allows(bot, Action::environment_inspect, environment);

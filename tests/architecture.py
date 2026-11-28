@@ -5,9 +5,9 @@ from tempfile import TemporaryDirectory
 import unittest
 
 
-class LayeringTest(unittest.TestCase):
+class ArchitectureTest(unittest.TestCase):
     def check(self, files):
-        checker = Path(__file__).resolve().parents[1] / "scripts" / "check-layering.py"
+        checker = Path(__file__).resolve().parents[1] / "scripts" / "check-architecture.py"
         with TemporaryDirectory() as directory:
             root = Path(directory)
             for name, text in files.items():
@@ -39,6 +39,20 @@ class LayeringTest(unittest.TestCase):
                 result = self.check(tree | {name: text})
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(diagnostic, result.stderr)
+
+    def test_json_responses_have_one_writer(self):
+        send = 'res.set_content(body.dump(), "application/json");\n'
+        self.assertEqual(self.check({"web/http.cpp": send, "web/tests/http.cpp": send}).returncode, 0)
+        result = self.check({"web/http.cpp": send, "web/git_routes.cpp": send})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("web/git_routes.cpp: send JSON responses with web::reply or web::error", result.stderr)
+
+    def test_hex_encoding_has_one_implementation(self):
+        loop = 'constexpr std::string_view digits = "0123456789abcdef";\n'
+        self.assertEqual(self.check({"src/digest.cpp": loop}).returncode, 0)
+        result = self.check({"src/digest.cpp": loop, "app/model.cpp": loop})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("app/model.cpp: encode hex with encodeHex and hash with sha256Hex", result.stderr)
 
 
 if __name__ == "__main__":

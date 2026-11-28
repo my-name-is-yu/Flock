@@ -1,7 +1,6 @@
 #include "policy_internal.hpp"
 #include "session_dispatch_lock.hpp"
 #include "flock/bot_lifecycle.hpp"
-#include "flock/decision_errors.hpp"
 #include "store_access.hpp"
 #include "bot_lifecycle_storage.hpp"
 #include "database.hpp"
@@ -51,7 +50,7 @@ void BotLifecycle::setBotPaused(const Person& actor, std::string_view bot, bool 
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     Policy permissions{store_};
-    if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_settings, bot)) throw AccessDenied{};
     if (storage.botLifecycle.botPaused(bot) == paused) return;
 
     if (paused) {
@@ -95,7 +94,7 @@ void BotLifecycle::deleteBot(const Person& actor, std::string_view bot) {
     std::lock_guard lock(storage.database.mutex);
     Transaction tx(storage.database.db);
     Policy permissions{store_};
-    if (!permissions.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_settings, bot)) throw AccessDenied{};
     if (storage.database
             .query(R"SQL(
 SELECT 1 WHERE

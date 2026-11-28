@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "flock/digest.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/bot_id.hpp"
@@ -64,7 +65,7 @@ ExternalMcpCredential ExternalMcp::connect(std::string_view person, const std::v
     storage.secretStorage.sharedRedactor().requirePublic({person, bots});
     ExternalMcpCredential credential{actionId(), connector_credentials::bearer(tokenPrefix)};
     storage.database.exec("INSERT INTO external_mcp_connections VALUES(?,?,?)",
-                          {credential.connectionId, actor.id, connector_credentials::digest(credential.bearerToken)});
+                          {credential.connectionId, actor.id, sha256Hex(credential.bearerToken)});
     for (const auto& bot : bots) {
         if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
         storage.database.exec("INSERT OR IGNORE INTO external_mcp_allowed_bots VALUES(?,?)", {credential.connectionId, bot});
@@ -84,8 +85,7 @@ std::optional<ExternalMcpConnection> ExternalMcp::authenticate(std::string_view 
     if (!connector_credentials::validBearer(token, tokenPrefix)) return std::nullopt;
     auto& storage = StoreAccess::get(store_);
     std::lock_guard lock(storage.database.mutex);
-    auto row = storage.database.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?",
-                                      {connector_credentials::digest(token)});
+    auto row = storage.database.query("SELECT id,person_id FROM external_mcp_connections WHERE token_digest=?", {sha256Hex(token)});
     if (!row.next() || storage.sessionParticipationStorage.sessionActor(row.string(1)).id.empty()) return std::nullopt;
     return ExternalMcpConnection{row.string(0)};
 }
@@ -110,7 +110,7 @@ WHERE c.id=? AND c.token_digest IS NOT NULL AND b.bot_id=?
     const auto actor = storage.sessionParticipationStorage.sessionActor(grant.string(0));
     if (!Policy{store_}.allows(actor, Action::bot_decide, bot)) throw Conflict(std::string(botUnavailable));
 
-    const auto fingerprint = connector_credentials::digest(Json::array({bot, text}).dump());
+    const auto fingerprint = sha256Hex(Json::array({bot, text}).dump());
     auto receipt = storage.database.query("SELECT request_digest,task_id FROM external_mcp_receipts WHERE connection_id=? AND request_id=?",
                                           {connection.id, requestId});
     if (receipt.next()) {

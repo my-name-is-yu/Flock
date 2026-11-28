@@ -4,7 +4,6 @@
 #include "flock/task_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/secret_ref.hpp"
-#include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
 #include "flock/automations.hpp"
 #include "flock/bot_memory.hpp"
@@ -230,8 +229,8 @@ void turns(const std::filesystem::path& path) {
     const auto otherView = Inbox(store).inbox(member).at(0);
     check(otherView.at("canDecide") == false && otherView.at("canSaveRule") == false,
           "member received another person's decision or rule controls");
-    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(member, target(item), "always_allow"); });
-    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(item), "always_allow"); });
+    rejected<AccessDenied>([&] { Inbox(store).decideInbox(member, target(item), "always_allow"); });
+    rejected<AccessDenied>([&] { Inbox(store).decideInbox(requester, target(item), "always_allow"); });
     check(card() == item && policyRules.rules().empty() && Inbox(store).decisionHistory(requester).empty(),
           "a rejected global rule affected the pending approval");
     rejected([&] { Inbox(store).decideInbox(Person{}, target(item), "allow_once"); });
@@ -283,7 +282,7 @@ void turns(const std::filesystem::path& path) {
     check(Inbox(store).inbox(delegatedAdmin).at(0).at("canSaveRule") == true, "an administrator could not save a global rule");
     isAdmin = false;
     check(Inbox(store).inbox(delegatedAdmin).empty(), "a demoted administrator retained access to the approval");
-    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow"); });
+    rejected<AccessDenied>([&] { Inbox(store).decideInbox(delegatedAdmin, target(item), "always_allow"); });
     check(card() == item && policyRules.rules() == existingRules, "a stale administrator changed the rule or card");
     // Older host configuration can assign separate credentials with distinct
     // roles to one person. Interactive authority comes from the credential.
@@ -430,7 +429,7 @@ void scheduled(const std::filesystem::path& path) {
     const auto expired = Inbox(store).inbox(requester).at(0);
     check(expired.at("status") == "expired" && expired.at("canDecide") == false && expired.at("canSaveRule") == false,
           "the expired approval showed actions to the requester");
-    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(requester, target(expired), "allow_next_time"); });
+    rejected<AccessDenied>([&] { Inbox(store).decideInbox(requester, target(expired), "allow_next_time"); });
     check(Inbox(store).inbox(requester).at(0) == expired && policyRules.rules().empty(),
           "the requester changed an expired approval or its global rule");
     const auto adminView = Inbox(store).inbox(localOwner).at(0);

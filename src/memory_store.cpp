@@ -1,4 +1,5 @@
 #include "flock/bot_memory.hpp"
+#include "flock/digest.hpp"
 #include "flock/bot_id.hpp"
 #include "conversation_turns.hpp"
 #include "memory_learnings.hpp"
@@ -22,7 +23,6 @@
 #include "json_fields.hpp"
 
 #include <algorithm>
-#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,7 +30,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
 #include <sqlite3.h>
 
 namespace flockv0 {
@@ -115,21 +114,6 @@ VALUES(?,?,?,?,?,?,?,?,?,?)
                   {key, before.version + 1, before.version, author, summary, before.content, updated,
                    reverted ? Json(reverted) : Json(nullptr), now, source});
     return {{"docKey", key}, {"revisionId", database.last()}, {"version", before.version + 1}, {"diffSummary", summary}};
-}
-
-std::string roleHash(std::string_view text) {
-    std::array<unsigned char, 32> digest{};
-    unsigned int size = 0;
-    if (EVP_Digest(text.data(), text.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1 || size != digest.size())
-        throw Conflict("Could not hash the Bot's Role");
-    constexpr std::string_view digits = "0123456789abcdef";
-    std::string hex;
-    hex.reserve(digest.size() * 2);
-    for (const auto byte : digest) {
-        hex += digits[byte >> 4];
-        hex += digits[byte & 15];
-    }
-    return hex;
 }
 
 SessionContext lastSessionContext(Database& database, const SessionContextTarget& target) {
@@ -225,9 +209,9 @@ SessionContext MemoryStorage::sessionContext(const SessionContextTarget& target,
     const auto prior = lastSessionContext(database_, target);
     const auto name = bounded(scrub.text(target.displayName.empty() ? bot : target.displayName), 128);
     SessionContext context;
-    context.role =
-        sessionExcerpt(roleHash(role), role, {"Standing rules from " + name + "'s role:\n", "No standing rules.", "\n[Bot role truncated]"},
-                       prior.role, std::min(maxBotRoleBytes, bytes));
+    context.role = sessionExcerpt(sha256Hex(role), role,
+                                  {"Standing rules from " + name + "'s role:\n", "No standing rules.", "\n[Bot role truncated]"},
+                                  prior.role, std::min(maxBotRoleBytes, bytes));
     if (context.role) bytes -= context.role->section.size();
     context.memory =
         sessionExcerpt(version, memory, {"Notes from " + name + "'s memory:\n", "No memory notes.", "\n[Bot memory truncated]"},

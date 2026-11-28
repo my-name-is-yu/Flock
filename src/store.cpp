@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "flock/digest.hpp"
 #include "flock/tasks.hpp"
 #include "flock/task_list.hpp"
 #include "flock/conversation_intake.hpp"
@@ -58,6 +59,7 @@
 #include "flock/task_target.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -101,14 +103,9 @@ Id requiredInteger(const Json& data, std::string_view key, Id minimum) {
 }
 std::string actionId() {
     std::random_device random;
-    constexpr std::string_view hex = "0123456789abcdef";
-    std::string id = "flock-";
-    for (int i = 0; i < 16; ++i) {
-        const auto octet = random() & 0xff;
-        id += hex[octet >> 4];
-        id += hex[octet & 15];
-    }
-    return id;
+    std::array<unsigned char, 16> bytes{};
+    for (auto& byte : bytes) byte = random() & 0xff;
+    return "flock-" + encodeHex(bytes);
 }
 Json runJson(const RunRef& run) {
     Json result{{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};
@@ -330,7 +327,7 @@ Id TaskIntake::submit(const Intake& item, const Person* requester) {
 
 Id TaskOperations::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
-    if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
+    if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw AccessDenied{};
     secretStorage.sharedRedactor().requirePublic(requester->id);
     return submit(item, 0, nullptr, {}, requester->id);
 }
@@ -387,7 +384,7 @@ void TaskControl::operate(const Person& actor, const TaskTarget& target, std::st
 void TaskOperations::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& input, Id sourceMessage,
                              std::optional<InboxKind> expectedKind) {
     const auto& [bot, id, waitId, revision, generation] = target;
-    if (!permissions.allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_decide, bot)) throw AccessDenied{};
     if (operation != "cancel" && botLifecycle.botPaused(bot)) throw BotPaused{};
     auto task = taskRecords.load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};

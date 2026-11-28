@@ -1,4 +1,6 @@
 #include "internal.hpp"
+#include "flock/percent_encoding.hpp"
+#include "flock/digest.hpp"
 #include "flock/json.hpp"
 #include "flock/t3_mcp.hpp"
 #include "flock/types.hpp"
@@ -7,7 +9,6 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -83,8 +84,7 @@ std::string randomValue() {
 }
 
 std::string digest(std::string_view value) {
-    std::array<unsigned char, SHA256_DIGEST_LENGTH> bytes{};
-    SHA256(reinterpret_cast<const unsigned char*>(value.data()), value.size(), bytes.data());
+    const auto bytes = sha256(value);
     return base64url(bytes.data(), bytes.size());
 }
 
@@ -151,7 +151,7 @@ std::string form(const Headers& parameters) {
     std::string result;
     for (const auto& [key, value] : parameters) {
         if (!result.empty()) result += '&';
-        result += encode(key) + '=' + encode(value);
+        result += percentEncode(key) + '=' + percentEncode(value);
     }
     return result;
 }

@@ -86,7 +86,7 @@ add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/
                        src/bot_settings_tools.cpp src/bot_setup.cpp src/identity.cpp src/settings_access.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/memory_learnings.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp src/digest.cpp src/percent_encoding.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -232,10 +232,10 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_live_gate.py")
   add_test(NAME flock_header_fanout COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/header_fanout.py")
-  add_test(NAME flock_layering COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-layering.py" "${CMAKE_CURRENT_SOURCE_DIR}")
-  add_test(NAME flock_layering_check COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/layering.py")
+  add_test(NAME flock_architecture COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-architecture.py" "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME flock_architecture_check COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/architecture.py")
   if(FLOCK_LIVE_TESTS)
     foreach(test flock_live_t3 flock_live_conversation)
       add_test(NAME ${test} COMMAND ${test} --live)

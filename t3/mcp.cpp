@@ -129,21 +129,6 @@ Url checkedUrl(const std::string& value) {
     return {origin + path, origin, path};
 }
 
-std::string encode(std::string_view value) {
-    std::string result;
-    const auto hex = "0123456789ABCDEF";
-    for (unsigned char c : value) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~')
-            result += static_cast<char>(c);
-        else {
-            result += '%';
-            result += hex[c >> 4];
-            result += hex[c & 15];
-        }
-    }
-    return result;
-}
-
 std::string decode(std::string_view value) {
     const auto nibble = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';

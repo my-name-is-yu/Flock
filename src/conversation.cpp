@@ -1,7 +1,6 @@
 #include "flock/bot_lifecycle.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "local_machine_storage.hpp"
-#include "flock/decision_errors.hpp"
 #include "web_identity_state.hpp"
 #include "database.hpp"
 #include "flock/policy.hpp"
@@ -76,7 +75,7 @@ std::optional<Json> WebConversationIntake::receipt(const Person& actor, std::str
                                                    std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(database_.mutex);
     if (reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
-    if (!permissions_.allows(actor, Action::bot_talk, bot)) throw DecisionDenied{};
+    if (!permissions_.allows(actor, Action::bot_talk, bot)) throw AccessDenied{};
     return turns_.messageReceipt(actor, bot, clientId, text, replyTo, attachments);
 }
 
@@ -97,7 +96,7 @@ Json ConversationStorage::receive(const Person& actor, std::string_view bot, std
     {
         std::lock_guard lock(database.mutex);
         Transaction transaction(database.db);
-        if (!permissions.allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+        if (!permissions.allows(actor, Action::bot_decide, bot)) throw AccessDenied{};
         const auto existing = messageReceipt(actor, bot, clientId, text, replyTo, attachments);
         if (existing)
             receipt = *existing;
