@@ -1,5 +1,5 @@
 #include "task_routing.hpp"
-#include "connector_credentials.hpp"
+#include "flock/digest.hpp"
 #include "flock/limits.hpp"
 #include "conversation_storage.hpp"
 #include "task_storage.hpp"
@@ -28,7 +28,7 @@ constexpr std::size_t maxEnvironmentSelectorBytes = 256;
 std::string linkedSelector(std::string_view label, std::string_view title, const TaskRoute& route) {
     constexpr std::string_view separator = " — ";
     const auto key = Json::array({route.environmentId, route.projectId, route.gatewayEnvironmentId}).dump();
-    const auto selector = " [" + connector_credentials::digest(key).substr(0, 24) + "]";
+    const auto selector = " [" + sha256Hex(key).substr(0, 24) + "]";
     const auto identity = " (" + route.environmentId + " via " + route.gatewayEnvironmentId + ")";
     const auto project = " (" + route.projectId + ")";
     const auto remaining = maxEnvironmentSelectorBytes - selector.size();

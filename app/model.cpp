@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "flock/digest.hpp"
 #include "flock/decision.hpp"
 #include "flock/git_host.hpp"
 #include "flock/json.hpp"
@@ -11,10 +12,8 @@
 #include "flock/workspace_tools.hpp"
 
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <ostream>
@@ -481,17 +480,7 @@ namespace {
 // OpenAI routes requests with the same key to the same prompt cache. Hashing keeps Bot and channel IDs out of the key
 // and within its length limit.
 std::string promptCacheKey(std::string_view scope) {
-    std::array<unsigned char, 32> digest{};
-    unsigned int size = 0;
-    if (EVP_Digest(scope.data(), scope.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1 || size != digest.size())
-        throw ModelError("Unable to derive the ChatGPT prompt cache key", false);
-    constexpr std::string_view digits = "0123456789abcdef";
-    std::string key;
-    for (const auto byte : digest) {
-        key += digits[byte >> 4];
-        key += digits[byte & 15];
-    }
-    return key;
+    return sha256Hex(scope);
 }
 }
 

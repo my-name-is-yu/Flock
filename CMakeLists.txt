@@ -86,7 +86,7 @@ add_library(flock_core STATIC src/database.cpp src/store.cpp src/schema.cpp src/
                        src/bot_settings_tools.cpp src/bot_setup.cpp src/identity.cpp src/settings_access.cpp src/secrets.cpp src/participation.cpp src/external_mcp.cpp
                        src/board_inbox.cpp
                        src/memory_store.cpp src/memory_learnings.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/tool_batch.cpp src/attachments.cpp src/image_headers.cpp src/base64.cpp src/digest.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp src/git_followup.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)

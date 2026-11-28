@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/digest.hpp"
 #include "flock/bot_access.hpp"
 #include "flock/bot_id.hpp"
 #include "flock/automations.hpp"
@@ -111,13 +112,12 @@ std::string hashHex(std::string_view bytes) {
         hash ^= ch;
         hash *= 1099511628211ULL;
     }
-    constexpr char hex[] = "0123456789abcdef";
-    std::string out(16, '0');
-    for (int i = 15; i >= 0; --i) {
-        out[static_cast<std::size_t>(i)] = hex[hash & 0xF];
-        hash >>= 4;
+    std::array<unsigned char, 8> digest{};
+    for (auto byte = digest.rbegin(); byte != digest.rend(); ++byte) {
+        *byte = hash & 0xff;
+        hash >>= 8;
     }
-    return out;
+    return encodeHex(digest);
 }
 
 std::string sanitizeFilename(std::string_view raw) {

@@ -16,6 +16,7 @@ INCLUDE = re.compile(r'^[ \t]*#[ \t]*include[ \t]+"([^"]+)"', re.MULTILINE)
 TEST_FILE = re.compile(r"(^|_)tests\.cpp$")
 SINGLE_OWNERS = (
     (re.compile(r"set_content\([^;]*application/json"), "web/http.cpp", "send JSON responses with web::reply or web::error"),
+    (re.compile(r'"0123456789abcdef"(\[|;)|\bEVP_Digest\(|\bSHA256\('), "src/digest.cpp", "encode hex with encodeHex and hash with sha256Hex"),
 )
 
 

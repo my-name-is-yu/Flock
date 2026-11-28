@@ -1,4 +1,5 @@
 #include "policy_internal.hpp"
+#include "flock/digest.hpp"
 #include "conversation_turns.hpp"
 #include "flock/decision_errors.hpp"
 #include "outbox_storage.hpp"
@@ -30,7 +31,6 @@
 #include <utility>
 #include <vector>
 
-#include <openssl/evp.h>
 #include <nlohmann/json.hpp>
 
 namespace flockv0 {
@@ -38,17 +38,7 @@ namespace {
 using conversation_storage::integer;
 
 std::string fingerprint(const Json& payload) {
-    const auto encoded = payload.dump();
-    unsigned char bytes[32];
-    unsigned count = 0;
-    if (EVP_Digest(encoded.data(), encoded.size(), bytes, &count, EVP_sha256(), nullptr) != 1 || count != sizeof(bytes))
-        throw Conflict("Cannot bind this action to an approval");
-    std::string hex;
-    for (const auto byte : bytes) {
-        hex += "0123456789abcdef"[byte >> 4];
-        hex += "0123456789abcdef"[byte & 15];
-    }
-    return hex;
+    return sha256Hex(payload.dump());
 }
 
 Person currentApprovalActor(const Policy& policy, const WebIdentityResolver& resolve, bool liveInteractiveRoles, const Person& actor) {

@@ -47,6 +47,13 @@ class ArchitectureTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("web/git_routes.cpp: send JSON responses with web::reply or web::error", result.stderr)
 
+    def test_hex_encoding_has_one_implementation(self):
+        loop = 'constexpr std::string_view digits = "0123456789abcdef";\n'
+        self.assertEqual(self.check({"src/digest.cpp": loop}).returncode, 0)
+        result = self.check({"src/digest.cpp": loop, "app/model.cpp": loop})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("app/model.cpp: encode hex with encodeHex and hash with sha256Hex", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "flock/digest.hpp"
 #include "flock/tasks.hpp"
 #include "flock/task_list.hpp"
 #include "flock/conversation_intake.hpp"
@@ -58,6 +59,7 @@
 #include "flock/task_target.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -101,14 +103,9 @@ Id requiredInteger(const Json& data, std::string_view key, Id minimum) {
 }
 std::string actionId() {
     std::random_device random;
-    constexpr std::string_view hex = "0123456789abcdef";
-    std::string id = "flock-";
-    for (int i = 0; i < 16; ++i) {
-        const auto octet = random() & 0xff;
-        id += hex[octet >> 4];
-        id += hex[octet & 15];
-    }
-    return id;
+    std::array<unsigned char, 16> bytes{};
+    for (auto& byte : bytes) byte = random() & 0xff;
+    return "flock-" + encodeHex(bytes);
 }
 Json runJson(const RunRef& run) {
     Json result{{"threadId", run.threadId}, {"runId", run.runId}, {"link", run.link}};

@@ -1,4 +1,5 @@
 #include "flock/policy_rules.hpp"
+#include "flock/digest.hpp"
 #include "flock/settings_access.hpp"
 #include "flock/decision_errors.hpp"
 #include "database.hpp"
@@ -11,7 +12,6 @@
 
 #include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #include <array>
@@ -36,29 +36,15 @@ constexpr std::string_view basicPrefix = "Basic ";
 
 enum class Mode { local, managed, unavailable };
 
-std::string hex(const auto& bytes) {
-    std::string result;
-    result.reserve(bytes.size() * 2);
-    for (const auto byte : bytes) {
-        result += "0123456789abcdef"[byte >> 4];
-        result += "0123456789abcdef"[byte & 15];
-    }
-    return result;
-}
-
 std::string newPassword() {
     std::array<unsigned char, passwordBytes> random{};
     if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) throw Conflict("Could not generate a sign-in password");
-    return hex(random);
+    return encodeHex(random);
 }
 
+// Passwords are generated from 192 bits of randomness and never chosen by callers.
 std::string passwordDigest(std::string_view password) {
-    // Passwords are generated from 192 bits of randomness and never chosen by callers.
-    std::array<unsigned char, 32> bytes{};
-    unsigned count = 0;
-    if (EVP_Digest(password.data(), password.size(), bytes.data(), &count, EVP_sha256(), nullptr) != 1 || count != bytes.size())
-        throw Conflict("Could not verify the sign-in password");
-    return hex(bytes);
+    return sha256Hex(password);
 }
 
 bool matches(std::string_view password, std::string_view digest) {

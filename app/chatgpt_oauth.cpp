@@ -1,4 +1,5 @@
 #include "chatgpt.hpp"
+#include "flock/digest.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
 #include "chatgpt_failure.hpp"
@@ -119,22 +120,13 @@ std::string newHost() {
     auto bytes = randomness<16>();
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    std::string host = "urn:uuid:";
-    constexpr auto hex = "0123456789abcdef";
-    for (std::size_t i = 0; i < bytes.size(); ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) host += '-';
-        host += hex[bytes[i] >> 4];
-        host += hex[bytes[i] & 0x0f];
-    }
-    return host;
+    const auto hex = encodeHex(bytes);
+    return "urn:uuid:" + hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) + "-" + hex.substr(16, 4) + "-" +
+           hex.substr(20);
 }
 
 std::string pkceChallenge(std::string_view verifier) {
-    std::array<unsigned char, 32> digest{};
-    unsigned length = 0;
-    if (EVP_Digest(verifier.data(), verifier.size(), digest.data(), &length, EVP_sha256(), nullptr) != 1 || length != digest.size())
-        throw ModelError("Could not generate the ChatGPT sign-in challenge", true);
-    return encodeUrl64(asBytes(digest));
+    return encodeUrl64(asBytes(sha256(verifier)));
 }
 
 std::optional<double> number(const Json& value) {
