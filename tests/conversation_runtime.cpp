@@ -192,6 +192,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string, T3EnvironmentLinks> linksByGateway;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
     bool queueNextMessage = false, waitForSessionRuns = false;
+    bool failNextSessionCatalog = false;
     std::string loseSendForEnvironment;
     bool deferNextRunId = false;
     std::string login = "original-login";
@@ -216,6 +217,7 @@ struct SimulatedT3 : T3 {
     std::pair<std::vector<std::string>, std::optional<Id>> projectSessions(std::string_view environment, std::string_view project, Id,
                                                                            SessionReadDeadline) override {
         std::lock_guard lock(stateMutex);
+        if (std::exchange(failNextSessionCatalog, false)) throw std::runtime_error("Session catalog unavailable");
         std::vector<std::string> threads;
         for (const auto& [target, metadata] : sessions)
             if (target.first == environment && (project.empty() || project == metadata.projectId)) threads.push_back(target.second);
@@ -1815,6 +1817,41 @@ void failedReviewSearchDoesNotAutoComplete() {
         check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
                   lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
               "the reply settled the task without matching the outcome of its task search");
+    }
+}
+
+void failedReviewSessionSearchDoesNotAutoComplete() {
+    enum class Retry { none, unrelated, sameSearch };
+    for (const auto retry : {Retry::none, Retry::unrelated, Retry::sameSearch}) {
+        Fixture f;
+        const auto task = requestLearningTask(f, "Verify the release against other Sessions");
+        f.reach(task, "running");
+        f.t3.finish("run-1", "The release build passed.");
+        f.reach(task, "deciding");
+        f.t3.sessions[{"desktop", "dependency"}] = {"Release dependency", "Fixture Project",      "project",
+                                                    "completed",          "2026-11-23T00:00:00Z", "2026-11-23T00:00:00Z"};
+        f.t3.sessions[{"desktop", "other"}] = {"Other Session", "Fixture Project",      "project",
+                                               "completed",     "2026-11-23T00:00:00Z", "2026-11-23T00:00:00Z"};
+        f.t3.failNextSessionCatalog = true;
+        f.model.onWake = [&](const ModelInput& input) -> Decision {
+            const auto& turn = input.event.at("turn");
+            const auto* retryQuery = retry == Retry::unrelated ? "Other Session" : "Release dependency";
+            if (turn.empty()) return {"flock_session_search", {{"query", "Release dependency"}}, "Find the dependency Session"};
+            if (turn.size() == 1) {
+                check(turn.front().at("result").at("ok") == false, "the Session search did not fail");
+                if (retry != Retry::none) return {"flock_session_search", {{"query", retryQuery}}, "Search the recovered catalog"};
+            } else {
+                const auto& result = turn.back().at("result");
+                check(result.at("ok") == true && result.at("sessions").size() == 1 && result.at("sessions").at(0).at("title") == retryQuery,
+                      "the second Session search did not find its Session");
+            }
+            return {"reply", {{"text", "Here is my release review."}}, "Report the review result"};
+        };
+        f.advanceUntil([&] { return f.task(task).at("state") != "deciding"; }, "the Session search review did not settle");
+        const bool canComplete = retry == Retry::sameSearch;
+        check(f.task(task).at("state") == (canComplete ? "completed" : "waiting") &&
+                  lastTaskEvent(*f.store, task, "completed").is_null() == !canComplete,
+              "the reply settled the task without matching the outcome of its Session search");
     }
 }
 
@@ -4549,6 +4586,7 @@ int main(int argc, char** argv) {
         finishedTurnDoesNotHoldCompletion();
         failedReviewStepDoesNotAutoComplete();
         failedReviewSearchDoesNotAutoComplete();
+        failedReviewSessionSearchDoesNotAutoComplete();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();

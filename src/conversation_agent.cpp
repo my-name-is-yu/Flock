@@ -274,7 +274,7 @@ std::optional<std::pair<std::string, Json>> wakeEvidenceLookup(const Json& call)
         return std::pair{tool, Json{{"query", std::move(query)}, {"before", std::max<Id>(0, integer(args, "before"))}}};
     }
     if (tool == "read_result" && args.contains("messageId")) return std::pair{tool, args.at("messageId")};
-    if (tool == "flock_session_events") return std::pair{tool, args};
+    if (tool == "flock_session_search" || tool == "flock_session_events") return std::pair{tool, args};
     return std::nullopt;
 }
 }
@@ -897,7 +897,8 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
             const bool ok = result.value("ok", false);
             if (woken && route == reply && i < calls.size() && !result.value("notRun", false))
                 if (const auto evidence = wakeEvidenceLookup(calls.at(i))) {
-                    if (ok)
+                    const auto& outcome = result.contains("result") ? result.at("result") : result;
+                    if (outcome.value("ok", false))
                         unresolvedEvidence.erase(*evidence);
                     else
                         unresolvedEvidence.insert(*evidence);
