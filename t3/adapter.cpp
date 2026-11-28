@@ -1107,7 +1107,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
         const auto workspace = workspaceHead(client, command.projectId, thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted, {}, "The provisioned specialist worktree does not match the saved commit", true};
-        if (!projectStillAuthorized(client, command.projectId))
+        if (!attachments.empty() && !projectStillAuthorized(client, command.projectId))
             return attachmentAuthorizationRefusal("Could not verify the destination T3 Project before dispatching attachments");
         if (!authorizedStagedAttachments(command, authorizeAfterStaging)) return attachmentAuthorizationRefusal();
         const auto sent = sendWork(client, command, threadId, attachments, command.actionId + ":start");
