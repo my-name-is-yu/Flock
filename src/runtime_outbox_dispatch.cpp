@@ -616,7 +616,12 @@ SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_i
         }
         if (sendsWork) cmd.instruction = prompts.prepareStandingContext(action, current, clock());
         if (!outboxStorage.startOutbox(action, cmd.authGeneration)) return false;
-        journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
+        // A refused send is retried until T3 accepts it. One entry per action is enough for the history.
+        if (!database
+                 .query("SELECT 1 FROM journal WHERE task_id=? AND action_id=? AND kind='send_started' LIMIT 1",
+                        {current.id, action.command.actionId})
+                 .next())
+            journalStorage.journal(current.id, SendStartedEntry{action.command.actionId});
         return true;
     };
     try {
