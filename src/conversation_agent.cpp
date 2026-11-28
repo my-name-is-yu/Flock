@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "session_send_receipts.hpp"
 #include "turn_results.hpp"
 #include "channel_connectors.hpp"
 #include "session_participation_records.hpp"
@@ -816,7 +817,7 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
 void ConversationStorage::finishTurn(const Message& message, std::string text, const Json& suggestions, ConversationReplyRoute route,
                                      const conversation::QuestionAnchor* question) {
     using enum ConversationReplyRoute;
-    const bool pendingReceipt = sessionMessageStorage.persistPendingReceipt(message.id);
+    const bool pendingReceipt = sessionSendReceipts.persistPending(message.id);
     if (route == session_access || route == access || route == channel_access || route == bot_paused) {
         auto pending = database.query(R"SQL(
 SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
@@ -896,7 +897,7 @@ SELECT step FROM conversation_steps WHERE message_id=? AND result IS NULL
     database.exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?", {replyId, message.id});
     database.exec("DELETE FROM conversation_retries WHERE message_id=?", {message.id});
     turnResults.discardUnpersisted(message.id);
-    if (pendingReceipt) sessionMessageStorage.forgetPendingReceipt(message.id);
+    if (pendingReceipt) sessionSendReceipts.forgetPending(message.id);
 }
 
 bool ConversationStorage::authorizeTurn(const Message& message) {

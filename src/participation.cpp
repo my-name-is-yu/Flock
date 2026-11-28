@@ -1,4 +1,5 @@
 #include "store_access.hpp"
+#include "session_send_receipts.hpp"
 #include "turn_results.hpp"
 #include "t3_connected_environments.hpp"
 #include "flock/digest.hpp"
@@ -616,7 +617,7 @@ WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.envir
     // A send may have returned a receipt before its transaction hit SQLite contention.
     // Include that Run in the same stop transaction even if the conversation step is retried later.
     const SessionTarget stoppedTarget{environment, target.threadId};
-    sessionMessageStorage.recordPendingRuns(stoppedTarget);
+    sessionSendReceipts.recordPendingRuns(stoppedTarget);
 
     // The journal ID identifies this stop and fences out all previously admitted turns.
     const auto state = exit == SessionExit::removed ? "removed" : "left";

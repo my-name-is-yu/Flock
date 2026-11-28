@@ -1,4 +1,5 @@
 #include "conversation_call.hpp"
+#include "session_send_receipts.hpp"
 #include "turn_results.hpp"
 #include "session_participation_records.hpp"
 #include "conversation_messages.hpp"
@@ -282,23 +283,23 @@ SessionSendOutcome sessionSendOutcome(const SessionTarget& target, Delivery deli
 }
 }
 
-bool SessionMessageStorage::persistPendingReceipt(Id message) {
-    const auto receipt = sessionSendReceipts.find(message);
-    if (receipt == sessionSendReceipts.end()) return false;
-    persistSessionSendReceipt(message, receipt->second);
+bool SessionSendReceipts::persistPending(Id message) {
+    const auto receipt = pending.find(message);
+    if (receipt == pending.end()) return false;
+    persist(message, receipt->second);
     return true;
 }
 
-void SessionMessageStorage::forgetPendingReceipt(Id message) {
-    sessionSendReceipts.erase(message);
+void SessionSendReceipts::forgetPending(Id message) {
+    pending.erase(message);
 }
 
-void SessionMessageStorage::recordPendingRuns(const SessionTarget& target) {
-    for (const auto& [source, receipt] : sessionSendReceipts)
-        if (receipt.target == target) recordSessionSendRun(source, receipt);
+void SessionSendReceipts::recordPendingRuns(const SessionTarget& target) {
+    for (const auto& [source, receipt] : pending)
+        if (receipt.target == target) recordRun(source, receipt);
 }
 
-bool SessionMessageStorage::recordSessionSendRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
+bool SessionSendReceipts::recordRun(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
     const auto& outcome = receipt.outcome;
     using enum SessionSendOutcome::Status;
@@ -321,7 +322,7 @@ AND run_environment_id=? AND run_id=? AND run_thread_id=? LIMIT 1)SQL",
     return true;
 }
 
-void SessionMessageStorage::saveSessionSendResult(std::string_view bot, Id message, int step, Json result) {
+void SessionSendReceipts::saveResult(std::string_view bot, Id message, int step, Json result) {
     const bool unknown = field(result, "delivery") == "unknown";
     const auto results = Json::array({secretStorage.redactor(bot).record(std::move(result))});
     database.exec(R"SQL(
@@ -332,11 +333,11 @@ WHERE message_id=? AND step=? AND result IS NULL
                   {results, unknown ? 1 : 0, message, step});
 }
 
-void SessionMessageStorage::persistSessionSendReceipt(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
+void SessionSendReceipts::persist(Id message, const SessionSendReceipt& receipt, std::optional<Seconds> interruptAt) {
     const auto& target = receipt.target;
     const auto& outcome = receipt.outcome;
     using enum SessionSendOutcome::Status;
-    const bool accepted = recordSessionSendRun(message, receipt, interruptAt);
+    const bool accepted = recordRun(message, receipt, interruptAt);
     const bool settled = accepted || outcome.status == Unsent || (interruptAt && outcome.status == NotAccepted);
     if (settled) {
         database.exec("DELETE FROM session_message_sends WHERE action=? AND message_id=? AND coalesce(step,-1)=?",
@@ -359,7 +360,7 @@ UPDATE conversation_steps SET effect=NULL WHERE message_id=? AND step=?
         result = toolFailure(outcome.detail.empty() ? "Could not confirm delivery to T3" : outcome.detail);
         if (!settled) result["delivery"] = "unknown";
     }
-    saveSessionSendResult(receipt.bot, message, receipt.step, std::move(result));
+    saveResult(receipt.bot, message, receipt.step, std::move(result));
 }
 
 void SessionParticipationStorage::stopPausedBotParticipation(std::string_view bot) {
@@ -421,17 +422,17 @@ WHERE s.action=? AND s.message_id=? AND s.interrupt_at<=?
             continue;
         }
         const SessionTarget target{command.environmentId, command.target.threadId, command.gatewayEnvironmentId};
-        persistSessionSendReceipt(message,
-                                  {command.ownerBotId,
-                                   target,
-                                   {},
-                                   sessionSendOutcome(target, std::move(delivery)),
-                                   static_cast<int>(row.number(0)),
-                                   row.number(1),
-                                   row.string(2),
-                                   command.actionId,
-                                   false},
-                                  now);
+        receipts.persist(message,
+                         {command.ownerBotId,
+                          target,
+                          {},
+                          sessionSendOutcome(target, std::move(delivery)),
+                          static_cast<int>(row.number(0)),
+                          row.number(1),
+                          row.string(2),
+                          command.actionId,
+                          false},
+                         now);
         database.exec("UPDATE session_message_sends SET interrupt_at=? WHERE action=?", {now + 5, command.actionId});
         transaction.commit();
     }
@@ -589,18 +590,18 @@ std::optional<CallOutcome> SessionMessageStorage::prepareSessionSend(SessionSend
     auto row = database.query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL", {id, send.step});
     if (!row.next()) return stop;
     if (!row.string(0).empty()) {
-        if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
-            persistSessionSendReceipt(id, receipt->second);
+        if (const auto receipt = receipts.pending.find(id); receipt != receipts.pending.end()) {
+            receipts.persist(id, receipt->second);
         } else if (field(row.json(0), "sendState") == "prepared") {
             saveSessionSendStep(send, {{"ok", false}, {"delivery", "not_accepted"}, {"error", "The T3 Session message was not sent."}});
         } else {
-            saveSessionSendResult(message.bot, id, send.step,
-                                  {{"ok", false},
-                                   {"delivery", "unknown"},
-                                   {"error", "Flock restarted while sending this. Check the Session before sending again."}});
+            receipts.saveResult(message.bot, id, send.step,
+                                {{"ok", false},
+                                 {"delivery", "unknown"},
+                                 {"error", "Flock restarted while sending this. Check the Session before sending again."}});
         }
         transaction.commit();
-        sessionSendReceipts.erase(id);
+        receipts.pending.erase(id);
         return advance;
     }
     try {
@@ -778,16 +779,16 @@ void SessionMessageStorage::deliverSessionSend(SessionSend& send) {
     }
     std::lock_guard lock(database.mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
-    const auto checkpoint = sessionSendReceipts
+    const auto checkpoint = receipts.pending
                                 .insert_or_assign(message.id, SessionSendReceipt{message.bot, send.target, std::move(send.title),
                                                                                  sessionSendOutcome(send.target, std::move(receipt)),
                                                                                  send.step, send.savedTaskId, send.savedActionId,
                                                                                  send.command.actionId, !send.fixesPullRequest()})
                                 .first;
     Transaction transaction(database.db);
-    persistSessionSendReceipt(message.id, checkpoint->second);
+    receipts.persist(message.id, checkpoint->second);
     transaction.commit();
-    sessionSendReceipts.erase(checkpoint);
+    receipts.pending.erase(checkpoint);
 }
 
 CallOutcome SessionMessageStorage::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,

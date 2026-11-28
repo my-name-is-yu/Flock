@@ -15,6 +15,7 @@ class Policy;
 class Database;
 class BotLifecycleStorage;
 class ConversationStorage;
+class SessionSendReceipts;
 class ConversationMessages;
 class TurnResults;
 class GitStorage;
@@ -24,8 +25,6 @@ class PolicyApprovals;
 class SecretStorage;
 class SessionParticipationRecords;
 class SessionReadStorage;
-class TaskRecords;
-class TaskRunReports;
 class T3;
 enum class CallOutcome;
 struct ConversationCallContext;
@@ -41,16 +40,12 @@ public:
                           const Policy& permissions, const std::filesystem::path& path, JournalStorage& journalStorage,
                           OutboxStorage& outboxStorage, PolicyApprovals& policyApprovals, SecretStorage& secretStorage,
                           SessionParticipationRecords& sessionParticipations, SessionReadStorage& sessionReadStorage,
-                          TaskRecords& taskRecords, TaskRunReports& taskRunReports)
+                          SessionSendReceipts& receipts)
         : database(database), botLifecycle(botLifecycle), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           turnResults(turnResults), gitStorage(gitStorage), permissions(permissions), path(path), journalStorage(journalStorage),
           outboxStorage(outboxStorage), policyApprovals(policyApprovals), secretStorage(secretStorage),
-          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), taskRecords(taskRecords),
-          taskRunReports(taskRunReports) {}
+          sessionParticipations(sessionParticipations), sessionReadStorage(sessionReadStorage), receipts(receipts) {}
 
-    bool persistPendingReceipt(Id message);
-    void forgetPendingReceipt(Id message);
-    void recordPendingRuns(const SessionTarget&);
     void reconcilePausedSessionSends(T3&, std::stop_token);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
                                    const ConversationCallContext&);
@@ -61,7 +56,6 @@ public:
                                  std::stop_token);
 private:
     struct SessionSend;
-    std::map<Id, SessionSendReceipt> sessionSendReceipts;
     void saveSessionSendStep(const SessionSend&, Json result);
     void addressSessionSend(SessionSend&);
     std::optional<CallOutcome> prepareSessionSend(SessionSend&);
@@ -69,9 +63,6 @@ private:
     std::optional<CallOutcome> approveSessionSend(SessionSend&);
     std::optional<CallOutcome> startSessionSend(const SessionSend&);
     void deliverSessionSend(SessionSend&);
-    void persistSessionSendReceipt(Id message, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
-    void saveSessionSendResult(std::string_view bot, Id message, int step, Json result);
-    bool recordSessionSendRun(Id, const SessionSendReceipt&, std::optional<Seconds> interruptAt = {});
     Database& database;
     BotLifecycleStorage& botLifecycle;
     ConversationStorage& conversationTurns;
@@ -86,7 +77,6 @@ private:
     SecretStorage& secretStorage;
     SessionParticipationRecords& sessionParticipations;
     SessionReadStorage& sessionReadStorage;
-    TaskRecords& taskRecords;
-    TaskRunReports& taskRunReports;
+    SessionSendReceipts& receipts;
 };
 }

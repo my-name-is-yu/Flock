@@ -31,6 +31,7 @@ class ChannelConnectors;
 class ChannelDeliveryQueue;
 class ConversationMessages;
 class ConversationTools;
+class SessionSendReceipts;
 class TurnResults;
 class GitStorage;
 class JournalStorage;
@@ -88,7 +89,8 @@ public:
                         SessionParticipationStorage& sessionParticipationStorage, SessionReadStorage& sessionReadStorage,
                         TaskOperations& taskOperations, TaskRecords& taskRecords, TaskRouting& taskRouting, WaitStorage& waitStorage,
                         WebIdentityState& webIdentity, ConversationMessages& conversationMessages, ChannelDeliveryQueue& channelDeliveries,
-                        SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults)
+                        SessionParticipationRecords& sessionParticipations, ChannelConnectors& channelConnectors, TurnResults& turnResults,
+                        SessionSendReceipts& sessionSendReceipts)
         : database(database), attachments(attachments), automationStorage(automationStorage), botLifecycle(botLifecycle),
           botAccess(botAccess), botSettingsStorage(botSettingsStorage), botSetup(botSetup), channelStorage(channelStorage),
           conversationContextStorage(conversationContextStorage), conversationTools(conversationTools), gitStorage(gitStorage),
@@ -98,7 +100,7 @@ public:
           sessionReadStorage(sessionReadStorage), taskOperations(taskOperations), taskRecords(taskRecords), taskRouting(taskRouting),
           waitStorage(waitStorage), webIdentity(webIdentity), conversationMessages(conversationMessages),
           channelDeliveries(channelDeliveries), sessionParticipations(sessionParticipations), channelConnectors(channelConnectors),
-          turnResults(turnResults) {}
+          turnResults(turnResults), sessionSendReceipts(sessionSendReceipts) {}
 
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text, Id replyToMessageId,
                  conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&, const Json& attachments);
@@ -187,5 +189,6 @@ private:
     SessionParticipationRecords& sessionParticipations;
     ChannelConnectors& channelConnectors;
     TurnResults& turnResults;
+    SessionSendReceipts& sessionSendReceipts;
 };
 }

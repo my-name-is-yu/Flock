@@ -26,6 +26,7 @@
 #include "session_participation_records.hpp"
 #include "session_participation_storage.hpp"
 #include "session_read_storage.hpp"
+#include "session_send_receipts.hpp"
 #include "task_events.hpp"
 #include "task_operations.hpp"
 #include "task_records.hpp"
@@ -52,6 +53,7 @@ struct Store::Impl {
     ChannelDeliveryQueue channelDeliveries{database, permissions};
     SessionParticipationRecords sessionParticipations{database};
     TurnResults turnResults{database};
+    SessionSendReceipts sessionSendReceipts{database, secretStorage, sessionParticipations, taskRecords, taskRunReports};
     ChannelConnectors channelConnectors{database, permissions, webIdentity};
     ChannelNotices channelNotices{database, channelConnectors, permissions, journalStorage, channelDeliveries};
     BotSettingsStorage botSettingsStorage{database, permissions, secretRequests, taskRouting};
@@ -85,7 +87,8 @@ struct Store::Impl {
                                           channelDeliveries,
                                           sessionParticipations,
                                           channelConnectors,
-                                          turnResults};
+                                          turnResults,
+                                          sessionSendReceipts};
     ConversationTools conversationTools{database,      attachments,        conversationTurns, conversationMessages, permissions,
                                         path,          botSettingsStorage, modelCalls,        policyApprovals,      sessionReadStorage,
                                         secretStorage, turnResults};
@@ -103,8 +106,7 @@ struct Store::Impl {
                                                 secretStorage,
                                                 sessionParticipations,
                                                 sessionReadStorage,
-                                                taskRecords,
-                                                taskRunReports};
+                                                sessionSendReceipts};
     ModelCalls modelCalls{database, botLifecycle, permissions, secretStorage};
     TaskOperations taskOperations{database,   botLifecycle, permissions, journalStorage, outboxStorage, secretStorage,
                                   taskEvents, taskRecords,  taskRouting, waitStorage,    inboxDecisions};
@@ -132,13 +134,14 @@ struct Store::Impl {
     PolicyApprovals policyApprovals{database,          secretStorage,  webIdentity,          taskRecords,
                                     waitStorage,       permissions,    conversationMessages, botLifecycle,
                                     channelConnectors, channelNotices, inboxDecisions};
-    SessionParticipationStorage sessionParticipationStorage{database,          path,
-                                                            secretStorage,     taskRecords,
-                                                            webIdentity,       permissions,
-                                                            conversationTurns, conversationMessages,
-                                                            turnResults,       sessionMessageStorage,
-                                                            botLifecycle,      taskOperations,
-                                                            policyApprovals,   sessionParticipations};
+    SessionParticipationStorage sessionParticipationStorage{database,           path,
+                                                            secretStorage,      taskRecords,
+                                                            webIdentity,        permissions,
+                                                            conversationTurns,  conversationMessages,
+                                                            turnResults,        sessionMessageStorage,
+                                                            botLifecycle,       taskOperations,
+                                                            policyApprovals,    sessionParticipations,
+                                                            sessionSendReceipts};
     SessionReadStorage sessionReadStorage{database,          secretStorage,  sessionParticipations, permissions, conversationMessages,
                                           channelConnectors, policyApprovals};
     BotSetupStorage botSetup;

@@ -13,6 +13,7 @@ namespace flockv0 {
 class Policy;
 class ConversationStorage;
 class SessionParticipationRecords;
+class SessionSendReceipts;
 class ConversationMessages;
 class TurnResults;
 class SessionMessageStorage;
@@ -42,11 +43,12 @@ public:
                                 ConversationStorage& conversationTurns, ConversationMessages& conversationMessages,
                                 TurnResults& turnResults, SessionMessageStorage& sessionMessageStorage, BotLifecycleStorage& botLifecycle,
                                 TaskOperations& taskOperations, PolicyApprovals& policyApprovals,
-                                SessionParticipationRecords& sessionParticipations)
+                                SessionParticipationRecords& sessionParticipations, SessionSendReceipts& sessionSendReceipts)
         : database(database), path(path), secretStorage(secretStorage), taskRecords(taskRecords), webIdentity(webIdentity),
           permissions(permissions), conversationTurns(conversationTurns), conversationMessages(conversationMessages),
           turnResults(turnResults), sessionMessageStorage(sessionMessageStorage), botLifecycle(botLifecycle),
-          taskOperations(taskOperations), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations) {}
+          taskOperations(taskOperations), policyApprovals(policyApprovals), sessionParticipations(sessionParticipations),
+          sessionSendReceipts(sessionSendReceipts) {}
 
     SessionStop stopSessionParticipation(SessionReadStorage&, const Person&, std::string_view bot, const SessionTarget&, SessionExit,
                                          Id message = 0);
@@ -72,6 +74,7 @@ private:
     TaskOperations& taskOperations;
     PolicyApprovals& policyApprovals;
     SessionParticipationRecords& sessionParticipations;
+    SessionSendReceipts& sessionSendReceipts;
     std::mutex sessionQueueCancellationMutex;
 };
 }
