@@ -1,7 +1,6 @@
 #include "flock/policy_rules.hpp"
 #include "flock/digest.hpp"
 #include "flock/settings_access.hpp"
-#include "flock/decision_errors.hpp"
 #include "database.hpp"
 #include "flock/identity.hpp"
 #include "flock/base64.hpp"
@@ -75,10 +74,10 @@ std::optional<bool> currentRole(const auto& db, std::string_view person) {
 }
 
 void requireAdministrator(const auto& db, const Person& actor, Mode mode) {
-    if (!actor.adminRoot || actor.id.empty()) throw DecisionDenied{};
+    if (!actor.adminRoot || actor.id.empty()) throw AccessDenied{};
     if (mode == Mode::local && actor == localOwner) return;
     if (mode == Mode::managed && currentRole(db, actor.id).value_or(false)) return;
-    throw DecisionDenied{};
+    throw AccessDenied{};
 }
 
 Json credential(std::string_view person, std::string_view password) {
@@ -142,7 +141,7 @@ void SettingsAccess::commitIfAdministrator(const Person& actor, const std::funct
     auto& db = Database::of(store_);
     std::lock_guard lock(db.mutex);
     Transaction transaction(db.db);
-    if (!canManageInstallation(actor)) throw DecisionDenied{};
+    if (!canManageInstallation(actor)) throw AccessDenied{};
     commit();
     transaction.commit();
 }
@@ -201,7 +200,7 @@ Json SettingsAccess::view(const Person& actor) const {
     std::lock_guard lock(db.mutex);
     auto users = Json::array();
     if (external_.authenticate) {
-        if (!actor.adminRoot) throw DecisionDenied{};
+        if (!actor.adminRoot) throw AccessDenied{};
         for (const auto& person : external_.users) users.push_back({{"person", person.id}, {"adminRoot", person.adminRoot}});
         return {{"mode", "external"}, {"users", users}};
     }
@@ -250,7 +249,7 @@ Json SettingsAccess::change(const Person& actor, const Json& args) {
         // The installation owner's host access cannot be delegated by changing
         // the owner's role or password from another administrator's account.
         if (target == localOwner.id) {
-            if (actor != localOwner) throw DecisionDenied{};
+            if (actor != localOwner) throw AccessDenied{};
             if (operation == "role" || operation == "remove") throw Conflict("The installation owner must retain administrator access");
         }
         if (operation == "invite") {

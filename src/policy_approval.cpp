@@ -292,7 +292,7 @@ FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
     const bool canSaveRule = policy.allows(currentActor, Action::rules_manage, "installation");
     const bool nextTime = choice == "allow_next_time";
     const bool saveRule = nextTime || choice == "always_allow";
-    if (!canSaveRule && (saveRule || currentActor.id.empty() || currentActor.id != row.string(0))) throw DecisionDenied{};
+    if (!canSaveRule && (saveRule || currentActor.id.empty() || currentActor.id != row.string(0))) throw AccessDenied{};
     const auto status = row.string(3);
     if (item.waitId != row.number(9) || item.taskId != row.number(5) || item.targetRevision != row.number(6) ||
         item.targetGeneration != row.number(10))

@@ -380,7 +380,7 @@ public:
                 reply(res, 200, {{"ok", true}});
             } catch (const InputError& e) {
                 error(res, 400, e.what());
-            } catch (const DecisionDenied&) {
+            } catch (const AccessDenied&) {
                 error(res, 403, "access_denied");
             } catch (const BotProfileError& e) {
                 const bool stale = e.code == "setup_changed" || e.code == "role_changed";
@@ -576,7 +576,7 @@ private:
             error(res, 400, e.what());
         } catch (const BotProfileError& e) {
             error(res, e.code == "role_changed" ? 409 : 400, e.code);
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict&) {
             error(res, 400, "invalid_bot_profile");
@@ -596,7 +596,7 @@ private:
         }
         try {
             BotLifecycle(store_).deleteBot(actor, bot);
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             return error(res, 403, "access_denied");
         } catch (const BotBusy&) {
             return error(res, 409, "bot_busy");
@@ -618,7 +618,7 @@ private:
         if (findBot(bot).is_null()) return error(res, 404, "bot_not_found");
         try {
             BotLifecycle(store_).setBotPaused(actor, bot, paused->get<bool>());
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             return error(res, 403, "access_denied");
         }
         changes_.rescan();
@@ -775,7 +775,7 @@ private:
             reply(res, 200, {{"accepted", true}});
         } catch (const InputError& e) {
             error(res, 400, e.what());
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const BotPaused& e) {
             error(res, 409, "bot_paused", e.what());

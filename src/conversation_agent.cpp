@@ -1,6 +1,5 @@
 #include "conversation_call.hpp"
 #include "flock/board_inbox.hpp"
-#include "flock/decision_errors.hpp"
 #include "web_identity_state.hpp"
 #include "wait_storage.hpp"
 #include "task_routing.hpp"
@@ -757,7 +756,7 @@ Json ConversationStorage::applyTurnTool(const Message& message, int step, const 
         return {{"ok", true}, {"effect", "answered"}, {"taskId", task.id}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!permissions.allows(turnActor(message), Action::bot_decide, bot)) throw DecisionDenied{};
+        if (!permissions.allows(turnActor(message), Action::bot_decide, bot)) throw AccessDenied{};
         auto task = ownTask(identifier(args, "taskId", true), message);
         expectGeneration(task);
         active(task);

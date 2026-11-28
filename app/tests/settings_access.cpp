@@ -1,5 +1,4 @@
 #include "flock/settings_access.hpp"
-#include "flock/decision_errors.hpp"
 #include "fixtures.hpp"
 #include "flock/base64.hpp"
 #include "flock/json.hpp"
@@ -31,8 +30,8 @@ void accessLifecycle() {
     auto identity = access.identities();
     check(!access.enabled() && identity.authenticate("") == localOwner, "Local setup does not require an account");
     check(access.view(localOwner).at("mode") == "local", "Local setup status");
-    rejects<DecisionDenied>([&] { access.change({"member", false}, {{"operation", "prepare"}}); },
-                            "An ordinary user prepared the initial administrator");
+    rejects<AccessDenied>([&] { access.change({"member", false}, {{"operation", "prepare"}}); },
+                          "An ordinary user prepared the initial administrator");
 
     const auto first = access.change(localOwner, {{"operation", "prepare"}}).at("credential");
     const auto firstPassword = first.at("password").get<std::string>();
@@ -63,8 +62,8 @@ void accessLifecycle() {
     int credentialCommits = 0;
     other.commitIfAdministrator(administrator, [&] { ++credentialCommits; });
     check(credentialCommits == 1, "An authorized account could not commit a credential change");
-    rejects<DecisionDenied>([&] { other.change(administrator, {{"operation", "rotate"}, {"person", localOwner.id}}); },
-                            "A delegated administrator replaced the installation owner's credential");
+    rejects<AccessDenied>([&] { other.change(administrator, {{"operation", "rotate"}, {"person", localOwner.id}}); },
+                          "A delegated administrator replaced the installation owner's credential");
 
     const auto rotated = access.change(localOwner, {{"operation", "rotate"}, {"person", "member"}}).at("credential");
     const auto newHeader = authorization(rotated);
@@ -76,11 +75,11 @@ void accessLifecycle() {
 
     access.change(localOwner, {{"operation", "remove"}, {"person", "member"}});
     check(identity.authenticate(newHeader).id.empty() && !identity.resolveRoot("member"), "Revoked credentials still grant access");
-    rejects<DecisionDenied>([&] { other.commitIfAdministrator(administrator, [&] { ++credentialCommits; }); },
-                            "A revoked administrator was able to commit a credential change");
+    rejects<AccessDenied>([&] { other.commitIfAdministrator(administrator, [&] { ++credentialCommits; }); },
+                          "A revoked administrator was able to commit a credential change");
     check(credentialCommits == 1, "The credential change ran after the administrator was revoked");
-    rejects<DecisionDenied>([&] { other.change(administrator, {{"operation", "invite"}, {"person", "another"}, {"adminRoot", false}}); },
-                            "A revoked administrator changed settings with an earlier authorization");
+    rejects<AccessDenied>([&] { other.change(administrator, {{"operation", "invite"}, {"person", "another"}, {"adminRoot", false}}); },
+                          "A revoked administrator changed settings with an earlier authorization");
     rejects<Conflict>([&] { access.change(localOwner, {{"operation", "invite"}, {"person", "member"}, {"adminRoot", false}}); },
                       "Reusing a revoked identity can inherit its existing Bot membership");
 

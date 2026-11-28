@@ -250,11 +250,11 @@ SELECT )SQL" +
     check(!row(inbox, "itemKind", "protected_input").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
     const auto questionBefore = pending(store, user_question);
-    rejected<DecisionDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
-                             "nonmember answered a question");
+    rejected<AccessDenied>([&] { Inbox(store).decideInbox(bob, questionBefore, "answer", {{"text", "Final"}}); },
+                           "nonmember answered a question");
     const auto taskQuestion = TaskTarget::from(Tasks(store).task(question).task, questionBefore.waitId);
-    rejected<DecisionDenied>([&] { TaskControl(store).operate(bob, taskQuestion, "answer", {{"text", "Final"}}); },
-                             "nonmember answered through the direct controls");
+    rejected<AccessDenied>([&] { TaskControl(store).operate(bob, taskQuestion, "answer", {{"text", "Final"}}); },
+                           "nonmember answered through the direct controls");
     auto forged = questionBefore;
     ++forged.targetGeneration;
     rejected<RequestChanged>([&] { Inbox(store).decideInbox(alice, forged, "answer", {{"text", "Final"}}); },

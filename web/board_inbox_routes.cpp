@@ -89,7 +89,7 @@ void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks&
             error(res, 400, "invalid_input");
         } catch (const std::invalid_argument&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied& e) {
+        } catch (const AccessDenied& e) {
             error(res, 403, "access_denied", e.what());
         } catch (const RequestChanged& e) {
             error(res, 409, "request_changed", e.what());

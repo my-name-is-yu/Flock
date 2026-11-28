@@ -2,7 +2,6 @@
 #include "database.hpp"
 #include "secret_storage.hpp"
 #include "store_access.hpp"
-#include "flock/decision_errors.hpp"
 #include "flock/secrets.hpp"
 #include "flock/policy.hpp"
 #include "conversation_storage.hpp"
@@ -74,7 +73,7 @@ Json BotSetupStorage::apply(std::string_view bot, std::string_view operation, co
 
 void BotSetupStorage::undo(const Person& actor, std::string_view bot, Id event) {
     std::lock_guard lock(database.mutex);
-    if (!Policy{store}.allows(actor, Action::bot_settings, bot)) throw DecisionDenied{};
+    if (!Policy{store}.allows(actor, Action::bot_settings, bot)) throw AccessDenied{};
     if (!save) throw Conflict("Bot setup changes are unavailable");
     auto row = database.query("SELECT data,operation_id FROM journal WHERE id=? AND conversation_bot_id=? AND kind='bot_setup_updated'",
                               {event, bot});

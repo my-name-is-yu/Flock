@@ -6,7 +6,6 @@
 #include "flock/task_history.hpp"
 #include "flock/task_list.hpp"
 #include "bots.hpp"
-#include "flock/decision_errors.hpp"
 #include "demo.hpp"
 #include "chatgpt_web.hpp"
 #include "model.hpp"
@@ -364,7 +363,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         if (section == "channels" && actor != localOwner) {
             const auto action = args.value("action", "");
             if (action == "saveMachine" || action == "removeMachine" || (action == "options" && args.contains("sessionCredential")))
-                throw DecisionDenied{};
+                throw AccessDenied{};
         }
         return connections.change(section, args);
     };

@@ -327,7 +327,7 @@ Id TaskIntake::submit(const Intake& item, const Person* requester) {
 
 Id TaskOperations::submitRequest(const Intake& item, const Person* requester) {
     if (!requester) return submit(item);
-    if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw DecisionDenied{};
+    if (!permissions.allows(*requester, Action::bot_talk, item.botId)) throw AccessDenied{};
     secretStorage.sharedRedactor().requirePublic(requester->id);
     return submit(item, 0, nullptr, {}, requester->id);
 }
@@ -384,7 +384,7 @@ void TaskControl::operate(const Person& actor, const TaskTarget& target, std::st
 void TaskOperations::operate(const Person& actor, const TaskTarget& target, std::string_view operation, const Json& input, Id sourceMessage,
                              std::optional<InboxKind> expectedKind) {
     const auto& [bot, id, waitId, revision, generation] = target;
-    if (!permissions.allows(actor, Action::bot_decide, bot)) throw DecisionDenied{};
+    if (!permissions.allows(actor, Action::bot_decide, bot)) throw AccessDenied{};
     if (operation != "cancel" && botLifecycle.botPaused(bot)) throw BotPaused{};
     auto task = taskRecords.load(id);
     if (task.botId != bot || task.currentRevision.value_or(0) != revision) throw RequestChanged{};

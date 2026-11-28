@@ -3,7 +3,6 @@
 #include "flock/bot_id.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/t3.hpp"
-#include "flock/decision_errors.hpp"
 #include "flock/t3_connection.hpp"
 #include "flock/json.hpp"
 #include "flock/person.hpp"
@@ -178,7 +177,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                         reply(res, 200, result);
                     } catch (const Json::exception&) {
                         error(res, 400, "invalid_input");
-                    } catch (const DecisionDenied&) {
+                    } catch (const AccessDenied&) {
                         error(res, 403, "access_denied");
                     } catch (const Conflict& failure) {
                         error(res, 409, "settings_not_saved", failure.what());
@@ -215,7 +214,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 200, {{"bridges", callbacks.changeBotChannel(bot, args)}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict& failure) {
             error(res, 409, "settings_not_saved", failure.what());
@@ -236,7 +235,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             const auto actor = person(callbacks, req);
-            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw AccessDenied{};
             if (!args.is_object() || args.size() != (args.contains("switchAccount") ? 2 : 1)) return error(res, 400, "invalid_input");
             const auto reconsent = args.at("reconsent").get<bool>();
             const auto switchAccount = args.value("switchAccount", false);
@@ -247,7 +246,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 202, {{"ok", true}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const std::exception&) {
             error(res, 503, "sign_in_unavailable");
@@ -271,7 +270,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         if (req.body.size() > 8192) return error(res, 413, "payload_too_large");
         try {
             const auto actor = person(callbacks, req);
-            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw AccessDenied{};
             const auto target = parseT3ConnectRequest(Json::parse(req.body));
             if (!target) return error(res, 400, "invalid_input");
             if (!callbacks.t3Connect) return error(res, 409, "connect_unavailable");
@@ -279,7 +278,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 202, {{"ok", true}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict&) {
             error(res, 400, "invalid_input");
@@ -290,7 +289,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Post("/api/settings/t3-disconnect", [&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 8192) return error(res, 413, "payload_too_large");
         try {
-            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw AccessDenied{};
             const auto args = Json::parse(req.body);
             if (!args.is_object() || args.size() != 1) return error(res, 400, "invalid_input");
             const auto& value = args.at("environmentId");
@@ -304,7 +303,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 200, {{"ok", true}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const std::exception&) {
             error(res, 500, "disconnect_failed");
@@ -313,7 +312,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
     server.Post("/api/settings/remote-machine", [&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return error(res, 413, "payload_too_large");
         try {
-            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(person(callbacks, req), Action::rules_manage, "installation")) throw AccessDenied{};
             const auto args = Json::parse(req.body);
             if (!args.is_object() || args.size() != 1) return error(res, 400, "invalid_input");
             T3Connections connections(store);
@@ -327,7 +326,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 201, {{"id", credential.id}, {"url", url}, {"bearerToken", credential.bearerToken}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict& failure) {
             error(res, 409, "invalid_input", failure.what());
@@ -338,7 +337,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             const auto actor = person(callbacks, req);
-            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw DecisionDenied{};
+            if (!Policy{store}.allows(actor, Action::rules_manage, "installation")) throw AccessDenied{};
             PolicyRules rules{store};
             if (req.matches[1] == "mode")
                 rules.setMode(actor, args.at("mode").get<std::string>());
@@ -356,7 +355,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             reply(res, 200, {{"ok", true}});
         } catch (const Json::exception&) {
             error(res, 400, "invalid_input");
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error(res, 403, "access_denied");
         } catch (const Conflict&) {
             error(res, 400, "invalid_input");

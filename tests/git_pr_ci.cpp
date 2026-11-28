@@ -5,7 +5,6 @@
 #include "fake_git.hpp"
 #include "fake_git_sessions.hpp"
 #include "flock/secret_ref.hpp"
-#include "flock/decision_errors.hpp"
 #include "flock/tasks.hpp"
 #include "flock/git_events.hpp"
 #include "flock/conversations.hpp"

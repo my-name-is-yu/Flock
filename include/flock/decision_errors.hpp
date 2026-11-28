@@ -10,8 +10,4 @@ struct RequestChanged : Conflict {
 struct DecisionUnavailable : Conflict {
     DecisionUnavailable() : Conflict("The request was already decided or closed.") {}
 };
-
-struct DecisionDenied : Conflict {
-    DecisionDenied() : Conflict("You do not have permission to decide this request.") {}
-};
 }

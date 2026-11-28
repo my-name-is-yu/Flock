@@ -17,4 +17,9 @@ std::string actionId();
 struct Conflict : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+struct AccessDenied : Conflict {
+    AccessDenied() : Conflict("You do not have permission to do this.") {}
+    using Conflict::Conflict;
+};
 }

@@ -1,5 +1,4 @@
 #include "chatgpt_web.hpp"
-#include "flock/decision_errors.hpp"
 #include "model.hpp"
 #include "flock/settings_access.hpp"
 #include "flock/json.hpp"
@@ -55,7 +54,7 @@ bool ChatGPTWeb::signIn(const Person& actor, bool reconsent, bool switchAccount)
         std::string error;
         try {
             model_.loginWeb(reconsent, stop, switchAccount, [&](const auto& commit) { access_.commitIfAdministrator(actor, commit); });
-        } catch (const DecisionDenied&) {
+        } catch (const AccessDenied&) {
             error = "The account that started sign-in can no longer manage Flock.";
         } catch (const ModelError& failure) {
             error = failure.what();
