@@ -77,7 +77,7 @@ async function exercise() {
   check(getComputedStyle(row.querySelector('.bot-message-preview')).textOverflow === 'ellipsis', 'The preview was not truncated to one line');
   check($('#event-41').matches('article.bot-message-row') && !$('#event-41 a'), 'A message from an unavailable Bot became a link');
   const sent = $('#event-42-sent-0');
-  check(sent?.matches('a.bot-message-row.sent') && sent.getAttribute('href') === '/?bot=scout&thread=reviewer&message=39' &&
+  check(sent?.matches('a.bot-message-row') && sent.getAttribute('href') === '/?bot=scout&thread=reviewer&message=39' &&
     sent.querySelector('.bot-message-name').textContent === 'Reviewer' && sent.querySelector('.bot-message-preview').textContent === 'Is it ready?',
     'A message the Bot sent to another Bot did not link to its thread');
   check(!$('#conversation-bot-dms') && !$('.bot-thread-peers'), 'A separate Bot DM entry point is still present');

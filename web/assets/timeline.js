@@ -77,7 +77,6 @@ const icons = {
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
   resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
-  sent: '<path d="M7 17 17 7"/><path d="M9 7h8v8"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
 };
@@ -414,15 +413,14 @@ function memoryNotice(event, canUndo, context) {
   return note;
 }
 
-function botMessageRow({ id, event, peer, text, link, sent }) {
-  const row = node(link ? 'a' : 'article', `bot-message-row${sent ? ' sent' : ''}`);
+function botMessageRow({ id, event, peer, text, link }) {
+  const row = node(link ? 'a' : 'article', 'bot-message-row');
   row.id = id;
   if (link) {
     row.href = link;
     row.dataset.botThread = '';
     row.dataset.timelineAction = 'open-bot-thread';
   } else row.tabIndex = -1;
-  if (sent) row.append(icon('sent', 'glyph bot-message-direction'), node('span', 'sr-only', 'To '));
   const name = node('span', 'bot-message-name', peer.name);
   name.dir = 'auto';
   const preview = node('span', 'bot-message-preview', text ?? '');
@@ -1025,7 +1023,7 @@ function conversationRows(data, events, keep, source) {
         const link = peer ? botThreadUrl(bot.id, peer.id, action.messageId) : null;
         rows.push(keep(`event-${event.id}-sent-${index}`, [action, peer && [peer.name, peer.avatar], link], () =>
           botMessageRow({ id: `event-${event.id}-sent-${index}`, event, peer: peer ?? { id: action.botId, name: action.botId },
-            text: action.text, link, sent: true })));
+            text: action.text, link })));
       }
     }
     for (const item of approvals) {

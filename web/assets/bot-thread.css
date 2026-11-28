@@ -37,8 +37,8 @@
 .bot-thread-own.bot-thread-anchored > .bubble { outline-offset: 6px; }
 
 .bot-message-row {
-  display: flex; align-items: center; gap: .45rem; min-width: 0; max-width: min(100%, 40rem);
-  margin: .2rem 0 0 var(--avatar-col); padding: .2rem .45rem; border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: .45rem; width: fit-content; min-width: 0; max-width: min(100%, 40rem);
+  margin: .2rem auto 0; padding: .2rem .45rem; border-radius: var(--radius-sm);
   color: var(--text-3); font-size: var(--text-sm); line-height: 1.35; text-decoration: none;
 }
 .bot-message-row + .bot-message-row, .row:has(> .bot-message-row) + .row:has(> .bot-message-row) { margin-top: 0; }
@@ -48,11 +48,6 @@ a.bot-message-row:focus-visible { outline: 2px solid var(--focus); outline-offse
 .bot-message-avatar { width: 1.15rem; height: 1.15rem; }
 .bot-message-name { flex: none; max-width: 40%; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .bot-message-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 40rem) {
-  .bot-message-row { margin-inline-start: 0; }
-}
 @media (prefers-reduced-motion: reduce) {
   a.bot-message-row { transition: none; }
 }
-.bot-message-direction { display: inline-grid; flex: none; width: .9rem; height: .9rem; color: var(--text-3); }
-.bot-message-direction svg { width: 100%; height: 100%; }
