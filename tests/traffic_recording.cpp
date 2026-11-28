@@ -1,4 +1,5 @@
 #include "flock/detail/traffic_recording.hpp"
+#include "support.hpp"
 #include "flock/json.hpp"
 
 #include <nlohmann/json.hpp>
@@ -17,9 +18,7 @@ using namespace flockv0::recording;
 
 namespace {
 
-void check(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
-}
+using flockv0::test::check;
 
 void checkIds() {
     Ids ids;

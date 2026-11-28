@@ -152,7 +152,7 @@ Json post(httplib::Client& client, std::string_view type, std::string_view id, c
 }
 
 void run() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto database = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     Sessions sessions;
@@ -374,7 +374,7 @@ void run() {
 }
 
 void mergeDuringPullRequestCreation() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Sessions sessions;
@@ -413,7 +413,7 @@ void completeAfterPostMergeCI() {
             return {{Decision{"complete", {{"report", "The PR merged and smoke verified version 2."}}, "Verified both criteria"}}};
         }
     } model;
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     host->log = {"smoke: served v2", false};
@@ -474,7 +474,7 @@ void scheduledPullRequestCheck(bool connected, bool webhookFirst, bool waitForCI
         }
     } model;
     model.waitForCI = waitForCI;
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     const std::string currentHead(40, 'b');
@@ -572,7 +572,7 @@ void multipleWatchedPullRequests() {
             return {{Decision{"reply", {{"text", "Recorded the Git event."}}, {}}}};
         }
     } model;
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     Sessions sessions;
     auto host = std::make_shared<FakeHost>();
@@ -626,7 +626,7 @@ void multipleWatchedPullRequests() {
 
 void mergeWhileScheduledCheckWaitsForProject() {
     Bot model;
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Sessions sessions;

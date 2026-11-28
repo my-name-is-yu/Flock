@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "../tests/support.hpp"
 #include "flock/intake.hpp"
 #include "model.hpp"
 #include "flock/json.hpp"
@@ -24,9 +25,7 @@
 
 namespace flockv0::app {
 namespace {
-void check(bool pass, std::string_view reason) {
-    if (!pass) throw std::runtime_error(std::string(reason));
-}
+using flockv0::test::check;
 }
 
 void sessionConversationDispatch(Store& store, const Json& config) {

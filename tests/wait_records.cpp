@@ -1,4 +1,5 @@
 #include "../src/wait_storage.hpp"
+#include "support.hpp"
 #include "flock/record_decode_error.hpp"
 #include "flock/json.hpp"
 #include "flock/run_ref.hpp"
@@ -18,9 +19,7 @@
 
 using namespace flockv0;
 namespace {
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 Json stored(std::string_view reason) {
     return {{"reason", reason}, {"eventId", 21}, {"text", "Paused"}, {"actionId", "flock-example"}, {"run", nullptr}};

@@ -66,7 +66,7 @@ PeerBot peer(std::string_view bot) {
 }
 
 void listenerRebind() {
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     T3Connections connections(store);
     constexpr unsigned oldPort = 4173;
@@ -176,7 +176,7 @@ public:
 
 void remoteMachines() {
     FixedT3 t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     T3Connections connections(store);
     try {
@@ -259,7 +259,7 @@ void remoteMachineRevocation() {
             return metadata;
         }
     } t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     T3Connections connections(store);
     const auto local = connections.authenticate(connections.connect("env-1", localOwner.id, 4173));
@@ -306,7 +306,7 @@ void stopDuringSendPreflight() {
             return {Delivery::Kind::Accepted, {"thread", "queued-run", {}}, {}, false, "queued"};
         }
     } t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = T3Connections(store).connect("env-1", localOwner.id, 4173);
     auto cb = callbacks();
@@ -351,7 +351,7 @@ void stopDuringSendDispatch() {
             return QueueCancelOutcome::Cancelled;
         }
     } t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = T3Connections(store).connect("env-1", localOwner.id, 4173);
     auto cb = callbacks();
@@ -429,7 +429,7 @@ void pausedBotStopsSessionMessages() {
             return InterruptOutcome::Requested;
         }
     } t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     auto cb = callbacks();
     cb.sessionT3 = &t3;
@@ -551,7 +551,7 @@ void webSendParticipation() {
             return {{{"reply", {{"text", "Done."}}, "Finish the turn"}}};
         }
     } model;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = T3Connections(store).connect("env-1", alice.id, 4173);
     auto cb = callbacks();
@@ -681,7 +681,7 @@ void sessionInvitations() {
         }
     } model;
 
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     Store store(database);
     auto cb = callbacks();
@@ -893,7 +893,7 @@ void syntheticTurnsFollowSessionProgress() {
             return {{{"reply", {{"text", "Done."}}, "Finish the turn"}}};
         }
     } model;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     T3Connections connector(store);
     const auto token = connector.connect("env-1", localOwner.id, 4173);
@@ -943,7 +943,7 @@ void slowProbeAndStoppedApproval() {
             return SessionMetadata{.title = "Staging follow-up", .projectId = "project"};
         }
     } t3;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     auto connection = T3Connections(store);
     const auto token = connection.connect("env-0-stalled", localOwner.id, 4173);
@@ -1027,7 +1027,7 @@ void stopSelectedTaskAndConsultation() {
             return {{{"delegate", {{"instruction", "Check staging."}, {"doneWhen", "Staging is checked."}}, "Run the task"}}};
         }
     } model;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = T3Connections(store).connect("env-1", localOwner.id, 4173);
     auto cb = callbacks();
@@ -1074,7 +1074,7 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
                {"sessionAskFixture", true}});
     auto t3 = makeT3Mcp(credentials);
 
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     const auto makeStore = [&] {
         auto store = std::make_unique<Store>(database);
@@ -1234,7 +1234,7 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
                {"botRunStatus", "queued"},
                {"stopDropReply", "bot-run-3"}});
     auto t3 = makeT3Mcp(credentials);
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     auto db = std::make_unique<Store>(database);
     auto cb = callbacks();
@@ -1380,7 +1380,7 @@ void stopChildSessions(std::string_view fixtureUrl, const std::filesystem::path&
             return {{{"reply", {{"text", "Task started."}}, "End the turn"}}};
         }
     } model;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     auto db = std::make_unique<Store>(database);
     auto t3 = makeT3Mcp(credentials);

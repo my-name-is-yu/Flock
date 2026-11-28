@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "../tests/support.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "flock/identity.hpp"
 #include "flock/conversations.hpp"
@@ -40,9 +41,7 @@
 using namespace flockv0;
 
 namespace {
-void check(bool pass, const char* reason) {
-    if (!pass) throw std::runtime_error(reason);
-}
+using flockv0::test::check;
 
 struct SearchModel final : Model {
     Decision next;

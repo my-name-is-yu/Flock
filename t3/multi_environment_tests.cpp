@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "../tests/support.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_intake.hpp"
 #include "flock/task_list.hpp"
@@ -50,9 +51,7 @@ constexpr auto holdLocal = "Hold the local project";
 constexpr auto threadId = "shared-thread";
 constexpr auto runId = "shared-run";
 
-void check(bool pass, std::string_view detail) {
-    if (!pass) throw std::runtime_error(std::string(detail));
-}
+using flockv0::test::check;
 
 struct Endpoint {
     std::string name, origin;

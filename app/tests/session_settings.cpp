@@ -47,7 +47,7 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
         check(response.status == 200, "could not read fixture effects");
         return Json::parse(response.body);
     };
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto folder = temp.path / "bots";
     const auto database = temp.path / "tasks.db";
     const Bots bots(folder);

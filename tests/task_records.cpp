@@ -1,4 +1,5 @@
 #include "flock/intake.hpp"
+#include "support.hpp"
 #include "flock/task_intake.hpp"
 #include "../src/task_storage.hpp"
 #include "../src/journal.hpp"
@@ -36,9 +37,7 @@ using namespace std::literals;
 namespace {
 constexpr Id id = 47, generation = 12;
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 struct SavedTask {
     struct Directory {

@@ -122,7 +122,7 @@ GitWebhook review(std::string id) {
 }
 
 struct Fixture {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store;
     std::shared_ptr<FakeHost> host = std::make_shared<FakeHost>();
     Sessions sessions;

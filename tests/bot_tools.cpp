@@ -1,4 +1,5 @@
 #include "flock/t3_connection.hpp"
+#include "support.hpp"
 #include "flock/bot_memory.hpp"
 #include "flock/secret_ref.hpp"
 #include "flock/conversation_intake.hpp"
@@ -64,9 +65,7 @@ constexpr std::string_view secretMarker = "vault-only-marker";
 constexpr std::string_view peerMarker = "other-bot-only-marker";
 constexpr std::string_view historyMarker = "session-only-marker";
 
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 void write(const fs::path& path, std::string_view data) {
     std::ofstream file(path);
     file << data;

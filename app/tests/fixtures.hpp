@@ -1,6 +1,7 @@
 #pragma once
 
 #include "flock/json.hpp"
+#include "../../tests/support.hpp"
 #include "flock/types.hpp"
 
 #include <nlohmann/json.hpp>
@@ -17,24 +18,9 @@
 #include <system_error>
 
 namespace flockv0::app::test {
-class Sandbox {
-public:
-    Sandbox() {
-        auto pattern = (std::filesystem::temp_directory_path() / "flock-app-XXXXXX").string();
-        const char* made = mkdtemp(pattern.data());
-        if (!made) throw std::runtime_error("Temporary directory setup failed");
-        path = made;
-    }
-    ~Sandbox() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-    std::filesystem::path path;
-};
 
-inline void check(bool condition, std::string_view what) {
-    if (!condition) throw std::runtime_error(std::string(what));
-}
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 template <typename Error, typename Function> void rejects(Function run, std::string_view what) {
     try {

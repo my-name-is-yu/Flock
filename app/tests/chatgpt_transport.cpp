@@ -1,4 +1,5 @@
 #include "../chatgpt.hpp"
+#include "../../tests/support.hpp"
 #include "../chatgpt_failure.hpp"
 #include "../model.hpp"
 #include "fixtures.hpp"
@@ -34,9 +35,8 @@ using namespace flockv0;
 using namespace flockv0::app::chatgpt;
 
 namespace {
-void check(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
-}
+using flockv0::test::check;
+using flockv0::test::TemporaryDirectory;
 
 void checkTlsDisconnect() {
     struct Socket {
@@ -272,7 +272,7 @@ void checkRecordings(const std::filesystem::path& recordingFile) {
     checkRecordedBatch(records[0].at("exchange"), batch);
     checkRecordedError(records[1].at("exchange"), errorRequest);
 
-    const app::test::Sandbox sandbox;
+    const TemporaryDirectory sandbox;
     const auto capturedFile = sandbox.path / "capture.jsonl";
     check(setenv("FLOCK_RECORD_CHATGPT", capturedFile.c_str(), 1) == 0 &&
               setenv("FLOCK_RECORD_CHATGPT_MODEL", records[0].at("modelSlug").get_ref<const std::string&>().c_str(), 1) == 0 &&
@@ -332,7 +332,7 @@ void checkRecordings(const std::filesystem::path& recordingFile) {
 }
 
 void checkInspectedImageRequest() {
-    const app::test::Sandbox credentials;
+    const TemporaryDirectory credentials;
     std::filesystem::permissions(credentials.path, std::filesystem::perms::owner_all);
     const auto profile = credentials.path / "profile.json";
     const Json token{{"subject", "fixture"},

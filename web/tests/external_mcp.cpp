@@ -150,7 +150,7 @@ void checkByteLimit(const Json& tools, std::string_view name, std::string_view d
 }
 
 void credentialScopes() {
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto externalToken = ExternalMcp(store).connect(localOwner.id, {"release"}).bearerToken;
     const auto sessionToken = T3Connections(store).connect("local-env", localOwner.id, 4173);
@@ -177,7 +177,7 @@ void credentialScopes() {
 }
 
 void pausedBotRefusesExternalMessages() {
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = ExternalMcp(store).connect(localOwner.id, {"release", "triage"}).bearerToken;
     const auto server = startWeb(store, 0, callbacks());
@@ -206,7 +206,7 @@ void pausedBotRefusesExternalMessages() {
 }
 
 void roundTrip() {
-    TestDirectory dir;
+    TemporaryDirectory dir;
     const auto database = dir.path / "flock.sqlite3";
     const Json ask{{"bot", "release"}, {"text", multilingualText(8192)}, {"requestId", "notes-1"}};
     ExternalMcpCredential caller, other;
@@ -350,7 +350,7 @@ void replannedTaskDropsPriorRun() {
             throw std::runtime_error("The conversation could not see the external Task");
         }
     } model;
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto token = ExternalMcp(store).connect(localOwner.id, {"release"}).bearerToken;
     const auto cb = callbacks();
@@ -386,7 +386,7 @@ void hostedSessionLinks() {
     task.runs = {{.run = {{"loopback~nightly", {}, loopbackUrl, {}}, "build.prod", {}}},
                  {.run = {{"thread~nightly", {}, hostedSession.at("link"), {}}, "build.prod", {}}}};
     const std::vector tasks{std::move(task)};
-    TestDirectory dir;
+    TemporaryDirectory dir;
     Store store(dir.path / "flock.sqlite3");
     const auto view = web::botView(store, {{"id", "release"}}, &tasks);
     const auto& links = view.at("sessionTasks").at(0).at("sessions");

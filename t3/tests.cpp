@@ -1,4 +1,5 @@
 #include "flock/task.hpp"
+#include "../tests/support.hpp"
 #include "flock/task_history.hpp"
 #include "flock/web_conversation_intake.hpp"
 #include "internal.hpp"
@@ -60,9 +61,7 @@ void boundedSessionSearch(T3&, const std::filesystem::path&, const std::function
 void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 
 namespace {
-void check(bool pass, std::string_view reason) {
-    if (!pass) throw std::logic_error(std::string(reason));
-}
+using flockv0::test::check;
 
 void lineageFallback(T3& t3, Command launch, const std::function<void(Json)>& fixture, const std::function<Json(std::string_view)>& effects,
                      const std::function<Json()>& sessions) {

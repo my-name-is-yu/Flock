@@ -1,4 +1,5 @@
 #include "../src/tool_batch.hpp"
+#include "support.hpp"
 #include "flock/git_host.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/decision.hpp"
@@ -20,9 +21,7 @@ using namespace flockv0;
 using namespace flockv0::tool_batch;
 
 namespace {
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
+using flockv0::test::check;
 
 Decision call(std::string_view tool, Json args = Json::object()) {
     return {std::string(tool), std::move(args), {}};

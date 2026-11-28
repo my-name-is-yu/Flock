@@ -141,7 +141,7 @@ Json runUntilToolResult(HandoffModel& model, Runtime& runtime, std::string_view 
 }
 
 void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyncHead) {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     HandoffModel model;

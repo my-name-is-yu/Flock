@@ -1,4 +1,5 @@
 #include "flock/conversation_intake.hpp"
+#include "support.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
 #include "flock/task_intake.hpp"
@@ -63,9 +64,7 @@ using namespace flockv0;
 using flockv0::test::lastTaskEvent;
 
 namespace {
-void check(bool ok, const char* message) {
-    if (!ok) throw std::runtime_error(message);
-}
+using flockv0::test::check;
 
 struct Fixture {
     std::filesystem::path dir;

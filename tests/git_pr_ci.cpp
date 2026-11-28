@@ -174,7 +174,7 @@ std::string watchedPrUrl(const std::filesystem::path& db) {
 }
 
 void freshPrSchema() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "fresh.db";
     Store store(path);
     sqlite3* raw = nullptr;
@@ -193,7 +193,7 @@ SELECT NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE name IN ('pr_review_items',
 }
 
 void runner() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     Sessions sessions;
@@ -262,7 +262,7 @@ void runner() {
 }
 
 void invalidWebhookMetadata() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     const GitWebhook valid{hostName, "metadata", repoName, "ci", "completed", {1}, sha, "Finished"};
     const auto rejects = [&](std::string_view name, auto change) {
@@ -289,7 +289,7 @@ void invalidWebhookMetadata() {
 }
 
 void webhookHeadPeriods() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;
@@ -331,7 +331,7 @@ void webhookHeadPeriods() {
 }
 
 void pausedGitNotifications() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     Script script;
@@ -371,7 +371,7 @@ void pausedGitNotifications() {
 }
 
 void webhookDeliveryResumesAfterAnIdlePoll() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     Store store(path), receiver(path);
     auto host = std::make_shared<FakeHost>();
@@ -445,7 +445,7 @@ void selectCandidateInSameTurn() {
             return decodeCall(app::responseRequest(input), "git_open_pr", call);
         }
     };
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     Store store(path);
     auto host = std::make_shared<FakeHost>();
@@ -464,7 +464,7 @@ void selectCandidateInSameTurn() {
 }
 
 void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = false, bool wrongCorrelation = false) {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     auto host = std::make_shared<FakeHost>();
     host->create = losesRequest ? FakeHost::Create::lostRequest : FakeHost::Create::lostResponse;
@@ -566,7 +566,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
 }
 
 void accessAndActions() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;
@@ -707,7 +707,7 @@ void accessAndActions() {
 }
 
 void newAttempts() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;
@@ -740,7 +740,7 @@ void newAttempts() {
 }
 
 void redaction() {
-    Directory directory;
+    TemporaryDirectory directory;
     const auto path = directory.path / "state.db";
     Store store(path);
     auto host = std::make_shared<FakeHost>();
@@ -783,7 +783,7 @@ void redaction() {
 }
 
 void notificationCannotControlASession() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;
@@ -821,7 +821,7 @@ void notificationCannotControlASession() {
 }
 
 void notificationEvidenceAndRevocation() {
-    Directory directory;
+    TemporaryDirectory directory;
     Store store(directory.path / "state.db");
     auto host = std::make_shared<FakeHost>();
     Script script;

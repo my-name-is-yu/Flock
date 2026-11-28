@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -83,9 +84,7 @@ Decision converse(const ModelInput& input, const std::string& tool, Id taskId, J
     if (!args.contains(text)) args[text] = input.event.at("text");
     return {tool, std::move(args), "Scripted turn"};
 }
-void check(bool ok, const char* why) {
-    if (!ok) throw std::runtime_error(why);
-}
+using flockv0::test::check;
 void executeSql(const std::filesystem::path& databaseFile, const char* sql) {
     sqlite3* database = nullptr;
     const auto opened = sqlite3_open(databaseFile.c_str(), &database);

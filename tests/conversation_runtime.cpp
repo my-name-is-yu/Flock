@@ -1,4 +1,5 @@
 #include "flock/bot_lifecycle.hpp"
+#include "support.hpp"
 #include "flock/conversation_intake.hpp"
 #include "flock/task_control.hpp"
 #include "flock/task_history.hpp"
@@ -77,9 +78,7 @@ using namespace flockv0;
 using flockv0::test::lastTaskEvent;
 
 namespace {
-void check(bool ok, const char* why) {
-    if (!ok) throw std::runtime_error(why);
-}
+using flockv0::test::check;
 
 using Step = std::function<Decision(const ModelInput&)>;
 

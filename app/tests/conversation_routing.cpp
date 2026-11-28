@@ -79,7 +79,7 @@ struct RoutingT3 final : T3 {
     }
 };
 
-Intake pinnedBot(const Sandbox& temp) {
+Intake pinnedBot(const TemporaryDirectory& temp) {
     auto config = botConfig();
     const auto folder = temp.path / "bots";
     createBot(folder / "release", config, "Verify revisions.", "");
@@ -87,7 +87,7 @@ Intake pinnedBot(const Sandbox& temp) {
 }
 
 void parallelDestinations() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto intake = pinnedBot(temp);
     RoutingModel model;
     RoutingT3 t3;
@@ -151,7 +151,7 @@ void parallelDestinations() {
 }
 
 void genericDestinationCounts() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto intake = pinnedBot(temp);
     RoutingModel model;
     RoutingT3 t3;
@@ -181,7 +181,7 @@ void genericDestinationCounts() {
 }
 
 void manyConnectedDestinations() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     RoutingModel model;
     RoutingT3 t3;
     Store store(temp.path / "state.db");
@@ -211,7 +211,7 @@ void manyConnectedDestinations() {
 }
 
 void destinationWithoutSessionIsUnavailable() {
-    Sandbox temp;
+    TemporaryDirectory temp;
     auto intake = pinnedBot(temp);
     intake.request = "Verify the release";
     const auto database = temp.path / "state.db";
@@ -245,7 +245,7 @@ VALUES(?,0,'mini','mini-env','mini-project','saved-action','running','{}')
 }
 
 void moveWithProject(std::string_view project, bool explicitProject, bool sameEnvironment = false) {
-    Sandbox temp;
+    TemporaryDirectory temp;
     auto intake = pinnedBot(temp);
     intake.request = "Verify the release";
     if (sameEnvironment) {
@@ -284,7 +284,7 @@ void moveWithProject(std::string_view project, bool explicitProject, bool sameEn
 }
 
 void modelFailureGivesGuidance(ModelErrorCode code, std::string_view guidance) {
-    Sandbox temp;
+    TemporaryDirectory temp;
     const auto intake = pinnedBot(temp);
     RejectedModel model(code);
     RoutingT3 t3;
