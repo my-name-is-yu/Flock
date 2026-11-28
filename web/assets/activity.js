@@ -2,6 +2,7 @@ import { actionLabel, approvalSummary } from './action-labels.mjs';
 import { accentColor, presenceMotion, showAvatar } from './avatars.js';
 import { pendingKindLabels, sessionEndLabels, stateLabels } from './conversation-copy.mjs';
 import { node } from './dom.js';
+import { botDmUrl } from './bot-dm-url.js';
 import {
   bots,
   byId,
@@ -37,6 +38,7 @@ export function renderHeader() {
   elements['profile-placeholder'].hidden = !!bot || (listLoaded && !bots.length);
   elements['bot-activity'].hidden = !bot;
   byId('conversation-bot-settings').hidden = !bot;
+  if (bot) byId('conversation-bot-dms').href = botDmUrl(bot.id);
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
   if (nextScopeKey !== scopeKey) {
     if (bot) elements['activity-scope-name'].textContent = `${bot.name} activity`;

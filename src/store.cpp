@@ -452,6 +452,50 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
+std::vector<std::string> Conversations::botDmPeers(std::string_view bot, const std::vector<std::string>& candidates) const {
+    std::lock_guard lock(database_.mutex);
+    auto rows = database_.query(R"SQL(
+WITH inbound AS (
+  SELECT json_extract(data,'$.botMessage.fromBotId') AS sender,max(id) AS latest
+  FROM journal WHERE conversation_bot_id=?1 AND kind='conversation_message' AND sender IS NOT NULL
+  GROUP BY sender
+), peers AS (
+  SELECT peer.value AS bot,max(coalesce(inbound.latest,0),coalesce((
+    SELECT id FROM journal WHERE conversation_bot_id=peer.value AND kind='conversation_message'
+      AND json_extract(data,'$.botMessage.fromBotId')=?1 ORDER BY id DESC LIMIT 1
+  ),0)) AS latest
+  FROM json_each(?2) peer LEFT JOIN inbound ON inbound.sender=peer.value
+)
+SELECT bot FROM peers WHERE latest>0 ORDER BY latest DESC
+)SQL",
+                                {bot, Json(candidates).dump()});
+    std::vector<std::string> result;
+    while (rows.next()) result.push_back(rows.string(0));
+    return result;
+}
+
+Json Conversations::botDmMessages(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from) const {
+    std::lock_guard lock(database_.mutex);
+    // Wake turns can inherit Bot-message routing, but only deliveries have a Bot origin in the journal.
+    const auto sql = std::string(R"SQL(
+SELECT j.id,j.time,j.conversation_bot_id,m.text
+FROM journal j JOIN messages m ON m.id=j.id
+WHERE j.conversation_bot_id IN (?1,?2) AND j.kind='conversation_message'
+  AND j.id BETWEEN ?3 AND ?4
+  AND json_extract(j.data,'$.botMessage.fromBotId')=CASE j.conversation_bot_id WHEN ?1 THEN ?2 ELSE ?1 END
+ORDER BY j.id
+)SQL") + (from ? " ASC LIMIT ?5" : " DESC LIMIT ?5");
+    auto rows = database_.query(sql.c_str(), {bot, peer, from, before ? before - 1 : std::numeric_limits<Id>::max(), limit});
+    auto result = Json::array();
+    while (rows.next()) {
+        result.push_back({{"id", rows.number(0)},
+                          {"time", rows.number(1)},
+                          {"data", {{"fromBotId", rows.string(2) == bot ? peer : bot}, {"text", rows.string(3)}}}});
+    }
+    if (!from) std::reverse(result.begin(), result.end());
+    return result;
+}
+
 Json Conversations::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events, const Person* viewer) const {
     if (before == std::numeric_limits<Id>::min()) return Json::array();
     const auto through = before ? before - 1 : std::numeric_limits<Id>::max();

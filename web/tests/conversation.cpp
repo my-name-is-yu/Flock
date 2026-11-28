@@ -776,6 +776,8 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         std::function<Decision(const ModelInput&)> script;
         ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
+    const std::string question = "Can we **ship** today? [Checklist](https://example.com/release)";
+    const std::string answer = "Yes, ship it. Release key placeholder.";
     // The fixture has no display names, so each Bot is recognized by the one Bot it can reach.
     const auto botOf = [](const ModelInput& input) {
         return input.task.at("bots").at(0).at("botId") == "reviewer" ? std::string("Ernest") : std::string("Reviewer");
@@ -790,27 +792,25 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
                       std::ranges::find(input.tools, "message_bot") != input.tools.end() &&
                       std::ranges::find(input.tools, "request_bot_change") != input.tools.end(),
                   "the conversation could not see the Bot it may message");
-            return {"message_bot", {{"botId", "reviewer"}, {"text", "Can we ship today?"}}, "Ask Reviewer"};
+            return {"message_bot", {{"botId", "reviewer"}, {"text", question}}, "Ask Reviewer"};
         }
         if (botOf(input) == "Reviewer") {
-            check(from == "ernest" && input.event.at("text") == "Can we ship today?" &&
-                      input.event.at("botMessage").at("fromName") == "ernest",
+            check(from == "ernest" && input.event.at("text") == question && input.event.at("botMessage").at("fromName") == "ernest",
                   "Reviewer did not receive Ernest's message as a Bot message");
             for (const auto* tool : {"request_bot_change", "update_bot_setup", "write_memory", "create_schedule", "request_secret_input"})
                 check(std::ranges::find(input.tools, tool) == input.tools.end(), "another Bot's message was given the person's authority");
             if (answered) return {"reply", {{"text", "Ernest に答えました。"}}, "Tell the person"};
-            return {"message_bot", {{"botId", "ernest"}, {"text", "Yes, ship it."}}, "Answer Ernest"};
+            return {"message_bot", {{"botId", "ernest"}, {"text", answer}}, "Answer Ernest"};
         }
-        check(from == "reviewer" && input.event.at("text") == "Yes, ship it." && input.event.at("botMessage").at("depth") == 2,
+        check(from == "reviewer" && input.event.at("text") == answer && input.event.at("botMessage").at("depth") == 2,
               "Reviewer's answer did not reach Ernest");
-        check(std::ranges::any_of(input.history,
-                                  [](const Json& entry) {
-                                      return entry.contains("actions") &&
-                                             entry.at("actions") == Json::array({{{"tool", "message_bot"},
-                                                                                  {"effect", "sent"},
-                                                                                  {"botId", "reviewer"},
-                                                                                  {"text", "Can we ship today?"}}});
-                                  }),
+        check(std::ranges::any_of(
+                  input.history,
+                  [&](const Json& entry) {
+                      return entry.contains("actions") &&
+                             entry.at("actions") ==
+                                 Json::array({{{"tool", "message_bot"}, {"effect", "sent"}, {"botId", "reviewer"}, {"text", question}}});
+                  }),
               "Ernest's history lost the question that Reviewer answered");
         return {"reply", {{"text", "Reviewer says we can ship today."}}, "Relay the answer"};
     };
@@ -823,7 +823,10 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
         return {};
     };
     auto web = callbacks();
-    web.bots = [] { return Json::array({{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}}); };
+    web.bots = [] {
+        return Json::array(
+            {{{"id", "ernest"}, {"name", "Ernest"}}, {{"id", "reviewer"}, {"name", "Reviewer"}}, {{"id", "spare"}, {"name", "Spare"}}});
+    };
     const IntakeResolver intake = [](std::string_view bot, std::string_view request) {
         return Intake{std::string(bot), std::string(request), "local-env", ""};
     };
@@ -837,13 +840,68 @@ void conversationMessagesAnotherBot(const std::filesystem::path& path) {
     const auto inbound = std::ranges::find_if(
         reviewer, [](const Json& event) { return event.at("kind") == "conversation_message" && event.at("data").contains("botMessage"); });
     check(inbound != reviewer.end() && inbound->at("data").at("botMessage").at("fromBotId") == "ernest" &&
-              inbound->at("data").at("text") == "Can we ship today?",
+              inbound->at("data").at("text") == question,
           "Reviewer's conversation did not show who sent the Bot message");
     const auto ernest = browser.get("/api/view?bot=ernest");
     check(conversationReply(ernest, asked.at("messageId")).at("text") == "Reviewer に聞いています。" &&
               hasEvent(ernest.at("events"), "conversation_reply", "Reviewer says we can ship today."),
           "Ernest did not relay Reviewer's answer to the person");
     check(TaskList(store).tasks().empty() && t3.launches == 0, "Bot messaging created a task or used T3");
+
+    constexpr auto pair = "/api/bot-dms?bot=ernest&peer=reviewer";
+    check(browser.get("/api/bot-dms?bot=ernest").at("peers") == Json::array({{{"id", "reviewer"}, {"name", "Reviewer"}}}),
+          "Bot DM picker lost the active peer or showed a Bot with no conversation");
+    const auto events = browser.get(pair).at("events");
+    check(events == browser.get("/api/bot-dms?bot=reviewer&peer=ernest").at("events") && events.size() == 2 &&
+              events.at(0).at("id") == inbound->at("id") && events.at(0).at("data").at("fromBotId") == "ernest" &&
+              events.at(1).at("data").at("fromBotId") == "reviewer" && events.at(1).at("data").at("text") == answer,
+          "Bot DM must contain each delivery once in order from either perspective");
+    check(field(events.at(0).at("data"), "textHtml").find("<strong>ship</strong>") != std::string::npos, "Bot DM lost Markdown formatting");
+    const auto firstId = events.front().at("id").get<Id>();
+    Browser::checked(browser.client.Get(std::string(pair) + "&anchor=" + asked.at("messageId").dump()), 404);
+    const auto page = browser.client.Get("/bot-dms?bot=ernest&peer=reviewer");
+    check(page && page->status == 200 && page->body.find("dm-timeline") != std::string::npos, "the dedicated Bot DM page is missing");
+
+    model.script = [](const ModelInput& input) -> Decision {
+        if (input.event.contains("botMessage") || !input.event.at("turn").empty()) return {"reply", {{"text", "Done."}}, ""};
+        return {"message_bot", {{"botId", "reviewer"}, {"text", "Another message."}}, ""};
+    };
+    for (int i = 0; i < 38; ++i) {
+        browser.post("/api/messages", {{"botId", "ernest"}, {"clientMessageId", "dm-" + std::to_string(i)}, {"text", "Send more"}}, 201);
+        runtime.runConversations();
+        runtime.runConversations();
+    }
+    const auto latest = browser.get(pair);
+    const auto earlier = browser.get(std::string(pair) + "&before=" + latest.at("olderBefore").dump());
+    const auto anchored = browser.get(std::string(pair) + "&anchor=" + std::to_string(firstId));
+    check(latest.at("events").size() == 36 && earlier.at("events").size() == 4 && earlier.at("olderBefore") == 0 &&
+              earlier.at("events").back().at("id") < latest.at("events").front().at("id") &&
+              anchored.at("events").front().at("id") == firstId && anchored.at("hasNewer") == true,
+          "Bot DM history has a gap, duplicate, or missing anchor");
+
+    SecretRequests secrets{store};
+    const auto secret = secrets.requestSecret("reviewer", {"release-key"});
+    secrets.submitSecret(localOwner, "reviewer", secret, "Release key placeholder");
+    const auto redacted = browser.get(std::string(pair) + "&anchor=" + std::to_string(firstId));
+    check(redacted.dump().find("Release key placeholder") == std::string::npos && redacted.dump().find("[redacted]") != std::string::npos,
+          "Bot DM exposed a secret registered by the sender");
+
+    const Person owner{"owner", false};
+    BotAccess access{store};
+    access.setOwner(owner, "ernest");
+    access.setOwner(owner, "reviewer");
+    access.setMember(owner, "ernest", "reader", true);
+    web.authenticate = [](std::string_view credential) { return credential == "Bearer reader" ? Person{"reader", false} : Person{}; };
+    web.resolveIdentity = [](std::string_view) -> std::optional<bool> { return false; };
+    const auto shared = startWeb(store, 0, web);
+    Browser reader(*shared);
+    reader.client.set_default_headers({{"Authorization", "Bearer reader"}});
+    check(reader.get("/api/bot-dms?bot=ernest").at("peers").empty(), "Bot DM picker exposed an inaccessible peer");
+    Browser::checked(reader.client.Get(pair), 403);
+    Browser::checked(reader.client.Get("/api/bot-dms?bot=reviewer&peer=ernest"), 403);
+    access.setMember(owner, "reviewer", "reader", true);
+    check(reader.get(pair).at("events") == latest.at("events") && reader.get("/api/bot-dms?bot=ernest").at("peers").size() == 1,
+          "A shared reader with access to both Bots could not read the transcript");
 }
 
 void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {
@@ -889,6 +947,8 @@ void botStartedTaskKeepsItsBotOrigin(const std::filesystem::path& path) {
                 .kind = Observation::Kind::Finished, .status = "completed", .report = "Checked.", .itemId = "report"};
     }
     check(woke, "the Bot-started task never woke its conversation");
+    check(browser.get("/api/bot-dms?bot=ernest&peer=reviewer").at("events").size() == 1,
+          "A task wake inherited Bot-message routing and appeared as a DM");
 }
 
 void botMessagesStopAtTheExchangeLimit(const std::filesystem::path& path) {

@@ -275,6 +275,7 @@ public:
         });
         for (const auto& asset : web::assets) {
             const auto path = asset.path == "/index.html"          ? "/"
+                              : asset.path == "/bot-dms.html"      ? "/bot-dms"
                               : asset.path == "/settings.html"     ? "/settings"
                               : asset.path == "/bot-settings.html" ? R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))"
                                                                    : asset.path;
@@ -293,6 +294,7 @@ public:
             setViewer(res, callbacks_, actor);
             reply(res, 200, botList(actor));
         });
+        server_.Get("/api/bot-dms", [this](const Request& req, Response& res) { readBotDms(req, res); });
         server_.Get("/api/events", [this](const Request& req, Response& res) { changes(req, res); });
         server_.Post("/api/notifications", [this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_, req);
@@ -635,6 +637,49 @@ private:
         auto bot = Policy{store_}.redactSecrets(id, view);
         bot["id"] = id;
         return bot;
+    }
+
+    void readBotDms(const Request& req, Response& res) const {
+        const auto bot = req.get_param_value("bot");
+        const auto peer = req.get_param_value("peer");
+        if (req.get_param_value_count("bot") != 1 || !validBotId(bot)) return error(res, 400, "invalid_bot");
+        if (req.has_param("peer") && (req.get_param_value_count("peer") != 1 || !validBotId(peer) || peer == bot))
+            return error(res, 400, "invalid_peer");
+        const auto actor = web::person(callbacks_, req);
+        const Policy policy{store_};
+        const auto canView = [&](std::string_view id) { return policy.allows(actor, Action::bot_view, id); };
+        if (!canView(bot) || (!peer.empty() && !canView(peer))) return error(res, 403, "access_denied");
+        const auto known = bots();
+        const auto* owner = botById(known, bot);
+        if (!owner) return error(res, 404, "bot_not_found");
+        const auto participant = [this](const Json& descriptor) {
+            return redactBot(field(descriptor, "id"), web::botDmParticipant(descriptor));
+        };
+        try {
+            const auto before = queryId(req, "before", true);
+            const auto anchor = req.has_param("anchor") ? queryId(req, "anchor", false) : 0;
+            if ((before && anchor) || (peer.empty() && (before || anchor))) return error(res, 400, "invalid_cursor");
+            if (!peer.empty()) {
+                const auto* other = botById(known, peer);
+                if (!other) return error(res, 404, "bot_not_found");
+                auto page = web::botDm(store_, bot, peer, before, anchor);
+                page["bot"] = participant(*owner);
+                page["peer"] = participant(*other);
+                return reply(res, 200, page);
+            }
+            std::vector<std::string> candidates;
+            for (const auto& descriptor : known) {
+                const auto id = field(descriptor, "id");
+                if (!id.empty() && id != bot && canView(id)) candidates.push_back(id);
+            }
+            auto peers = Json::array();
+            for (const auto& id : Conversations(store_).botDmPeers(bot, candidates)) peers.push_back(participant(*botById(known, id)));
+            reply(res, 200, {{"bot", participant(*owner)}, {"peers", std::move(peers)}});
+        } catch (const InputError& e) {
+            error(res, 400, e.what());
+        } catch (const Conflict&) {
+            error(res, 404, "bot_message_not_found");
+        }
     }
 
     Json findBot(std::string_view id) const {

@@ -2,7 +2,8 @@ import { taskWaitDecision } from './board-inbox.js';
 import { orderSetupNotices, setupNotice } from './bot-setup.js';
 import { isMemoryNotice, isSystemNotice, messagePlacement, messageSide } from './chat-grouping.mjs';
 import { closedLabels, pendingActionLabels, stateLabels } from './conversation-copy.mjs';
-import { node } from './dom.js';
+import { node, setMessageBody } from './dom.js';
+import { botDmUrl } from './bot-dm-url.js';
 import { timelineMessages } from './event-history.mjs';
 import { hasQuestionChoices, questionChoiceForm, questionReplyButton } from './question-choices.js';
 import { replyArrivalId } from './reply-arrival.mjs';
@@ -84,13 +85,6 @@ function icon(name, className = 'glyph') {
   host.setAttribute('aria-hidden', 'true');
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
   return host;
-}
-function setMessageHtml(element, html) {
-  element.innerHTML = html;
-  for (const link of element.querySelectorAll('a[href]')) {
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-  }
 }
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
@@ -327,12 +321,6 @@ function inlineEdge(text, last) {
   const block = last ? text.lastElementChild : text.firstElementChild;
   return text.classList.contains('markdown-body') && block?.tagName === 'P' ? block : text;
 }
-function setBody(text, html, plain) {
-  if (typeof html === 'string') {
-    text.classList.add('markdown-body');
-    setMessageHtml(text, html);
-  } else text.append(document.createTextNode(plain ?? ''));
-}
 function appendTrailingIcon(body, icon) {
   const text = inlineEdge(body, true);
   const last = text.lastChild;
@@ -425,7 +413,7 @@ function memoryNotice(event, canUndo, context) {
   return note;
 }
 
-function eventCard(event, context, place, report) {
+function eventCard(event, context, place, report, dmLink) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
@@ -444,10 +432,18 @@ function eventCard(event, context, place, report) {
   if (isMemoryNotice(event))
     return memoryNotice(event, !context.readOnly && bot?.canDelete && data.canUndo, view);
   if (data.botMessage) {
-    const note = node('article', 'system-note session-event', `From ${data.botMessage.fromName} · `);
+    const { fromBotId, fromName } = data.botMessage;
+    const note = node('article', 'system-note session-event');
     note.id = `event-${event.id}`;
     note.tabIndex = -1;
-    note.append(eventTime(event));
+    const label = `From ${fromName || fromBotId}`;
+    if (dmLink) {
+      const link = node('a', 'link', label);
+      link.href = dmLink;
+      link.dataset.timelineAction = 'open-bot-dm';
+      note.append(link);
+    } else note.append(label);
+    note.append(' · ', eventTime(event));
     note.append(node('p', 'session-invitation-note', data.text ?? ''));
     return note;
   }
@@ -547,7 +543,7 @@ function eventCard(event, context, place, report) {
       }
     }
   } else if (event.kind === 'conversation_reply') {
-    setBody(text, data.textHtml, data.text);
+    setMessageBody(text, data.textHtml, data.text);
     text.classList.add('foldable-text');
     bubble.append(text);
     if (data.suggestions?.length) {
@@ -558,7 +554,7 @@ function eventCard(event, context, place, report) {
   } else if (event.kind === 'report') {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || (data.destination ? 'No report is available.' : 'The work is done.');
-    setBody(text, copy === data.report ? data.textHtml : undefined, copy);
+    setMessageBody(text, copy === data.report ? data.textHtml : undefined, copy);
     text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) appendTrailingIcon(text, link);
@@ -574,7 +570,7 @@ function eventCard(event, context, place, report) {
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
-    setBody(text, data.textHtml, data.text);
+    setMessageBody(text, data.textHtml, data.text);
     const lead = inlineEdge(text, false);
     if (outcome === 'completed') {
       lead.prepend(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Work complete: '));
@@ -587,7 +583,7 @@ function eventCard(event, context, place, report) {
     bubble.append(text);
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
   } else {
-    setBody(text, data.textHtml, data.text);
+    setMessageBody(text, data.textHtml, data.text);
     if (trigger) inlineEdge(text, false).prepend(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     bubble.append(text);
     text.classList.add('foldable-text');
@@ -818,9 +814,9 @@ export function renderTimeline(scroll = 'auto', previousScroll = timelineScrollP
     else scroller.scrollTop = previousScroll.top;
     updateJumpToLatest();
   };
-  if (changed('timeline', view?.id, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
+  if (changed('timeline', view?.id, bots, source ?? [sidebarViewer, data?.composerPerson, data?.bot, events, data?.waits, data?.queued,
     decisions.pendingKeys(), listLoaded, data?.presence, data?.activeTasks, data?.parallelTasks, data?.sessionTasks,
-    bots, dayFormat.format(Date.now()),
+    dayFormat.format(Date.now()),
     decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     const added = updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
@@ -996,8 +992,10 @@ function conversationRows(data, events, keep, source) {
     const waitDecision = wait && taskWaitDecision(view.id, wait);
     const request = ['request', 'conversation_message'].includes(event.kind);
     const blocker = request ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const fromBotId = event.data.botMessage?.fromBotId;
+    const dmLink = fromBotId && bot && bots.some(({ id }) => id === fromBotId) ? botDmUrl(bot.id, fromBotId, event.id) : null;
     const row = keep(`event-${report?.id ?? event.id}`,
-      [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
+      [event, report, botVersion, dmLink, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
         place.groupStart, place.taskStart, place.afterQuestion, place.replyQuote, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         waitDecision && decisions.busy(waitDecision),
@@ -1005,7 +1003,7 @@ function conversationRows(data, events, keep, source) {
         request ? timeline.parallelTasks.get(event.taskId) : null,
         isSystemNotice(event) && bot?.canDelete,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
-      () => eventCard(event, timeline, place, report));
+      () => eventCard(event, timeline, place, report, dmLink));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);

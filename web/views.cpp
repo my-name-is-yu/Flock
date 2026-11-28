@@ -445,6 +445,43 @@ Json botList(Store& store, const Json& bots) {
     return result;
 }
 
+Json botDmParticipant(const Json& bot) {
+    auto participant = botSummary(bot);
+    participant.erase("role");
+    return participant;
+}
+
+Json botDm(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor) {
+    const auto history = Conversations(store);
+    const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
+    auto events = history.botDmMessages(bot, peer, anchor ? anchor : before, olderSize + 1);
+    const bool hasOlder = events.size() > olderSize;
+    if (hasOlder) events.erase(events.begin());
+    const Id olderBefore = hasOlder ? events.front().at("id").get<Id>() : 0;
+    bool hasNewer = false;
+    if (anchor) {
+        const auto newerSize = conversationSize - olderSize;
+        auto newer = history.botDmMessages(bot, peer, 0, newerSize + 1, anchor);
+        if (newer.empty() || newer.front().at("id") != anchor) throw Conflict("Bot message not found");
+        hasNewer = newer.size() > newerSize;
+        if (hasNewer) newer.erase(std::prev(newer.end()));
+        for (auto& event : newer) events.push_back(std::move(event));
+    }
+    const Policy policy{store};
+    const auto sender = policy.secretRedactor(bot);
+    const auto recipient = policy.secretRedactor(peer);
+    const markdown::SensitiveText sensitive = [&](std::string_view text) {
+        return sender.containsProtectedText(text) || recipient.containsProtectedText(text);
+    };
+    for (auto& event : events) {
+        auto& data = event.at("data");
+        const auto text = recipient.text(sender.text(field(data, "text")));
+        data["text"] = text;
+        data["textHtml"] = markdown::toHtml(text, sensitive);
+    }
+    return {{"events", std::move(events)}, {"olderBefore", olderBefore}, {"hasNewer", hasNewer}};
+}
+
 Json conversation(Store& store, std::string_view bot, Id before, const Person* viewer) {
     auto events = Conversations(store).conversation(bot, before, conversationSize + 1, Conversations::ConversationEvents::all, viewer);
     const auto redactor = Policy{store}.secretRedactor(bot);

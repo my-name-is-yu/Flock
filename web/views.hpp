@@ -15,6 +15,8 @@ struct TaskView;
 namespace flockv0::web {
 std::string externalSessionLink(const Json& run);
 Json botList(Store&, const Json&);
+Json botDmParticipant(const Json&);
+Json botDm(Store&, std::string_view bot, std::string_view peer, Id before, Id anchor);
 Json botSettings(const Json&);
 void projectMemoryHistoryLinks(Json&);
 Json botView(Store&, const Json&, const std::vector<TaskView>* changedSessionTasks = nullptr, const Person* viewer = nullptr);

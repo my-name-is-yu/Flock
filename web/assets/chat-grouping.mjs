@@ -46,3 +46,12 @@ export function messagePlacement(previous, event, next) {
     afterQuestion: previous?.kind === 'waiting' && previous.data.id === event.data.waitId,
   };
 }
+
+export function botDmPlacement(previous, event, next) {
+  const joins = (first, second) => nearby(first, second) && first.data.fromBotId === second.data.fromBotId;
+  return {
+    groupStart: !joins(previous, event),
+    groupEnd: !joins(event, next),
+    timeBreak: timeBreak(previous, event),
+  };
+}
